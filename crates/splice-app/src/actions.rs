@@ -41,6 +41,7 @@ actions!(
         ToggleHide,
         RevealProject,
         ToggleMedia,
+        AskAgent,
         ResetLayout,
         Minimize,
         ZoomWindow,
@@ -76,6 +77,7 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("f1", CommandMenu, G),
         KeyBinding::new("cmd-q", Quit, G),
         KeyBinding::new("cmd-1", ToggleMedia, G),
+        KeyBinding::new("cmd-shift-a", AskAgent, G),
         KeyBinding::new("cmd-m", Minimize, G),
         KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, G),
         KeyBinding::new("cmd-h", HideApp, G),
@@ -111,6 +113,7 @@ pub fn menus() -> Vec<Menu> {
             name: "Splice".into(),
             items: vec![
                 MenuItem::action("Command Menu", CommandMenu),
+                MenuItem::action("Ask the Assistant…", AskAgent),
                 MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
@@ -198,6 +201,7 @@ pub fn menus() -> Vec<Menu> {
 /// Everything the command menu lists: label, keys, action.
 pub fn commands() -> Vec<(&'static str, &'static str, Box<dyn Action>)> {
     vec![
+        ("Ask the assistant", "⇧⌘A", Box::new(AskAgent)),
         ("Play / pause", "Space", Box::new(PlayPause)),
         ("Split at playhead", "S  ⌘B", Box::new(Split)),
         ("Delete selection", "⌫", Box::new(Delete)),

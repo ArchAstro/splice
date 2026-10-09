@@ -55,6 +55,8 @@ pub struct Document {
     /// Edited since the last explicit save (what the title shows).
     pub edited: bool,
     pub last_write: Option<Instant>,
+    /// Counts changes, so a reader can tell whether the project moved on.
+    pub revision: u64,
 }
 
 impl Document {
@@ -84,6 +86,7 @@ impl Document {
             dirty: false,
             edited: false,
             last_write: None,
+            revision: 0,
         }
     }
 
@@ -119,6 +122,7 @@ impl Document {
     }
 
     fn touch(&mut self) {
+        self.revision += 1;
         self.dirty = true;
         self.edited = true;
     }

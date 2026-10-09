@@ -210,6 +210,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::versions))
             .on_action(cx.listener(Self::cycle_aspect))
             .on_action(cx.listener(Self::open_palette))
+            .on_action(cx.listener(Self::ask_agent))
             .on_action(cx.listener(|this, _: &Export, _, cx| this.export(Quality::Standard, cx)))
             .on_action(cx.listener(|this, _: &ExportDraft, _, cx| this.export(Quality::Draft, cx)))
             .on_action(cx.listener(|this, _: &StepBack, _, cx| this.step(-this.doc.project.frame(), cx)))
@@ -244,7 +245,7 @@ impl Render for Editor {
             .on_action(|_: &ToggleFullScreen, window, _| window.toggle_fullscreen())
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 let place = this.ghost.take().map(|g| (g.start, g.track));
-                this.import_paths(paths.paths().to_vec(), place, cx);
+                this.import_paths(paths.paths().to_vec(), place, None, cx);
             }))
             .child(self.render_titlebar(cx))
             .child(
@@ -547,6 +548,7 @@ impl Editor {
                     .flex()
                     .items_center()
                     .gap_1()
+                    .child(self.render_presence(cx))
                     .child(
                         icon_button("versions", "history", true)
                             .tooltip(tip("Versions", Some("⇧⌘H")))
@@ -560,6 +562,58 @@ impl Editor {
                     .child(div().w(px(6.0)))
                     .child(export_button),
             )
+    }
+
+    /// The assistant in the title bar: who is listening, or working, and a
+    /// way to message them.
+    fn render_presence(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let open = cx.listener(|this, _, window, cx| this.ask_agent(&AskAgent, window, cx));
+        let Some(presence) = self.agent.presence() else {
+            return icon_button("ask", "message", true)
+                .tooltip(tip("Ask the assistant", Some("⇧⌘A")))
+                .on_click(open)
+                .into_any_element();
+        };
+        let (name, working) = match presence {
+            agent::Presence::Listening(name) => (name, false),
+            agent::Presence::Working(name) => (name, true),
+        };
+        div()
+            .id("presence")
+            .h(px(26.0))
+            .pl(px(9.0))
+            .pr(px(10.0))
+            .mr_1()
+            .rounded_full()
+            .border_1()
+            .border_color(Theme::edge())
+            .bg(Theme::panel())
+            .flex()
+            .items_center()
+            .gap(px(7.0))
+            .cursor_pointer()
+            .hover(|s| s.border_color(Theme::surface2()))
+            .tooltip(tip(
+                if working {
+                    "Working on your last message"
+                } else {
+                    "Listening — send a message"
+                },
+                Some("⇧⌘A"),
+            ))
+            .on_click(open)
+            .child(div().size(px(7.0)).rounded_full().map(|d| {
+                if working {
+                    d.border_1().border_color(Theme::subtext())
+                } else {
+                    d.bg(Theme::wave())
+                }
+            }))
+            .child(div().text_size(px(11.5)).text_color(Theme::text()).child(name))
+            .when(working, |d| {
+                d.child(div().text_size(px(11.0)).text_color(Theme::overlay()).child("working"))
+            })
+            .into_any_element()
     }
 
     fn render_bin(&mut self, width: f32, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1461,6 +1515,83 @@ impl Editor {
                     }))
                     .child(footer("↑↓ move  ·  ⏎ run  ·  esc close"))
             }
+            Overlay::Ask { text } => {
+                let presence = self.agent.presence();
+                let name = match &presence {
+                    Some(agent::Presence::Listening(n) | agent::Presence::Working(n)) => n.clone(),
+                    None => "the assistant".into(),
+                };
+                let state = match presence {
+                    Some(agent::Presence::Listening(_)) => "listening".to_string(),
+                    Some(agent::Presence::Working(_)) => "busy — this will wait its turn".to_string(),
+                    None => "not connected — an assistant connects with `splice ctl wait`".to_string(),
+                };
+                let fps = self.doc.project.settings.fps;
+                let n = self.selection.len();
+                let context = format!(
+                    "Sends the playhead ({}){}",
+                    timecode(self.player.position, fps),
+                    match n {
+                        0 => String::new(),
+                        1 => " and the selected clip".into(),
+                        n => format!(" and the {n} selected clips"),
+                    }
+                );
+                let lines: Vec<String> = text.split('\n').map(String::from).collect();
+                let last = lines.len() - 1;
+                let empty = text.is_empty();
+                panel()
+                    .child(
+                        div()
+                            .h(px(48.0))
+                            .px(px(16.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .border_b_1()
+                            .border_color(Theme::rule())
+                            .child(icon("message", Theme::overlay()))
+                            .child(div().text_size(px(14.0)).text_color(Theme::text()).child(format!("Ask {name}")))
+                            .child(div().text_size(px(11.5)).text_color(Theme::overlay()).child(state)),
+                    )
+                    .child(
+                        div()
+                            .min_h(px(84.0))
+                            .px(px(16.0))
+                            .py(px(14.0))
+                            .flex()
+                            .flex_col()
+                            .text_size(px(14.0))
+                            .line_height(px(20.0))
+                            .when(empty, |d| {
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .child(div().w(px(1.5)).h(px(17.0)).bg(Theme::accent()))
+                                        .child(
+                                            div()
+                                                .ml(px(2.0))
+                                                .text_color(Theme::overlay())
+                                                .child("Trim the pauses out of the interview, put the logo over the first five seconds…"),
+                                        ),
+                                )
+                            })
+                            .when(!empty, |d| {
+                                d.children(lines.into_iter().enumerate().map(|(i, line)| {
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .min_h(px(20.0))
+                                        .text_color(Theme::text())
+                                        .child(line)
+                                        .when(i == last, |d| d.child(div().w(px(1.5)).h(px(17.0)).bg(Theme::accent())))
+                                }))
+                            }),
+                    )
+                    .child(div().px(px(16.0)).pb(px(12.0)).text_size(px(11.0)).text_color(Theme::overlay()).child(context))
+                    .child(footer("⏎ send  ·  ⇧⏎ new line  ·  esc close"))
+            }
             Overlay::Versions { list, index } => {
                 let now = SystemTime::now();
                 let items: Vec<_> = list
@@ -1536,7 +1667,7 @@ impl Editor {
     }
 }
 
-fn ago(now: SystemTime, then: SystemTime) -> String {
+pub(super) fn ago(now: SystemTime, then: SystemTime) -> String {
     let s = now.duration_since(then).unwrap_or_default().as_secs();
     match s {
         0..=59 => "just now".into(),

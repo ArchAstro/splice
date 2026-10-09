@@ -3,6 +3,7 @@
 mod actions;
 mod audio;
 mod cli;
+mod ctl;
 mod editor;
 mod ffmpeg;
 mod icons;
@@ -18,6 +19,9 @@ use std::path::PathBuf;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "ctl") {
+        std::process::exit(ctl::cli(&args[1..]));
+    }
     if let Some(code) = cli::run(&args) {
         std::process::exit(code);
     }
@@ -60,6 +64,7 @@ fn main() {
             .ok();
         cx.on_app_quit(move |cx| {
             editor.update(cx, |editor, _| editor.flush());
+            ctl::stop_listening();
             async {}
         })
         .detach();

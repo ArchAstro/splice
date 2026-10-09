@@ -73,6 +73,9 @@ fn icon(name: &str) -> Option<&'static str> {
             r#"<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9.5 4.5v15"/><path d="M5.8 8h1.6M5.8 11h1.6" />"#
         }
         "sidebar-off" => r#"<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9.5 4.5v15"/>"#,
+        "message" => {
+            r#"<path d="M20.5 11.5a8 8 0 0 1-11.8 7L3.5 20l1.6-4.6A8 8 0 1 1 20.5 11.5z"/><path d="M8.5 11.5h.01M12 11.5h.01M15.5 11.5h.01" stroke-width="2.4"/>"#
+        }
         "layers" => {
             r#"<path d="m12 3.5 9 4.5-9 4.5-9-4.5z"/><path d="m3 12 9 4.5 9-4.5"/><path d="m3 16 9 4.5 9-4.5"/>"#
         }

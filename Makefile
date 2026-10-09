@@ -1,4 +1,4 @@
-.PHONY: all build build-release run test lint fmt check clean
+.PHONY: all build build-release run test lint fmt check clean install-skill
 
 all: build
 
@@ -26,3 +26,8 @@ check:
 
 clean:
 	cargo clean
+
+# Teach Claude Code to drive Splice (`splice ctl`)
+install-skill:
+	mkdir -p ~/.claude/skills/splice
+	cp skill/splice/SKILL.md ~/.claude/skills/splice/SKILL.md

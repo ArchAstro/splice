@@ -5286,6 +5286,7 @@ dependencies = [
  "anyhow",
  "cpal",
  "directories",
+ "futures",
  "gpui",
  "image",
  "serde",

@@ -28,6 +28,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+mod agent;
 mod render;
 
 const AUTOSAVE_EVERY: Duration = Duration::from_millis(1500);
@@ -92,6 +93,10 @@ enum Overlay {
         list: Vec<splice_core::store::Version>,
         index: usize,
     },
+    /// A message for the connected assistant.
+    Ask {
+        text: String,
+    },
 }
 
 #[derive(Default)]
@@ -136,6 +141,11 @@ pub struct Editor {
     resizing: Option<Resize>,
     /// The largest media width and timeline height the window allows.
     limits: (f32, f32),
+    /// The assistant connected through `splice ctl wait`, if any.
+    agent: agent::Agent,
+    /// `splice ctl export --wait` callers, answered when the export ends.
+    export_replies: Vec<std::sync::mpsc::Sender<String>>,
+    _ctl: Task<()>,
     _autosave: Task<()>,
 }
 
@@ -177,6 +187,22 @@ impl Editor {
             });
         }
 
+        // Answer `splice ctl` while this window is open.
+        let ctl = match crate::ctl::listen() {
+            Some(mut incoming) => cx.spawn_in(window, async move |this, cx| {
+                use futures::StreamExt;
+                while let Some(request) = incoming.next().await {
+                    if this
+                        .update_in(cx, |editor, window, cx| editor.ctl_incoming(request, window, cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }),
+            None => Task::ready(()),
+        };
+
         let mut editor = Editor {
             focus,
             palette_focus: cx.focus_handle(),
@@ -201,6 +227,9 @@ impl Editor {
             layout: Layout::load(),
             resizing: None,
             limits: (f32::MAX, f32::MAX),
+            agent: agent::Agent::default(),
+            export_replies: Vec::new(),
+            _ctl: ctl,
             _autosave: autosave,
         };
         editor.prepare_media(cx);
@@ -341,12 +370,21 @@ impl Editor {
 
     // Import.
 
-    fn import_paths(&mut self, paths: Vec<PathBuf>, place: Option<(Time, usize)>, cx: &mut Context<Self>) {
+    fn import_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        place: Option<(Time, usize)>,
+        reply: Option<std::sync::mpsc::Sender<String>>,
+        cx: &mut Context<Self>,
+    ) {
         let (projects, media): (Vec<PathBuf>, Vec<PathBuf>) = paths
             .into_iter()
             .partition(|p| p.extension().is_some_and(|e| e == EXTENSION));
         if let Some(project) = projects.into_iter().next() {
             self.open_path(project, cx);
+            if let Some(reply) = reply {
+                let _ = reply.send(serde_json::json!({ "ok": true, "opened": self.doc.path() }).to_string());
+            }
             return;
         }
         if media.is_empty() {
@@ -371,7 +409,7 @@ impl Editor {
                         .collect::<Vec<anyhow::Result<_>>>()
                 })
                 .await;
-            this.update(cx, |editor, cx| editor.add_imported(probed, place, cx))
+            this.update(cx, |editor, cx| editor.add_imported(probed, place, reply, cx))
                 .ok();
         })
         .detach();
@@ -382,6 +420,7 @@ impl Editor {
         &mut self,
         probed: Vec<anyhow::Result<(PathBuf, ffmpeg::Probe, String)>>,
         place: Option<(Time, usize)>,
+        reply: Option<std::sync::mpsc::Sender<String>>,
         cx: &mut Context<Self>,
     ) {
         self.working -= 1;
@@ -429,6 +468,21 @@ impl Editor {
             self.library.entry(&media.hash).path = Some(path.clone());
             self.embed(&media, path.clone(), cx);
             self.build_assets(media, path, cx);
+        }
+        if let Some(reply) = reply {
+            let media: Vec<_> = added
+                .iter()
+                .map(|(m, _)| serde_json::json!({ "id": m.id.0, "name": m.name }))
+                .collect();
+            let clips: Vec<_> = placed.iter().map(|c| c.0).collect();
+            let answer = serde_json::json!({
+                "ok": errors.is_empty(),
+                "media": media,
+                "clips": clips,
+                "errors": errors,
+                "revision": self.doc.revision,
+            });
+            let _ = reply.send(answer.to_string());
         }
         if !placed.is_empty() {
             self.selection = placed;
@@ -893,7 +947,8 @@ impl Editor {
         });
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = paths.await {
-                this.update(cx, |editor, cx| editor.import_paths(paths, None, cx)).ok();
+                this.update(cx, |editor, cx| editor.import_paths(paths, None, None, cx))
+                    .ok();
             }
         })
         .detach();
@@ -1013,14 +1068,26 @@ impl Editor {
                 if path.extension().is_none() {
                     path.set_extension("mp4");
                 }
-                this.update(cx, |editor, cx| editor.start_export(path, quality, cx))
-                    .ok();
+                this.update(cx, |editor, cx| {
+                    if let Err(e) = editor.start_export(path, quality, true, cx) {
+                        editor.say_error(e);
+                        cx.notify();
+                    }
+                })
+                .ok();
             }
         })
         .detach();
     }
 
-    fn start_export(&mut self, output: PathBuf, quality: Quality, cx: &mut Context<Self>) {
+    /// Starts encoding the movie to `output`; `reveal` shows it in Finder when done.
+    fn start_export(
+        &mut self,
+        output: PathBuf,
+        quality: Quality,
+        reveal: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         let library = &self.library;
         let plan = match export::plan(
             &self.doc.project,
@@ -1029,18 +1096,9 @@ impl Editor {
             quality,
         ) {
             Ok(plan) => plan,
-            Err(e) => {
-                self.say_error(format!("Cannot export: {e}"));
-                return cx.notify();
-            }
+            Err(e) => return Err(format!("Cannot export: {e}")),
         };
-        let mut command = match ffmpeg::export_command() {
-            Ok(c) => c,
-            Err(e) => {
-                self.say_error(e.to_string());
-                return cx.notify();
-            }
-        };
+        let mut command = ffmpeg::export_command().map_err(|e| e.to_string())?;
         let child = command
             .args(&plan.args)
             .stdout(Stdio::piped())
@@ -1048,10 +1106,7 @@ impl Editor {
             .spawn();
         let mut child = match child {
             Ok(child) => child,
-            Err(e) => {
-                self.say_error(format!("Could not start ffmpeg: {e}"));
-                return cx.notify();
-            }
+            Err(e) => return Err(format!("Could not start ffmpeg: {e}")),
         };
         let stdout = child.stdout.take().unwrap();
         let mut stderr = child.stderr.take().unwrap();
@@ -1093,10 +1148,19 @@ impl Editor {
                         cx.notify();
                         let Some(result) = done else { return true };
                         editor.export = None;
+                        let answer = match &result {
+                            Ok(()) => serde_json::json!({ "ok": true, "path": output }),
+                            Err(e) => serde_json::json!({ "ok": false, "error": e }),
+                        };
+                        for reply in editor.export_replies.drain(..) {
+                            let _ = reply.send(answer.to_string());
+                        }
                         match result {
                             Ok(()) => {
                                 editor.say(format!("Exported {}", file_name(&output)));
-                                cx.reveal_path(&output);
+                                if reveal {
+                                    cx.reveal_path(&output);
+                                }
                             }
                             Err(e) if e == "cancelled" => editor.say("Export cancelled"),
                             Err(e) => editor.say_error(format!("Export failed: {e}")),
@@ -1111,6 +1175,7 @@ impl Editor {
         })
         .detach();
         cx.notify();
+        Ok(())
     }
 
     fn cancel_export(&mut self, cx: &mut Context<Self>) {
@@ -1133,6 +1198,15 @@ impl Editor {
             query: String::new(),
             index: 0,
         };
+        window.focus(&self.palette_focus);
+        cx.notify();
+    }
+
+    fn ask_agent(&mut self, _: &AskAgent, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.overlay, Overlay::Ask { .. }) {
+            return self.close_overlay(window, cx);
+        }
+        self.overlay = Overlay::Ask { text: String::new() };
         window.focus(&self.palette_focus);
         cx.notify();
     }
@@ -1178,6 +1252,33 @@ impl Editor {
                     if let Some(c) = typed.filter(|c| !c.chars().any(char::is_control)) {
                         query.push_str(&c);
                         *index = 0;
+                    }
+                }
+                _ => {}
+            },
+            Overlay::Ask { text } => match key {
+                "escape" => return self.close_overlay(window, cx),
+                "backspace" if command => text.clear(),
+                "backspace" => {
+                    text.pop();
+                }
+                "enter" if event.keystroke.modifiers.shift => text.push('\n'),
+                "enter" => {
+                    let message = text.trim().to_string();
+                    if message.is_empty() {
+                        return;
+                    }
+                    self.close_overlay(window, cx);
+                    return self.send_to_agent(message, cx);
+                }
+                "v" if command => {
+                    if let Some(pasted) = cx.read_from_clipboard().and_then(|c| c.text()) {
+                        text.push_str(&pasted);
+                    }
+                }
+                _ if !command => {
+                    if let Some(c) = typed.filter(|c| !c.chars().any(char::is_control)) {
+                        text.push_str(&c);
                     }
                 }
                 _ => {}

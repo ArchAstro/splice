@@ -49,10 +49,54 @@ pub fn plan(
     output: &Path,
     quality: Quality,
 ) -> Result<Plan, String> {
-    let duration = project.duration();
-    if duration <= 0 {
+    if project.duration() <= 0 {
         return Err("the timeline is empty".into());
     }
+    build(project, resolve, output, Some(quality))
+}
+
+/// The picture at timeline time `t`, composited exactly as export would,
+/// written as a still image (the format follows `output`'s extension).
+pub fn plan_still(
+    project: &Project,
+    resolve: impl Fn(&Media) -> Option<PathBuf>,
+    t: Time,
+    output: &Path,
+) -> Result<Plan, String> {
+    if t < 0 || t >= project.duration().max(1) {
+        return Err(format!(
+            "{:.3}s is outside the movie (0 to {:.3}s)",
+            secs(t),
+            secs(project.duration())
+        ));
+    }
+    // A one-frame movie of whatever is under `t`.
+    let frame = project.frame();
+    let mut moment = project.clone();
+    for track in &mut moment.tracks {
+        track.muted = true;
+        track.clips.retain(|c| c.contains(t));
+        for clip in &mut track.clips {
+            let timed = project.media(clip.media).is_some_and(Media::is_timed);
+            if timed {
+                clip.source_in += t - clip.start;
+            }
+            clip.start = 0;
+            clip.duration = frame;
+        }
+    }
+    let mut plan = build(&moment, resolve, output, None)?;
+    plan.duration = frame;
+    Ok(plan)
+}
+
+fn build(
+    project: &Project,
+    resolve: impl Fn(&Media) -> Option<PathBuf>,
+    output: &Path,
+    quality: Option<Quality>,
+) -> Result<Plan, String> {
+    let duration = project.duration().max(project.frame());
     let s = project.settings;
     let (w, h, fps) = (s.width, s.height, s.fps);
     let d = fmt(duration);
@@ -128,13 +172,20 @@ pub fn plan(
     }
 
     filters.push(format!("[{picture}]format=yuv420p[vout]"));
-    filters.push(format!(
-        "[1:a]{}amix=inputs={}:normalize=0:duration=first[aout]",
-        sounds.join(""),
-        sounds.len() + 1
-    ));
+    if quality.is_some() {
+        filters.push(format!(
+            "[1:a]{}amix=inputs={}:normalize=0:duration=first[aout]",
+            sounds.join(""),
+            sounds.len() + 1
+        ));
+    }
 
     args.extend(strings(&["-filter_complex", &filters.join(";")]));
+    let Some(quality) = quality else {
+        args.extend(strings(&["-map", "[vout]", "-frames:v", "1", "-update", "1"]));
+        args.push(output.to_string_lossy().to_string());
+        return Ok(Plan { args, duration });
+    };
     args.extend(strings(&[
         "-map",
         "[vout]",
@@ -227,6 +278,39 @@ mod tests {
         assert!(graph.contains("amix=inputs=2"));
         assert!(plan.args.contains(&"/m/b".to_string()));
         assert_eq!(plan.duration, 6 * SECOND, "the image runs 1s to 6s");
+    }
+
+    #[test]
+    fn still_shows_what_is_under_the_time() {
+        let mut p = Project::default();
+        let video = p.add_media(Media {
+            id: MediaId(0),
+            name: "v".into(),
+            hash: "a".into(),
+            ext: "mp4".into(),
+            kind: MediaKind::Video,
+            duration: 4 * SECOND,
+            width: 1920,
+            height: 1080,
+            has_audio: true,
+            source: PathBuf::new(),
+        });
+        p.append_clip(video);
+        p.append_clip(video);
+        let plan = plan_still(
+            &p,
+            |m| Some(PathBuf::from(format!("/m/{}", m.hash))),
+            5 * SECOND,
+            Path::new("/o.png"),
+        )
+        .unwrap();
+        let graph = &plan.args[plan.args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
+        assert_eq!(graph.matches("overlay=").count(), 1, "only the second clip is under 5s");
+        assert!(!graph.contains("amix"), "a still has no sound");
+        let seek = plan.args.iter().position(|a| a == "-ss").unwrap();
+        assert_eq!(plan.args[seek + 1], "1.000000", "5s is 1s into the second clip");
+        assert!(plan.args.ends_with(&["/o.png".to_string()]));
+        assert!(plan_still(&p, |_| None, 9 * SECOND, Path::new("/o.png")).is_err());
     }
 
     #[test]
