@@ -1,0 +1,21 @@
+[package]
+name = "splice-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Windowed shell for splice: gpui views, decoding, playback, sound"
+
+[[bin]]
+name = "splice"
+path = "src/main.rs"
+
+[dependencies]
+splice-core = { path = "../splice-core" }
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+image = { version = "0.25", default-features = false }
+cpal = "0.16"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+directories = "6"
