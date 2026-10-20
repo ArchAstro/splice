@@ -107,8 +107,12 @@ fn export_project(path: &Path, out: &Path, quality: Quality) -> anyhow::Result<(
     let store = Store::open(path)?;
     let project = store.latest()?.unwrap_or_default();
     let paths = resolve_all(&store, &project)?;
-    let plan = export::plan(&project, |m: &Media| paths.get(&m.hash).cloned(), out, quality)
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let resolver = crate::titles::Resolver {
+        media: |m: &Media| paths.get(&m.hash).cloned(),
+        dir: crate::titles::drawn_dir(),
+        canvas: (project.settings.width, project.settings.height),
+    };
+    let plan = export::plan(&project, &resolver, out, quality).map_err(|e| anyhow::anyhow!(e))?;
     let mut child = ffmpeg::export_command()?
         .args(&plan.args)
         .stdout(Stdio::piped())

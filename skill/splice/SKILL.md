@@ -64,7 +64,38 @@ splice ctl undo
   `revision`. If something failed, read again and retry once; if it fails
   twice, tell the user what happened.
 
-## 4. Playback, the window, versions, export
+## 4. Titles, colours, and how pictures look
+
+```sh
+splice ctl fonts --query avenir                     # font families installed here
+splice ctl text --text "Day one" --at 2 --duration 3 --font "Avenir Next" --size 96 --enter pop --exit fade
+splice ctl text --text "Ada Lovelace" --y 0.32 --size 54 --box "#000000b3" --no-shadow   # a caption
+splice ctl style --clip 12 --text "Day two" --color gold --italic
+splice ctl color --color black --at 0 --duration 2                 # a title card or background
+splice ctl color --color "#00000080" --at 10 --duration 4          # a tint over what is under it
+splice ctl look --clip 7 --scale 0.4 --x 0.28 --y -0.25            # picture in picture, top right
+splice ctl look --clip 7 --mask ellipse --feather 0.15             # a soft round crop
+splice ctl look --clip 9 --key green --similarity 0.18             # green screen (blue, #rrggbb too)
+splice ctl look --clip 3 --drift zoom-in --enter fade --enter-for 1
+```
+
+- A title's `--size` is the letter height in canvas pixels. Text uses real
+  system fonts; `fonts` lists them, and a font not listed is refused.
+- `--x`/`--y` move a picture's centre by fractions of the canvas (0 is
+  centred, +0.5 is the right/bottom edge); `--scale` 1 is its natural size
+  (media fitted to the canvas, a title as set).
+- Animations: `--enter`/`--exit` take none, fade, slide-up, slide-down,
+  slide-left, slide-right, zoom or pop (all but none also fade);
+  `--enter-for` is seconds. `--drift zoom-in|zoom-out` zooms slowly across
+  the whole clip.
+- Keys and masks are for video and pictures; masks work on titles and
+  colours too. Mask numbers are fractions of the clip's own frame.
+- Text and colour clips are on the timeline like any other clip: move,
+  trim, split and delete them the same way. `read` shows their `text` and
+  `look`.
+- Always check with `frame` afterwards: it is drawn exactly as export draws.
+
+## 5. Playback, the window, versions, export
 
 ```sh
 splice ctl seek 4.2
@@ -79,7 +110,7 @@ splice ctl export ~/Movies/cut.mp4 --wait          # --draft (fast), --high
 
 Export without `--wait` returns at once; `status` shows its `progress`.
 
-## 5. Taking requests from inside Splice
+## 6. Taking requests from inside Splice
 
 The user can message you from the editor (Cmd-Shift-A, or the speech-bubble
 button in the title bar). To receive those, wait:

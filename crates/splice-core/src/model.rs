@@ -5,13 +5,14 @@
 //! never overlap: a clip dropped where there is no room rises to the first
 //! track above with space, which is how overlays come about.
 
+use crate::look::{Look, MotionKind};
 use crate::time::{SECOND, Time, frame};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Version of the project JSON. Bump it and add a step to `migrate` when the
 /// shape changes.
-pub const SCHEMA: u32 = 1;
+pub const SCHEMA: u32 = 2;
 
 /// How long a still image runs when it is first placed.
 pub const IMAGE_DURATION: Time = 5 * SECOND;
@@ -77,6 +78,105 @@ pub struct Clip {
     pub duration: Time,
     #[serde(default = "one")]
     pub volume: f32,
+    /// Position, size, opacity, key, mask and motion on the canvas.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub look: Look,
+    /// Made by Splice (a title, a colour) rather than cut from media; `media`
+    /// is then unused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generator: Option<Generator>,
+}
+
+fn is_default(look: &Look) -> bool {
+    *look == Look::default()
+}
+
+/// Content Splice draws itself.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase", tag = "kind")]
+pub enum Generator {
+    Text(Title),
+    /// A flat colour filling the canvas: a background, a title card.
+    Color {
+        color: u32,
+    },
+}
+
+impl Generator {
+    pub fn name(&self) -> String {
+        match self {
+            Generator::Text(title) => {
+                let line = title.text.lines().find(|l| !l.trim().is_empty()).unwrap_or("Text");
+                line.trim().to_string()
+            }
+            Generator::Color { color } => match color & 0xff {
+                0xff => format!("#{:06x}", color >> 8),
+                alpha => format!("#{:06x} at {}%", color >> 8, (alpha * 100 + 127) / 255),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Align {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
+/// Text on the canvas, in a system font.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Title {
+    pub text: String,
+    /// A font family installed on the system.
+    pub font: String,
+    /// Letter size as a fraction of the canvas height.
+    pub size: f32,
+    pub bold: bool,
+    pub italic: bool,
+    /// 0xRRGGBBAA.
+    pub color: u32,
+    pub align: Align,
+    /// A box behind the text, 0xRRGGBBAA.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background: Option<u32>,
+    /// A soft shadow under the letters.
+    pub shadow: bool,
+}
+
+impl Default for Title {
+    fn default() -> Title {
+        Title {
+            text: "Title".into(),
+            font: "Helvetica Neue".into(),
+            size: 0.08,
+            bold: true,
+            italic: false,
+            color: 0xffffffff,
+            align: Align::Center,
+            background: None,
+            shadow: true,
+        }
+    }
+}
+
+/// What a clip shows: cut from media, or drawn by Splice.
+#[derive(Clone, Copy, Debug)]
+pub enum Source<'a> {
+    Media(&'a Media),
+    Generated(&'a Generator),
+}
+
+impl Source<'_> {
+    pub fn is_visual(&self) -> bool {
+        match self {
+            Source::Media(m) => m.is_visual(),
+            Source::Generated(_) => true,
+        }
+    }
 }
 
 fn one() -> f32 {
@@ -246,6 +346,23 @@ impl Project {
         self.media.iter().find(|m| m.id == id)
     }
 
+    /// What a clip shows.
+    pub fn source<'a>(&'a self, clip: &'a Clip) -> Option<Source<'a>> {
+        match &clip.generator {
+            Some(generator) => Some(Source::Generated(generator)),
+            None => self.media(clip.media).map(Source::Media),
+        }
+    }
+
+    /// The clip's name as the timeline shows it.
+    pub fn clip_name(&self, clip: &Clip) -> String {
+        match self.source(clip) {
+            Some(Source::Media(m)) => m.name.clone(),
+            Some(Source::Generated(g)) => g.name(),
+            None => "missing".into(),
+        }
+    }
+
     pub fn slot(&self, id: ClipId) -> Option<Slot> {
         self.tracks.iter().enumerate().find_map(|(track, t)| {
             t.clips
@@ -259,7 +376,7 @@ impl Project {
         self.slot(id).map(|s| &self.tracks[s.track].clips[s.index])
     }
 
-    fn clip_mut(&mut self, id: ClipId) -> Option<&mut Clip> {
+    pub fn clip_mut(&mut self, id: ClipId) -> Option<&mut Clip> {
         self.slot(id).map(|s| &mut self.tracks[s.track].clips[s.index])
     }
 
@@ -346,9 +463,42 @@ impl Project {
             source_in: 0,
             duration,
             volume: 1.0,
+            look: Look::default(),
+            generator: None,
         };
         self.place(clip, track);
         Some(id)
+    }
+
+    /// Places a title or colour. It goes on `track` or the first free one above.
+    pub fn insert_generated(&mut self, generator: Generator, track: usize, start: Time, duration: Time) -> ClipId {
+        let id = ClipId(self.alloc());
+        let clip = Clip {
+            id,
+            media: MediaId(0),
+            start: start.max(0),
+            source_in: 0,
+            duration: duration.max(self.frame()),
+            volume: 1.0,
+            look: Look::default(),
+            generator: Some(generator),
+        };
+        self.place(clip, track);
+        id
+    }
+
+    /// Changes a clip's look.
+    pub fn set_look(&mut self, id: ClipId, f: impl FnOnce(&mut Look)) {
+        if let Some(clip) = self.clip_mut(id) {
+            f(&mut clip.look);
+        }
+    }
+
+    /// Changes a title or colour clip's content.
+    pub fn set_generator(&mut self, id: ClipId, f: impl FnOnce(&mut Generator)) {
+        if let Some(generator) = self.clip_mut(id).and_then(|c| c.generator.as_mut()) {
+            f(generator);
+        }
     }
 
     /// Places media at the end of the bottom track.
@@ -440,14 +590,19 @@ impl Project {
         let new_id = ClipId(self.alloc());
         let clip = &mut self.tracks[slot.track].clips[slot.index];
         let left = t - clip.start;
-        let right = Clip {
+        let mut right = Clip {
             id: new_id,
             media: clip.media,
             start: t,
             source_in: if timed { clip.source_in + left } else { 0 },
             duration: clip.duration - left,
             volume: clip.volume,
+            look: clip.look.clone(),
+            generator: clip.generator.clone(),
         };
+        // The animation in stays with the left half, the one out with the right.
+        right.look.enter.kind = MotionKind::None;
+        clip.look.exit.kind = MotionKind::None;
         clip.duration = left;
         self.tracks[slot.track].clips.insert(slot.index + 1, right);
         Some(new_id)
@@ -533,13 +688,13 @@ impl Project {
     }
 
     /// Visible picture layers at `t`, bottom first.
-    pub fn visual_stack(&self, t: Time) -> Vec<(&Clip, &Media)> {
+    pub fn visual_stack(&self, t: Time) -> Vec<(&Clip, Source<'_>)> {
         self.tracks
             .iter()
             .filter(|track| !track.hidden)
             .flat_map(|track| track.clips.iter())
             .filter(|c| c.contains(t))
-            .filter_map(|c| self.media(c.media).filter(|m| m.is_visual()).map(|m| (c, m)))
+            .filter_map(|c| self.source(c).filter(Source::is_visual).map(|s| (c, s)))
             .collect()
     }
 
@@ -549,7 +704,7 @@ impl Project {
             .iter()
             .filter(|track| !track.muted)
             .flat_map(|track| track.clips.iter())
-            .filter(|c| c.volume > 0.0)
+            .filter(|c| c.volume > 0.0 && c.generator.is_none())
             .filter_map(|c| self.media(c.media).filter(|m| m.has_audio).map(|m| (c, m)))
             .collect()
     }
@@ -569,7 +724,8 @@ fn migrate(value: &mut serde_json::Value) -> anyhow::Result<()> {
     if schema > SCHEMA {
         anyhow::bail!("this project was saved by a newer Splice (schema {schema}); this build reads up to {SCHEMA}");
     }
-    // Future steps: `if schema < 2 { ... }`.
+    // Schema 2 added `look` and `generator` to clips; both default, so
+    // older projects need nothing. Future steps: `if schema < 3 { ... }`.
     value["schema"] = SCHEMA.into();
     Ok(())
 }
@@ -723,7 +879,7 @@ mod tests {
         p.append_clip(m);
         let back = Project::from_json(&p.to_json()).unwrap();
         assert_eq!(back, p);
-        let newer = p.to_json().replace("\"schema\":1", "\"schema\":99");
+        let newer = p.to_json().replace(&format!("\"schema\":{SCHEMA}"), "\"schema\":99");
         assert!(Project::from_json(&newer).is_err());
     }
 

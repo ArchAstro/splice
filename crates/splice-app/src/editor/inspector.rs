@@ -1,0 +1,1271 @@
+//! The inspector: everything about the selected clip. Text and its style for
+//! titles; position, size and opacity; animation in and out; green screen;
+//! a mask; and volume. Sliders and chips edit live, one undo step each.
+
+use super::render::{caps, icon, tip};
+use super::stage::Grab;
+use super::*;
+use gpui::{Hsla, Stateful};
+use splice_core::look::{Drift, Key, Mask, MotionKind, Shape};
+use splice_core::model::{Align, Clip, Source, Title};
+
+pub const INSPECTOR_WIDTH: f32 = 292.0;
+
+/// A number the inspector edits with a slider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Field {
+    X,
+    Y,
+    Scale,
+    Opacity,
+    Volume,
+    TextSize,
+    KeySimilarity,
+    KeyBlend,
+    MaskX,
+    MaskY,
+    MaskWidth,
+    MaskHeight,
+    MaskFeather,
+    EnterDuration,
+    ExitDuration,
+}
+
+impl Field {
+    fn range(self) -> (f32, f32) {
+        match self {
+            Field::X | Field::Y => (-0.75, 0.75),
+            Field::Scale => (0.05, 3.0),
+            Field::Opacity => (0.0, 1.0),
+            Field::Volume => (0.0, 2.0),
+            Field::TextSize => (0.02, 0.3),
+            Field::KeySimilarity => (0.01, 0.6),
+            Field::KeyBlend => (0.0, 0.5),
+            Field::MaskX | Field::MaskY => (0.0, 1.0),
+            Field::MaskWidth | Field::MaskHeight => (0.05, 1.5),
+            Field::MaskFeather => (0.001, 1.0),
+            Field::EnterDuration | Field::ExitDuration => (0.1, 3.0),
+        }
+    }
+
+    /// What a double-click puts back.
+    fn default(self) -> f32 {
+        match self {
+            Field::X | Field::Y => 0.0,
+            Field::Scale | Field::Opacity | Field::Volume => 1.0,
+            Field::TextSize => Title::default().size,
+            Field::KeySimilarity => Key::default().similarity,
+            Field::KeyBlend => Key::default().blend,
+            Field::MaskX | Field::MaskY => 0.5,
+            Field::MaskWidth | Field::MaskHeight => 0.8,
+            Field::MaskFeather => Mask::default().feather,
+            Field::EnterDuration | Field::ExitDuration => 0.5,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Field::X => "Across",
+            Field::Y => "Down",
+            Field::Scale => "Size",
+            Field::Opacity => "Opacity",
+            Field::Volume => "Volume",
+            Field::TextSize => "Size",
+            Field::KeySimilarity => "Strength",
+            Field::KeyBlend => "Softness",
+            Field::MaskX => "Across",
+            Field::MaskY => "Down",
+            Field::MaskWidth => "Width",
+            Field::MaskHeight => "Height",
+            Field::MaskFeather => "Feather",
+            Field::EnterDuration | Field::ExitDuration => "Length",
+        }
+    }
+
+    /// The value as shown; `canvas_height` turns text size into pixels.
+    fn format(self, v: f32, canvas_height: u32) -> String {
+        match self {
+            Field::Scale => format!("{:.0}%", v * 100.0),
+            Field::Volume => {
+                if v <= 0.0 {
+                    "off".into()
+                } else {
+                    format!("{:+.1} dB", 20.0 * v.log10())
+                }
+            }
+            Field::TextSize => format!("{:.0} px", v * canvas_height as f32),
+            Field::EnterDuration | Field::ExitDuration => format!("{v:.1}s"),
+            Field::X | Field::Y => format!("{:+.0}%", v * 100.0),
+            // Mask places count from the middle of the picture, like X and Y.
+            Field::MaskX | Field::MaskY => format!("{:+.0}%", (v - 0.5) * 100.0),
+            _ => format!("{:.0}%", v * 100.0),
+        }
+    }
+
+    fn get(self, clip: &Clip) -> f32 {
+        let look = &clip.look;
+        let key = look.key.unwrap_or_default();
+        let mask = look.mask.unwrap_or_default();
+        let title = match &clip.generator {
+            Some(Generator::Text(t)) => t.size,
+            _ => Title::default().size,
+        };
+        match self {
+            Field::X => look.x,
+            Field::Y => look.y,
+            Field::Scale => look.scale,
+            Field::Opacity => look.opacity,
+            Field::Volume => clip.volume,
+            Field::TextSize => title,
+            Field::KeySimilarity => key.similarity,
+            Field::KeyBlend => key.blend,
+            Field::MaskX => mask.x,
+            Field::MaskY => mask.y,
+            Field::MaskWidth => mask.width,
+            Field::MaskHeight => mask.height,
+            Field::MaskFeather => mask.feather,
+            Field::EnterDuration => secs(look.enter.duration) as f32,
+            Field::ExitDuration => secs(look.exit.duration) as f32,
+        }
+    }
+
+    fn set(self, clip: &mut Clip, v: f32) {
+        let look = &mut clip.look;
+        match self {
+            Field::X => look.x = v,
+            Field::Y => look.y = v,
+            Field::Scale => look.scale = v,
+            Field::Opacity => look.opacity = v,
+            Field::Volume => clip.volume = v,
+            Field::TextSize => {
+                if let Some(Generator::Text(t)) = &mut clip.generator {
+                    t.size = v;
+                }
+            }
+            Field::KeySimilarity => {
+                if let Some(k) = &mut look.key {
+                    k.similarity = v;
+                }
+            }
+            Field::KeyBlend => {
+                if let Some(k) = &mut look.key {
+                    k.blend = v;
+                }
+            }
+            Field::MaskX | Field::MaskY | Field::MaskWidth | Field::MaskHeight | Field::MaskFeather => {
+                if let Some(m) = &mut look.mask {
+                    match self {
+                        Field::MaskX => m.x = v,
+                        Field::MaskY => m.y = v,
+                        Field::MaskWidth => m.width = v,
+                        Field::MaskHeight => m.height = v,
+                        _ => m.feather = v,
+                    }
+                }
+            }
+            Field::EnterDuration => look.enter.duration = splice_core::time::from_secs(v as f64),
+            Field::ExitDuration => look.exit.duration = splice_core::time::from_secs(v as f64),
+        }
+    }
+}
+
+/// A title's words being typed, and the project before the typing began.
+pub struct TitleEdit {
+    pub clip: ClipId,
+    pub before: Project,
+    /// Byte offset of the caret.
+    pub cursor: usize,
+    /// Everything is selected: the next keystroke replaces it.
+    pub all: bool,
+}
+
+/// Swatches offered for text, boxes and colours: 0xRRGGBBAA.
+pub const SWATCHES: &[u32] = &[
+    0xffffffff, 0xf3eee4ff, 0x12151fff, 0x000000ff, 0xef6a55ff, 0xf2c14eff, 0x86cfc0ff, 0x6c9ef8ff, 0xc792eaff,
+];
+const BOXES: &[u32] = &[0x000000b3, 0x12151fe6, 0xffffffe6, 0xef6a55ff, 0xf2c14eff];
+
+/// A length in plain words: `4s`, `2.5s`, `1:05`.
+fn seconds(t: Time) -> String {
+    let s = splice_core::time::secs(t);
+    if s >= 60.0 {
+        format!("{}:{:02}", (s / 60.0) as u64, (s % 60.0).round() as u64)
+    } else if (s - s.round()).abs() < 0.05 {
+        format!("{}s", s.round())
+    } else {
+        format!("{s:.1}s")
+    }
+}
+
+fn hsla(color: u32) -> Hsla {
+    gpui::rgba(color).into()
+}
+
+impl Editor {
+    pub(super) fn inspected(&self) -> Option<ClipId> {
+        self.selection
+            .first()
+            .copied()
+            .filter(|id| self.doc.project.slot(*id).is_some())
+    }
+
+    /// Applies a change to one clip as its own undo step.
+    fn change(&mut self, id: ClipId, cx: &mut Context<Self>, f: impl FnOnce(&mut Clip)) {
+        self.edit(cx, |p| {
+            if let Some(clip) = p.clip_mut(id) {
+                f(clip);
+            }
+        });
+    }
+
+    fn change_title(&mut self, id: ClipId, cx: &mut Context<Self>, f: impl FnOnce(&mut Title)) {
+        self.change(id, cx, |clip| {
+            if let Some(Generator::Text(title)) = &mut clip.generator {
+                f(title);
+            }
+        });
+    }
+
+    // Sliders.
+
+    fn slider(&self, id: ClipId, clip: &Clip, field: Field, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let (lo, hi) = field.range();
+        let value = field.get(clip);
+        let frac = ((value - lo) / (hi - lo)).clamp(0.0, 1.0);
+        let bounds = self.slider_bounds.clone();
+        let held = matches!(&self.grab, Some(Grab::Slider { field: f, .. }) if *f == field);
+        let canvas_height = self.doc.project.settings.height;
+        let group: SharedString = format!("slider-{field:?}").into();
+        div()
+            .h(px(26.0))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .child(
+                div()
+                    .w(px(64.0))
+                    .flex_none()
+                    .text_size(px(11.5))
+                    .text_color(Theme::subtext())
+                    .child(field.label()),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("track-{field:?}")))
+                    .group(group.clone())
+                    .flex_1()
+                    .h(px(20.0))
+                    .relative()
+                    .cursor_pointer()
+                    .child(
+                        canvas(
+                            move |b, _, _| {
+                                bounds.borrow_mut().insert(field, b);
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .top(px(9.0))
+                            .h(px(2.0))
+                            .rounded_full()
+                            .bg(Theme::surface1()),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .top(px(9.0))
+                            .h(px(2.0))
+                            .w(relative(frac))
+                            .rounded_full()
+                            .bg(Theme::subtext()),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(4.0))
+                            .left(relative(frac))
+                            .ml(px(-6.0))
+                            .size(px(12.0))
+                            .rounded_full()
+                            .bg(Theme::text())
+                            .border_2()
+                            .border_color(if held { Theme::accent() } else { Theme::panel() })
+                            .shadow(render::shadow(0.45, 4.0, 1.0))
+                            .group_hover(group, |s| s.border_color(Theme::accent())),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            if event.click_count >= 2 {
+                                this.change(id, cx, |clip| field.set(clip, field.default()));
+                                return;
+                            }
+                            this.grab = Some(Grab::Slider {
+                                field,
+                                before: this.doc.project.clone(),
+                            });
+                            this.slide(field, event.position, cx);
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(48.0))
+                    .flex_none()
+                    .flex()
+                    .justify_end()
+                    .font_family(MONO_FONT)
+                    .text_size(px(10.5))
+                    .text_color(Theme::muted())
+                    .child(field.format(value, canvas_height)),
+            )
+    }
+
+    /// Sets a slider's value from the pointer.
+    pub(super) fn slide(&mut self, field: Field, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(bounds) = self.slider_bounds.borrow().get(&field).copied() else {
+            return;
+        };
+        let Some(id) = self.inspected() else { return };
+        let (lo, hi) = field.range();
+        let frac = (f32::from(at.x - bounds.left()) / f32::from(bounds.size.width).max(1.0)).clamp(0.0, 1.0);
+        let mut v = lo + frac * (hi - lo);
+        // Rest at the natural value when near it.
+        if (v - field.default()).abs() < (hi - lo) * 0.015 {
+            v = field.default();
+        }
+        if let Some(clip) = self.doc.project.clip_mut(id) {
+            field.set(clip, v);
+        }
+        cx.notify();
+    }
+
+    // Small controls.
+
+    fn chip(
+        &self,
+        id: impl Into<SharedString>,
+        label: &str,
+        on: bool,
+        cx: &mut Context<Self>,
+        f: impl Fn(&mut Editor, &mut Context<Editor>) + 'static,
+    ) -> Stateful<gpui::Div> {
+        div()
+            .id(gpui::ElementId::Name(id.into()))
+            .h(px(24.0))
+            .px(px(9.0))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(11.5))
+            .cursor_pointer()
+            .border_1()
+            .map(|d| {
+                if on {
+                    d.bg(Theme::surface1())
+                        .border_color(Theme::surface2())
+                        .text_color(Theme::text())
+                } else {
+                    d.border_color(Theme::edge())
+                        .text_color(Theme::subtext())
+                        .hover(|s| s.bg(Theme::lane()).text_color(Theme::text()))
+                }
+            })
+            .child(label.to_string())
+            .on_click(cx.listener(move |this, _, _, cx| f(this, cx)))
+    }
+
+    fn swatch(
+        &self,
+        id: impl Into<SharedString>,
+        color: Option<u32>,
+        on: bool,
+        cx: &mut Context<Self>,
+        f: impl Fn(&mut Editor, &mut Context<Editor>) + 'static,
+    ) -> Stateful<gpui::Div> {
+        div()
+            .id(gpui::ElementId::Name(id.into()))
+            .size(px(24.0))
+            .rounded_full()
+            .p(px(2.0))
+            .border_1()
+            .border_color(if on { Theme::accent() } else { gpui::rgba(0x00000000) })
+            .cursor_pointer()
+            .child(
+                div()
+                    .size_full()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(gpui::rgba(0xffffff2e))
+                    .map(|d| match color {
+                        Some(c) => d.bg(hsla(c)),
+                        // "None": a crossed-out circle.
+                        None => d
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(div().w(px(14.0)).h(px(1.5)).bg(Theme::muted()).rounded_full()),
+                    }),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| f(this, cx)))
+    }
+
+    fn toggle(
+        &self,
+        id: &'static str,
+        label: &str,
+        on: bool,
+        cx: &mut Context<Self>,
+        f: impl Fn(&mut Editor, &mut Context<Editor>) + 'static,
+    ) -> Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .h(px(26.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .cursor_pointer()
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(Theme::subtext())
+                    .child(label.to_string()),
+            )
+            .child(
+                div()
+                    .w(px(28.0))
+                    .h(px(16.0))
+                    .rounded_full()
+                    .p(px(2.0))
+                    .flex()
+                    .when(on, |d| d.justify_end())
+                    .bg(if on { Theme::accent() } else { Theme::surface1() })
+                    .child(div().size(px(12.0)).rounded_full().bg(Theme::text())),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| f(this, cx)))
+    }
+
+    // The panel.
+
+    pub(super) fn render_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let body: AnyElement = match self.inspected().and_then(|id| self.doc.project.clip(id).cloned()) {
+            Some(clip) => self.inspect_clip(clip, window, cx).into_any_element(),
+            None => self.inspect_canvas(cx).into_any_element(),
+        };
+        render::panel()
+            .id("inspector")
+            .w(px(INSPECTOR_WIDTH))
+            .flex_none()
+            .h_full()
+            .flex()
+            .flex_col()
+            .child(body)
+    }
+
+    fn header(&self, glyph: &str, title: String, detail: String) -> impl IntoElement + use<> {
+        div()
+            .h(px(52.0))
+            .flex_none()
+            .px(px(16.0))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .border_b_1()
+            .border_color(Theme::edge())
+            .child(
+                div()
+                    .size(px(28.0))
+                    .rounded(px(7.0))
+                    .bg(Theme::lane())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon(glyph, Theme::subtext()).size(px(14.0))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(Theme::text())
+                            .truncate()
+                            .child(title),
+                    )
+                    .child(div().text_size(px(10.5)).text_color(Theme::overlay()).child(detail)),
+            )
+    }
+
+    fn section(&self, title: &str) -> gpui::Div {
+        div()
+            .px(px(16.0))
+            .pt(px(14.0))
+            .pb(px(12.0))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .border_b_1()
+            .border_color(Theme::edge())
+            .child(div().pb(px(2.0)).child(caps(title)))
+    }
+
+    fn inspect_canvas(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let s = self.doc.project.settings;
+        let chips: Vec<AnyElement> = ASPECTS
+            .iter()
+            .map(|(name, w, h)| {
+                let on = (s.width, s.height) == (*w, *h);
+                let (w, h) = (*w, *h);
+                self.chip(format!("aspect-{name}"), name, on, cx, move |this, cx| {
+                    this.edit(cx, |p| {
+                        p.settings.width = w;
+                        p.settings.height = h;
+                    });
+                })
+                .into_any_element()
+            })
+            .collect();
+        div()
+            .flex()
+            .flex_col()
+            .child(self.header(
+                "film",
+                "Canvas".into(),
+                format!("{}×{} · {} fps", s.width, s.height, s.fps),
+            ))
+            .child(
+                self.section("Shape")
+                    .child(div().flex().flex_wrap().gap(px(6.0)).children(chips)),
+            )
+            .child(
+                div()
+                    .px(px(16.0))
+                    .py(px(18.0))
+                    .text_size(px(11.5))
+                    .line_height(px(17.0))
+                    .text_color(Theme::overlay())
+                    .child("Select a clip to place it, animate it, key out a green screen or mask it."),
+            )
+    }
+
+    fn inspect_clip(&mut self, clip: Clip, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let id = clip.id;
+        let project = &self.doc.project;
+        let (glyph, kind, visual, audio, media_clip) = match project.source(&clip) {
+            Some(Source::Media(m)) => match m.kind {
+                MediaKind::Video => ("film", "Video", true, m.has_audio, true),
+                MediaKind::Image => ("image", "Picture", true, false, true),
+                MediaKind::Audio => ("music", "Sound", false, true, true),
+            },
+            Some(Source::Generated(Generator::Text(_))) => ("text", "Text", true, false, false),
+            Some(Source::Generated(Generator::Color { .. })) => ("swatch", "Colour", true, false, false),
+            None => ("film", "Missing", false, false, false),
+        };
+        let name = project.clip_name(&clip);
+        let detail = format!(
+            "{kind} · {} long · starts at {}",
+            seconds(clip.duration),
+            seconds(clip.start)
+        );
+
+        let mut sections: Vec<AnyElement> = Vec::new();
+        match &clip.generator {
+            Some(Generator::Text(title)) => sections.push(
+                self.text_section(id, &clip, title.clone(), window, cx)
+                    .into_any_element(),
+            ),
+            Some(Generator::Color { color }) => {
+                let current = *color;
+                let swatches: Vec<AnyElement> = SWATCHES
+                    .iter()
+                    .map(|&c| {
+                        self.swatch(format!("fill-{c:08x}"), Some(c), c == current, cx, move |this, cx| {
+                            this.change(id, cx, |clip| clip.generator = Some(Generator::Color { color: c }));
+                        })
+                        .into_any_element()
+                    })
+                    .collect();
+                sections.push(
+                    self.section("Colour")
+                        .child(div().flex().flex_wrap().gap(px(4.0)).children(swatches))
+                        .into_any_element(),
+                );
+            }
+            None => {}
+        }
+        if visual {
+            sections.push(self.place_section(id, &clip, cx).into_any_element());
+            sections.push(self.motion_section(id, &clip, cx).into_any_element());
+            if media_clip {
+                sections.push(self.key_section(id, &clip, cx).into_any_element());
+            }
+            sections.push(self.mask_section(id, &clip, cx).into_any_element());
+        }
+        if audio {
+            sections.push(
+                self.section("Sound")
+                    .child(self.slider(id, &clip, Field::Volume, cx))
+                    .into_any_element(),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(self.header(glyph, name, detail))
+            .child(
+                div()
+                    .id("inspector-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children(sections),
+            )
+    }
+
+    fn text_section(
+        &mut self,
+        id: ClipId,
+        clip: &Clip,
+        title: Title,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let editing = self
+            .title_edit
+            .as_ref()
+            .filter(|e| e.clip == id && self.text_focus.is_focused(window));
+        let (cursor, all) = editing.map_or((title.text.len(), false), |e| (e.cursor.min(title.text.len()), e.all));
+        let focused = editing.is_some();
+
+        // The words, with a caret where typing goes.
+        let mut lines: Vec<AnyElement> = Vec::new();
+        let mut offset = 0;
+        for line in title.text.split('\n') {
+            let end = offset + line.len();
+            let row = div().min_h(px(18.0)).flex().items_center().flex_wrap();
+            let row = if focused && !all && cursor >= offset && cursor <= end {
+                let (a, b) = line.split_at(cursor - offset);
+                row.child(a.to_string())
+                    .child(div().w(px(1.5)).h(px(16.0)).bg(Theme::accent()))
+                    .child(b.to_string())
+            } else {
+                row.child(line.to_string())
+            };
+            lines.push(row.into_any_element());
+            offset = end + 1;
+        }
+
+        let text_box = div()
+            .id("title-text")
+            .key_context("TextField")
+            .track_focus(&self.text_focus)
+            .on_key_down(cx.listener(Self::title_key))
+            .on_action(cx.listener(|this, _: &TextSelectAll, _, cx| {
+                if let Some(edit) = &mut this.title_edit {
+                    edit.all = true;
+                }
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &TextPaste, _, cx| {
+                if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
+                    this.type_text(&text, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &TextDone, window, cx| {
+                this.end_title_edit(cx);
+                window.focus(&this.focus);
+            }))
+            .min_h(px(64.0))
+            .px(px(10.0))
+            .py(px(8.0))
+            .rounded(px(8.0))
+            .bg(Theme::crust())
+            .border_1()
+            .border_color(if focused { Theme::surface2() } else { Theme::edge() })
+            .text_size(px(13.0))
+            .line_height(px(18.0))
+            .text_color(Theme::text())
+            .cursor_text()
+            .when(all && focused, |d| d.bg(Theme::accent_soft()))
+            .children(lines)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.begin_title_edit(id, window, cx);
+                    cx.notify();
+                }),
+            );
+
+        let font = title.font.clone();
+        let aligns: Vec<AnyElement> = [
+            (Align::Left, "align-left", "Align left"),
+            (Align::Center, "align-center", "Centre"),
+            (Align::Right, "align-right", "Align right"),
+        ]
+        .into_iter()
+        .map(|(a, glyph, name)| {
+            let on = title.align == a;
+            self.chip(format!("align-{glyph}"), "", on, cx, move |this, cx| {
+                this.change_title(id, cx, |t| t.align = a);
+            })
+            .w(px(30.0))
+            .px_0()
+            .tooltip(tip(name, None))
+            .child(icon(glyph, if on { Theme::text() } else { Theme::subtext() }).size(px(14.0)))
+            .into_any_element()
+        })
+        .collect();
+        let bold = self
+            .chip("bold", "", title.bold, cx, move |this, cx| {
+                this.change_title(id, cx, |t| t.bold = !t.bold);
+            })
+            .w(px(30.0))
+            .px_0()
+            .tooltip(tip("Bold", None))
+            .child(div().font_weight(gpui::FontWeight::BOLD).text_size(px(13.0)).child("B"));
+        let italic = self
+            .chip("italic", "", title.italic, cx, move |this, cx| {
+                this.change_title(id, cx, |t| t.italic = !t.italic);
+            })
+            .w(px(30.0))
+            .px_0()
+            .tooltip(tip("Italic", None))
+            .child(
+                div()
+                    .italic()
+                    .font_family("Iowan Old Style")
+                    .text_size(px(14.0))
+                    .child("I"),
+            );
+        let colors: Vec<AnyElement> = SWATCHES
+            .iter()
+            .map(|&c| {
+                self.swatch(
+                    format!("text-{c:08x}"),
+                    Some(c),
+                    title.color == c,
+                    cx,
+                    move |this, cx| {
+                        this.change_title(id, cx, |t| t.color = c);
+                    },
+                )
+                .into_any_element()
+            })
+            .collect();
+        let mut boxes: Vec<AnyElement> = vec![
+            self.swatch("box-none", None, title.background.is_none(), cx, move |this, cx| {
+                this.change_title(id, cx, |t| t.background = None);
+            })
+            .into_any_element(),
+        ];
+        boxes.extend(BOXES.iter().map(|&c| {
+            self.swatch(
+                format!("box-{c:08x}"),
+                Some(c),
+                title.background == Some(c),
+                cx,
+                move |this, cx| {
+                    this.change_title(id, cx, |t| t.background = Some(c));
+                },
+            )
+            .into_any_element()
+        }));
+
+        self.section("Text")
+            .child(text_box)
+            .child(
+                div()
+                    .id("font")
+                    .mt(px(4.0))
+                    .h(px(32.0))
+                    .px(px(10.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(Theme::edge())
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(Theme::lane()))
+                    .tooltip(tip("Choose a font", None))
+                    .child(
+                        div()
+                            .font_family(SharedString::from(font.clone()))
+                            .text_size(px(14.0))
+                            .child(font),
+                    )
+                    .child(div().text_size(px(10.0)).text_color(Theme::overlay()).child("change"))
+                    .on_click(cx.listener(move |this, _, window, cx| this.open_fonts(id, window, cx))),
+            )
+            .child(self.slider(id, clip, Field::TextSize, cx))
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .child(div().flex().gap(px(4.0)).child(bold).child(italic))
+                    .child(div().flex().gap(px(4.0)).children(aligns)),
+            )
+            .child(
+                div()
+                    .pt(px(4.0))
+                    .text_size(px(11.0))
+                    .text_color(Theme::overlay())
+                    .child("Colour"),
+            )
+            .child(div().flex().flex_wrap().gap(px(2.0)).children(colors))
+            .child(
+                div()
+                    .pt(px(4.0))
+                    .text_size(px(11.0))
+                    .text_color(Theme::overlay())
+                    .child("Box"),
+            )
+            .child(div().flex().flex_wrap().gap(px(2.0)).children(boxes))
+            .child(self.toggle("shadow", "Shadow", title.shadow, cx, move |this, cx| {
+                this.change_title(id, cx, |t| t.shadow = !t.shadow);
+            }))
+    }
+
+    fn place_section(&mut self, id: ClipId, clip: &Clip, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        // Nine places to put a picture, like a phone's camera grid.
+        let spot = |x: f32, y: f32, cx: &mut Context<Self>| -> AnyElement {
+            {
+                let on = (clip.look.x - x).abs() < 0.01 && (clip.look.y - y).abs() < 0.01;
+                div()
+                    .id(SharedString::from(format!("spot-{x}-{y}")))
+                    .size(px(18.0))
+                    .rounded(px(4.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(Theme::surface0()))
+                    .child(
+                        div()
+                            .size(px(6.0))
+                            .rounded_full()
+                            .bg(if on { Theme::accent() } else { Theme::surface2() }),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.change(id, cx, |c| {
+                            c.look.x = x;
+                            c.look.y = y;
+                        });
+                    }))
+                    .into_any_element()
+            }
+        };
+        let rows: Vec<AnyElement> = [-0.32f32, 0.0, 0.32]
+            .into_iter()
+            .map(|y| {
+                let cells: Vec<AnyElement> = [-0.32f32, 0.0, 0.32].into_iter().map(|x| spot(x, y, cx)).collect();
+                div().flex().gap(px(2.0)).children(cells).into_any_element()
+            })
+            .collect();
+        self.section("Place")
+            .child(
+                div()
+                    .flex()
+                    .gap(px(14.0))
+                    .items_center()
+                    .child(
+                        div()
+                            .p(px(4.0))
+                            .rounded(px(8.0))
+                            .border_1()
+                            .border_color(Theme::edge())
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .children(rows),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.0))
+                            .line_height(px(16.0))
+                            .text_color(Theme::overlay())
+                            .child("Drag it on the stage, or its corners to resize."),
+                    ),
+            )
+            .child(self.slider(id, clip, Field::Scale, cx))
+            .child(self.slider(id, clip, Field::Opacity, cx))
+            .child(self.slider(id, clip, Field::X, cx))
+            .child(self.slider(id, clip, Field::Y, cx))
+    }
+
+    fn motion_section(&mut self, id: ClipId, clip: &Clip, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let look = clip.look.clone();
+        let names = |k: MotionKind| match k {
+            MotionKind::None => "None",
+            MotionKind::Fade => "Fade",
+            MotionKind::SlideUp => "Up",
+            MotionKind::SlideDown => "Down",
+            MotionKind::SlideLeft => "Left",
+            MotionKind::SlideRight => "Right",
+            MotionKind::Zoom => "Zoom",
+            MotionKind::Pop => "Pop",
+        };
+        let row = |this: &mut Self, enter: bool, cx: &mut Context<Self>| -> Vec<AnyElement> {
+            MotionKind::ALL
+                .into_iter()
+                .map(|k| {
+                    let current = if enter { look.enter.kind } else { look.exit.kind };
+                    let side = if enter { "in" } else { "out" };
+                    this.chip(
+                        format!("motion-{side}-{}", k.name()),
+                        names(k),
+                        current == k,
+                        cx,
+                        move |this, cx| {
+                            this.change(id, cx, |c| {
+                                if enter {
+                                    c.look.enter.kind = k;
+                                } else {
+                                    c.look.exit.kind = k;
+                                }
+                            });
+                        },
+                    )
+                    .into_any_element()
+                })
+                .collect()
+        };
+        // Rows of four, the same width, so the choices line up.
+        let grid = |chips: Vec<AnyElement>| {
+            let mut chips = chips.into_iter();
+            let mut rows = Vec::new();
+            loop {
+                let row: Vec<AnyElement> = chips
+                    .by_ref()
+                    .take(4)
+                    .map(|c| div().flex_1().flex().flex_col().child(c).into_any_element())
+                    .collect();
+                if row.is_empty() {
+                    break;
+                }
+                rows.push(div().flex().gap(px(5.0)).children(row).into_any_element());
+            }
+            div().flex().flex_col().gap(px(5.0)).children(rows)
+        };
+        let enter = grid(row(self, true, cx));
+        let exit = grid(row(self, false, cx));
+        let drifts: Vec<AnyElement> = [
+            (Drift::None, "None"),
+            (Drift::ZoomIn, "Zoom in"),
+            (Drift::ZoomOut, "Zoom out"),
+        ]
+        .into_iter()
+        .map(|(d, label)| {
+            self.chip(format!("drift-{label}"), label, look.drift == d, cx, move |this, cx| {
+                this.change(id, cx, |c| c.look.drift = d);
+            })
+            .into_any_element()
+        })
+        .collect();
+        let label = |text: &str| {
+            div()
+                .pt(px(2.0))
+                .text_size(px(11.0))
+                .text_color(Theme::overlay())
+                .child(text.to_string())
+        };
+        self.section("Animate")
+            .child(label("In"))
+            .child(enter)
+            .when(look.enter.kind != MotionKind::None, |d| {
+                d.child(self.slider(id, clip, Field::EnterDuration, cx))
+            })
+            .child(label("Out"))
+            .child(exit)
+            .when(look.exit.kind != MotionKind::None, |d| {
+                d.child(self.slider(id, clip, Field::ExitDuration, cx))
+            })
+            .child(label("Across the clip"))
+            .child(grid(drifts))
+    }
+
+    fn key_section(&mut self, id: ClipId, clip: &Clip, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let key = clip.look.key;
+        let on = key.is_some();
+        let colors: Vec<AnyElement> = [(0x00ff00u32, "green"), (0x0047bbu32, "blue")]
+            .into_iter()
+            .map(|(c, name)| {
+                let current = key.map(|k| k.color) == Some(c);
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(self.swatch(
+                        format!("key-{name}"),
+                        Some(c << 8 | 0xff),
+                        current,
+                        cx,
+                        move |this, cx| {
+                            this.change(id, cx, |clip| {
+                                let mut k = clip.look.key.unwrap_or_default();
+                                k.color = c;
+                                clip.look.key = Some(k);
+                            });
+                        },
+                    ))
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(Theme::subtext())
+                            .child(match name {
+                                "green" => "Green screen",
+                                _ => "Blue screen",
+                            }),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        self.section("Green screen")
+            .child(
+                self.toggle("key-on", "Remove the background colour", on, cx, move |this, cx| {
+                    this.change(id, cx, |c| {
+                        c.look.key = if c.look.key.is_some() {
+                            None
+                        } else {
+                            Some(Key::default())
+                        };
+                    });
+                }),
+            )
+            .when(on, |d| {
+                d.child(div().flex().gap(px(14.0)).children(colors))
+                    .child(self.slider(id, clip, Field::KeySimilarity, cx))
+                    .child(self.slider(id, clip, Field::KeyBlend, cx))
+                    .child(self.toggle(
+                        "despill",
+                        "Clean up colour fringes",
+                        key.is_some_and(|k| k.despill),
+                        cx,
+                        move |this, cx| {
+                            this.change(id, cx, |c| {
+                                if let Some(k) = &mut c.look.key {
+                                    k.despill = !k.despill;
+                                }
+                            });
+                        },
+                    ))
+            })
+    }
+
+    fn mask_section(&mut self, id: ClipId, clip: &Clip, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let mask = clip.look.mask;
+        let shapes: Vec<AnyElement> = [
+            (None, "None"),
+            (Some(Shape::Ellipse), "Circle"),
+            (Some(Shape::Rect), "Box"),
+        ]
+        .into_iter()
+        .map(|(shape, label)| {
+            let on = mask.map(|m| m.shape) == shape;
+            self.chip(format!("mask-{label}"), label, on, cx, move |this, cx| {
+                this.change(id, cx, |c| {
+                    c.look.mask = shape.map(|shape| Mask {
+                        shape,
+                        ..c.look.mask.unwrap_or_default()
+                    });
+                });
+            })
+            .into_any_element()
+        })
+        .collect();
+        self.section("Mask")
+            .child(
+                div()
+                    .flex()
+                    .gap(px(5.0))
+                    .children(shapes.into_iter().map(|c| div().flex_1().flex().flex_col().child(c))),
+            )
+            .when(mask.is_some(), |d| {
+                d.child(self.slider(id, clip, Field::MaskWidth, cx))
+                    .child(self.slider(id, clip, Field::MaskHeight, cx))
+                    .child(self.slider(id, clip, Field::MaskX, cx))
+                    .child(self.slider(id, clip, Field::MaskY, cx))
+                    .child(self.slider(id, clip, Field::MaskFeather, cx))
+                    .child(self.toggle(
+                        "mask-invert",
+                        "Show the outside instead",
+                        mask.is_some_and(|m| m.invert),
+                        cx,
+                        move |this, cx| {
+                            this.change(id, cx, |c| {
+                                if let Some(m) = &mut c.look.mask {
+                                    m.invert = !m.invert;
+                                }
+                            });
+                        },
+                    ))
+            })
+    }
+
+    // Typing a title.
+
+    pub(super) fn begin_title_edit(&mut self, id: ClipId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.title_edit.as_ref().is_some_and(|e| e.clip == id) {
+            window.focus(&self.text_focus);
+            return;
+        }
+        self.end_title_edit(cx);
+        let len = match self.doc.project.clip(id).and_then(|c| c.generator.as_ref()) {
+            Some(Generator::Text(t)) => t.text.len(),
+            _ => return,
+        };
+        self.selection = vec![id];
+        self.layout.inspector_open = true;
+        self.title_edit = Some(TitleEdit {
+            clip: id,
+            before: self.doc.project.clone(),
+            cursor: len,
+            all: true,
+        });
+        window.focus(&self.text_focus);
+    }
+
+    /// Finishes typing: the words become one undo step.
+    pub(super) fn end_title_edit(&mut self, cx: &mut Context<Self>) {
+        if let Some(edit) = self.title_edit.take() {
+            self.doc.commit(edit.before);
+            self.after_edit();
+            cx.notify();
+        }
+    }
+
+    fn with_title_text(&mut self, f: impl FnOnce(&mut String, &mut TitleEdit)) {
+        let Some(edit) = &mut self.title_edit else { return };
+        if let Some(Generator::Text(title)) = self.doc.project.clip_mut(edit.clip).and_then(|c| c.generator.as_mut()) {
+            f(&mut title.text, edit);
+        }
+    }
+
+    fn type_text(&mut self, typed: &str, cx: &mut Context<Self>) {
+        self.with_title_text(|text, edit| {
+            if edit.all {
+                text.clear();
+                edit.cursor = 0;
+                edit.all = false;
+            }
+            let at = edit.cursor.min(text.len());
+            text.insert_str(at, typed);
+            edit.cursor = at + typed.len();
+        });
+        cx.notify();
+    }
+
+    fn title_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let k = &event.keystroke;
+        let (cmd, alt) = (k.modifiers.platform, k.modifiers.alt);
+        let prev = |text: &str, at: usize| text[..at].char_indices().next_back().map_or(0, |(i, _)| i);
+        let next = |text: &str, at: usize| text[at..].chars().next().map_or(at, |c| at + c.len_utf8());
+        // Where a word starts, going left.
+        let word_left = |text: &str, at: usize| {
+            let trimmed = text[..at].trim_end();
+            trimmed.rfind(char::is_whitespace).map_or(0, |i| i + 1)
+        };
+        match k.key.as_str() {
+            "escape" => {
+                self.end_title_edit(cx);
+                window.focus(&self.focus);
+            }
+            "enter" => self.type_text("\n", cx),
+            "backspace" => self.with_title_text(|text, edit| {
+                if edit.all {
+                    text.clear();
+                    edit.cursor = 0;
+                    edit.all = false;
+                    return;
+                }
+                let at = edit.cursor.min(text.len());
+                let from = if cmd {
+                    text[..at].rfind('\n').map_or(0, |i| i + 1)
+                } else if alt {
+                    word_left(text, at)
+                } else {
+                    prev(text, at)
+                };
+                text.replace_range(from..at, "");
+                edit.cursor = from;
+            }),
+            "delete" => self.with_title_text(|text, edit| {
+                let at = edit.cursor.min(text.len());
+                let to = next(text, at);
+                text.replace_range(at..to, "");
+                edit.all = false;
+            }),
+            "left" | "right" | "home" | "end" | "up" | "down" => self.with_title_text(|text, edit| {
+                let at = edit.cursor.min(text.len());
+                edit.cursor = match k.key.as_str() {
+                    "left" if edit.all => 0,
+                    "right" if edit.all => text.len(),
+                    "left" if cmd => text[..at].rfind('\n').map_or(0, |i| i + 1),
+                    "right" if cmd => text[at..].find('\n').map_or(text.len(), |i| at + i),
+                    "left" if alt => word_left(text, at),
+                    "left" => prev(text, at),
+                    "right" => next(text, at),
+                    "home" | "up" => 0,
+                    _ => text.len(),
+                };
+                edit.all = false;
+            }),
+            _ if cmd || k.modifiers.control => return,
+            _ => match k.key_char.clone().filter(|c| !c.chars().any(char::is_control)) {
+                Some(c) => self.type_text(&c, cx),
+                None => return,
+            },
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    // Fonts.
+
+    fn open_fonts(&mut self, clip: ClipId, window: &mut Window, cx: &mut Context<Self>) {
+        let current = match self.doc.project.clip(clip).and_then(|c| c.generator.as_ref()) {
+            Some(Generator::Text(t)) => t.font.clone(),
+            _ => return,
+        };
+        let list = titles::families();
+        let index = list.iter().position(|f| *f == current).unwrap_or(0);
+        self.overlay = Overlay::Fonts {
+            clip,
+            query: String::new(),
+            index,
+            list,
+        };
+        window.focus(&self.palette_focus);
+        cx.notify();
+    }
+
+    pub(super) fn font_matches(list: &[String], query: &str) -> Vec<String> {
+        let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        list.iter()
+            .filter(|name| words.iter().all(|w| name.to_lowercase().contains(w)))
+            .cloned()
+            .collect()
+    }
+
+    pub(super) fn choose_font(&mut self, clip: ClipId, font: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_overlay(window, cx);
+        self.change_title(clip, cx, |t| t.font = font);
+    }
+}

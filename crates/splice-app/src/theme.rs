@@ -62,6 +62,10 @@ impl Theme {
     pub fn clip() -> Rgba {
         rgb(0x363c52)
     }
+    /// Title clips.
+    pub fn clip_text() -> Rgba {
+        rgb(0x6b4f2a)
+    }
     pub fn clip_audio() -> Rgba {
         rgb(0x1f3a36)
     }

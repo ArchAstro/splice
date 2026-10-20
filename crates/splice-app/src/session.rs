@@ -243,6 +243,7 @@ pub struct Layout {
     pub bin_width: f32,
     pub bin_open: bool,
     pub timeline_height: f32,
+    pub inspector_open: bool,
 }
 
 impl Default for Layout {
@@ -251,6 +252,7 @@ impl Default for Layout {
             bin_width: 248.0,
             bin_open: true,
             timeline_height: 300.0,
+            inspector_open: true,
         }
     }
 }

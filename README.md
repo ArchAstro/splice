@@ -34,6 +34,30 @@ cargo run --release -p splice-app -- path/to/film.splice
 - **Export**: ⌘E (H.264 + AAC MP4), or ⇧⌘E for a fast draft.
 - **Everything else**: ⌘/ opens the command menu, with every command and its key.
 
+## Titles and looks
+
+- **Text** (⌘T, or the Text shelf): titles in any installed font, with size,
+  bold, italic, alignment, colour, a box behind and a soft shadow. Type in the
+  inspector, or double-click a title on the stage.
+- **Colour** shelf: full-frame colours for backgrounds and title cards, and a
+  half-black tint.
+- **Inspector** (⌘2), for the selected clip:
+  - **Place:** drag a picture on the stage, or its corners to resize. It snaps
+    to the centre lines. There's a nine-point grid, plus size, opacity and
+    position sliders.
+  - **Animate:** in and out with fade, slide (four ways), zoom or pop, with a
+    length you choose. A slow zoom can run across the whole clip.
+  - **Green screen:** key out green or blue, with strength, softness and fringe
+    clean-up.
+  - **Mask:** circle or box, with size, position, feather and invert.
+  - **Sound:** volume.
+
+The viewer and export share one renderer, so what you see is what you get.
+Titles are drawn once in Rust (cosmic-text) and that same picture is overlaid
+on export. Keys and masks are ffmpeg filters that the viewer's decoder runs
+too. Animation is one expression, evaluated for the viewer and printed into
+ffmpeg for export.
+
 ## Projects
 
 A project is one `.splice` file: a SQLite database holding the imported
@@ -68,6 +92,8 @@ with `make install-skill`) teaches Claude Code to use it.
 | `splice ctl import FILES [--at T]` | brings media in, optionally onto the timeline |
 | `splice ctl add / move / trim / split / delete / duplicate / volume` | timeline edits, each one undo step |
 | `splice ctl track`, `canvas`, `undo`, `redo` | layers, canvas shape, history |
+| `splice ctl text`, `color`, `style`, `fonts` | titles in system fonts, colour cards and tints |
+| `splice ctl look` | position, size, opacity, animation, green screen, mask |
 | `splice ctl seek`, `play`, `pause`, `select`, `command` | the playhead, selection and any menu command |
 | `splice ctl save`, `versions`, `export FILE [--wait]` | versions and export |
 | `splice ctl wait --name Claude` | connects an assistant and waits for your message |

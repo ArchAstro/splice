@@ -42,6 +42,14 @@ actions!(
         RevealProject,
         ToggleMedia,
         AskAgent,
+        ToggleInspector,
+        AddText,
+        ShowMedia,
+        ShowTextStyles,
+        ShowColours,
+        TextSelectAll,
+        TextPaste,
+        TextDone,
         ResetLayout,
         Minimize,
         ZoomWindow,
@@ -54,7 +62,9 @@ actions!(
 
 pub fn bind(cx: &mut App) {
     const G: Option<&str> = Some("Splice");
-    const W: Option<&str> = Some("Workspace");
+    // Bare keys stay out of text fields, which take typing.
+    const W: Option<&str> = Some("Workspace && !TextField");
+    const T: Option<&str> = Some("TextField");
     cx.bind_keys([
         KeyBinding::new("cmd-n", NewProject, G),
         KeyBinding::new("cmd-o", Open, G),
@@ -78,6 +88,12 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("cmd-q", Quit, G),
         KeyBinding::new("cmd-1", ToggleMedia, G),
         KeyBinding::new("cmd-shift-a", AskAgent, G),
+        KeyBinding::new("cmd-2", ToggleInspector, G),
+        KeyBinding::new("cmd-t", AddText, G),
+        KeyBinding::new("t", AddText, W),
+        KeyBinding::new("cmd-a", TextSelectAll, T),
+        KeyBinding::new("cmd-v", TextPaste, T),
+        KeyBinding::new("cmd-enter", TextDone, T),
         KeyBinding::new("cmd-m", Minimize, G),
         KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, G),
         KeyBinding::new("cmd-h", HideApp, G),
@@ -130,6 +146,7 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::action("Open…", Open),
                 MenuItem::separator(),
                 MenuItem::action("Import Media…", Import),
+                MenuItem::action("Add Text", AddText),
                 MenuItem::separator(),
                 MenuItem::action("Save Version", Save),
                 MenuItem::action("Save As…", SaveAs),
@@ -167,6 +184,7 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::action("Zoom to Fit", ZoomFit),
                 MenuItem::separator(),
                 MenuItem::action("Show / Hide Media", ToggleMedia),
+                MenuItem::action("Show / Hide Inspector", ToggleInspector),
                 MenuItem::action("Reset Layout", ResetLayout),
                 MenuItem::separator(),
                 MenuItem::action("Enter / Exit Full Screen", ToggleFullScreen),
@@ -233,6 +251,11 @@ pub fn commands() -> Vec<(&'static str, &'static str, Box<dyn Action>)> {
         ("Hide the selection's track", "H", Box::new(ToggleHide)),
         ("Change canvas shape (16:9, 9:16, 1:1, 4:5)", "", Box::new(CycleAspect)),
         ("Show / hide media", "⌘1", Box::new(ToggleMedia)),
+        ("Show / hide inspector", "⌘2", Box::new(ToggleInspector)),
+        ("Add text at the playhead", "T  ⌘T", Box::new(AddText)),
+        ("Show media", "", Box::new(ShowMedia)),
+        ("Show text styles", "", Box::new(ShowTextStyles)),
+        ("Show colours", "", Box::new(ShowColours)),
         ("Reset layout", "", Box::new(ResetLayout)),
         ("Minimize window", "⌘M", Box::new(Minimize)),
         ("Zoom window", "", Box::new(ZoomWindow)),

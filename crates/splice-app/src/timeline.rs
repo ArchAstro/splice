@@ -10,7 +10,7 @@ use gpui::{
     App, Bounds, Corners, Font, Hsla, Pixels, Point, RenderImage, Rgba, SharedString, TextRun, Window, bounds, font,
     point, px, quad, size, transparent_black,
 };
-use splice_core::model::{ClipId, MediaId, MediaKind, Project};
+use splice_core::model::{ClipId, Generator, MediaId, MediaKind, Project};
 use splice_core::time::{SECOND, Time, from_secs, ruler_label, secs};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -282,13 +282,30 @@ pub fn paint(b: Bounds<Pixels>, frame: Frame, window: &mut Window, cx: &mut App)
                 if x1 < GUTTER || x0 > w {
                     continue;
                 }
-                let art = frame.art.get(&clip.media).cloned().unwrap_or_default();
                 let selected = frame.selection.contains(&clip.id);
                 let cb = area(x0, y, (x1 - x0).max(1.0), ROW);
-                let fill = if art.kind == Some(MediaKind::Audio) {
-                    Theme::clip_audio()
-                } else {
-                    Theme::clip()
+                // Titles in a warm amber; colours as themselves.
+                let (art, fill) = match &clip.generator {
+                    Some(generator) => {
+                        let art = ClipArt {
+                            name: generator.name().into(),
+                            ..ClipArt::default()
+                        };
+                        let fill = match generator {
+                            Generator::Text(_) => Theme::clip_text(),
+                            Generator::Color { color } => gpui::rgba(*color),
+                        };
+                        (art, fill)
+                    }
+                    None => {
+                        let art = frame.art.get(&clip.media).cloned().unwrap_or_default();
+                        let fill = if art.kind == Some(MediaKind::Audio) {
+                            Theme::clip_audio()
+                        } else {
+                            Theme::clip()
+                        };
+                        (art, fill)
+                    }
                 };
                 rect(window, cb, fill, 5.0);
                 window.with_content_mask(Some(gpui::ContentMask { bounds: cb }), |window| {

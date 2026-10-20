@@ -36,6 +36,26 @@ Editing (each is one undo step; clips and media are named by id, media also by n
   canvas [--aspect 16:9|9:16|1:1|4:5] [--size WxH] [--fps N]
   undo | redo
 
+Titles, colours and looks
+  text --text WORDS [--at T] [--duration D] [--track N] [style] [look]
+                                 put a title on the canvas (default: at the playhead, over what is there)
+  color --color C [--at T] [--duration D] [--track N] [look]
+                                 a full-frame colour: a background, a title card, a tint (#00000080)
+  style --clip C [--text WORDS] [style]    change a title's words or style, or a colour clip's --color
+  look --clip C [look]                     place, size, fade, animate, key or mask any picture
+  fonts [--query WORDS]                    the font families installed here
+
+  style:  --font NAME  --size PX  --color C  --box C|none  --align left|center|right
+          --bold/--no-bold  --italic/--no-italic  --shadow/--no-shadow
+  look:   --x F --y F (centre offset, fractions of the canvas)  --scale F (1 = natural)  --opacity F
+          --enter KIND [--enter-for S]  --exit KIND [--exit-for S]
+              KIND: none, fade, slide-up, slide-down, slide-left, slide-right, zoom, pop
+          --drift none|zoom-in|zoom-out (a slow zoom across the clip)
+          --key green|blue|#rrggbb|none [--similarity F] [--blend F] [--despill/--no-despill]
+          --mask ellipse|rect|none [--mask-x F --mask-y F --mask-width F --mask-height F]
+                [--feather F] [--invert/--no-invert]   (mask numbers are fractions of the clip's frame)
+  C is #rrggbb, #rrggbbaa or a name: white, black, paper, ink, vermilion, gold, green, blue, clear.
+
 Playing and the window
   seek T | play | pause
   select [--clip C]                        select clips (none: deselect)
@@ -192,7 +212,28 @@ fn build(args: &[String]) -> Result<Value, String> {
     while let Some(arg) = rest.next() {
         let mut next = |name: &str| rest.next().ok_or(format!("{name} needs a value"));
         match arg.as_str() {
-            "--at" | "--to" | "--start" | "--end" => {
+            "--font" | "--color" | "--box" | "--align" | "--enter" | "--exit" | "--drift" | "--key" | "--mask"
+            | "--query" => {
+                request.insert(arg[2..].into(), json!(value(next(arg)?)?));
+            }
+            "--size" | "--x" | "--y" | "--scale" | "--opacity" | "--similarity" | "--blend" | "--feather"
+            | "--mask-x" | "--mask-y" | "--mask-width" | "--mask-height" | "--enter-for" | "--exit-for" => {
+                let raw = next(arg)?;
+                let v = match raw.parse::<f64>() {
+                    Ok(v) => json!(v),
+                    // `canvas --size 1080x1920` is a size, not a number.
+                    Err(_) if arg == "--size" => json!(raw),
+                    Err(_) => return Err(format!("{arg} expects a number")),
+                };
+                request.insert(arg[2..].replace('-', "_"), v);
+            }
+            "--bold" | "--italic" | "--shadow" | "--invert" | "--despill" => {
+                request.insert(arg[2..].into(), json!(true));
+            }
+            "--no-bold" | "--no-italic" | "--no-shadow" | "--no-invert" | "--no-despill" => {
+                request.insert(arg[5..].into(), json!(false));
+            }
+            "--at" | "--to" | "--start" | "--end" | "--duration" => {
                 let raw = next(arg)?;
                 request.insert(arg[2..].into(), time_value(arg, raw)?);
             }
@@ -213,7 +254,7 @@ fn build(args: &[String]) -> Result<Value, String> {
                 let m = next(arg)?;
                 request.insert("media".into(), m.parse::<u64>().map_or(json!(m), |id| json!(id)));
             }
-            "--text" | "--label" | "--name" | "--aspect" | "--size" => {
+            "--text" | "--label" | "--name" | "--aspect" => {
                 request.insert(arg[2..].into(), json!(value(next(arg)?)?));
             }
             "--ripple" | "--wait" => {
@@ -237,9 +278,8 @@ fn build(args: &[String]) -> Result<Value, String> {
     }
     let cmd = match command.as_str() {
         "status" | "read" | "versions" | "add" | "move" | "trim" | "split" | "delete" | "duplicate" | "volume"
-        | "track" | "canvas" | "undo" | "redo" | "play" | "pause" | "select" | "save" | "say" | "wait" => {
-            command.as_str()
-        }
+        | "track" | "canvas" | "undo" | "redo" | "play" | "pause" | "select" | "save" | "say" | "wait" | "text"
+        | "color" | "style" | "look" | "fonts" => command.as_str(),
         "restore" => {
             if let Some(id) = words.first().and_then(|w| w.parse::<u64>().ok()) {
                 request.insert("version".into(), json!(id));
@@ -344,6 +384,19 @@ mod tests {
         let r = build(&args("frame 2.5 shot.png")).unwrap();
         assert_eq!(r["at"], json!(2.5));
         assert!(r["path"].as_str().unwrap().ends_with("/shot.png"));
+        let r = build(&args(
+            "look --clip 2 --x -0.25 --enter slide-up --enter-for 0.8 --mask ellipse --no-invert",
+        ))
+        .unwrap();
+        assert_eq!(
+            r,
+            json!({"cmd": "look", "clips": [2], "x": -0.25, "enter": "slide-up", "enter_for": 0.8, "mask": "ellipse", "invert": false})
+        );
+        let r = build(&args("text --text Hi --size 96 --bold --duration 2.5")).unwrap();
+        assert_eq!(
+            r,
+            json!({"cmd": "text", "text": "Hi", "size": 96.0, "bold": true, "duration": 2.5})
+        );
         assert!(build(&args("move --clip x")).is_err());
         assert!(build(&args("explode")).is_err());
     }

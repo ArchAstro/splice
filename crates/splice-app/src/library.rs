@@ -103,7 +103,7 @@ pub fn build(media: &Media, path: &Path, rate: u32) -> Built {
         } else {
             0
         };
-        match ffmpeg::still(path, at, w, h) {
+        match ffmpeg::still(path, at, w, h, None) {
             Ok(image) => built.thumb = Some(image),
             Err(e) => note(e),
         }
@@ -118,7 +118,7 @@ pub fn build(media: &Media, path: &Path, rate: u32) -> Built {
         }
         MediaKind::Image => {
             let (w, h) = ffmpeg::fit(media.width, media.height, 2048, 2048);
-            match ffmpeg::still(path, 0, w, h) {
+            match ffmpeg::still(path, 0, w, h, None) {
                 Ok(image) => built.still = Some(image),
                 Err(e) => note(e),
             }

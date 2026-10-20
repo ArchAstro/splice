@@ -15,6 +15,21 @@ const TIMELINE_MIN: f32 = 170.0;
 /// The least the viewer keeps when the other panels grow.
 const VIEWER_MIN: (f32, f32) = (360.0, 220.0);
 const WORDMARK_FONT: &str = "Iowan Old Style";
+/// Cards in the left panel: the narrowest they get, the space between them,
+/// and their thumbnails' height for their width.
+pub(super) const CARD_MIN: f32 = 72.0;
+pub(super) const CARD_GAP: f32 = 10.0;
+pub(super) const CARD_ASPECT: f32 = 9.0 / 16.0;
+/// The panel's side padding.
+pub(super) const SHELF_PAD: f32 = 14.0;
+
+/// The width of a card, so whole cards fill a row of a panel this wide.
+pub(super) fn card_width(panel: f32) -> f32 {
+    // Less the panel's border and a little slack for rounding.
+    let inner = (panel - 2.0 * SHELF_PAD - 4.0).max(CARD_MIN);
+    let columns = ((inner + CARD_GAP) / (CARD_MIN + CARD_GAP)).floor().max(1.0);
+    ((inner - CARD_GAP * (columns - 1.0)) / columns).floor()
+}
 
 /// A hover label: what a control does and its key.
 pub struct Tip {
@@ -52,7 +67,10 @@ impl Render for Tip {
     }
 }
 
-fn tip(text: &'static str, keys: Option<&'static str>) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+pub(super) fn tip(
+    text: &'static str,
+    keys: Option<&'static str>,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     move |_, cx| {
         cx.new(|_| Tip {
             text: text.into(),
@@ -62,7 +80,7 @@ fn tip(text: &'static str, keys: Option<&'static str>) -> impl Fn(&mut Window, &
     }
 }
 
-fn shadow(alpha: f32, blur: f32, y: f32) -> Vec<BoxShadow> {
+pub(super) fn shadow(alpha: f32, blur: f32, y: f32) -> Vec<BoxShadow> {
     vec![BoxShadow {
         color: hsla(0.0, 0.0, 0.0, alpha),
         offset: point(px(0.0), px(y)),
@@ -80,7 +98,7 @@ pub fn icon(name: &str, color: impl Into<Hsla>) -> Svg {
 }
 
 /// A square icon control that brightens on hover.
-fn icon_button(id: &'static str, name: &str, enabled: bool) -> Stateful<gpui::Div> {
+pub(super) fn icon_button(id: &'static str, name: &str, enabled: bool) -> Stateful<gpui::Div> {
     let group: SharedString = format!("{id}-group").into();
     let color: Rgba = if enabled { Theme::subtext() } else { Theme::surface2() };
     div()
@@ -101,7 +119,7 @@ fn hairline() -> gpui::Div {
 }
 
 /// A raised surface on the crust.
-fn panel() -> gpui::Div {
+pub(super) fn panel() -> gpui::Div {
     div()
         .rounded(px(10.0))
         .overflow_hidden()
@@ -110,7 +128,7 @@ fn panel() -> gpui::Div {
         .border_color(Theme::edge())
 }
 
-fn caps(text: &str) -> gpui::Div {
+pub(super) fn caps(text: &str) -> gpui::Div {
     div()
         .text_size(px(10.0))
         .font_weight(FontWeight::SEMIBOLD)
@@ -155,14 +173,27 @@ impl Render for Editor {
             let natural_top = timeline::RULER + timeline::TOP_PAD + row;
             let centered_top = timeline::RULER + ((room - timeline::RULER - n * row) / 2.0).floor();
             self.view.scroll_y = (natural_top - centered_top).min(0.0);
+        } else if !self.scrolled_layers {
+            // More layers than fit: show the bottom ones, where the main
+            // footage is, until the timeline is scrolled.
+            self.view.scroll_y = (content - room).max(0.0);
         } else if self.view.scroll_y < 0.0 {
             self.view.scroll_y = 0.0;
+        }
+        if content < room {
+            self.scrolled_layers = false;
         }
         for image in self.player.take_retired() {
             let _ = window.drop_image(image);
         }
         if self.player.busy() {
             window.request_animation_frame();
+        }
+
+        // Typing a title ends when the text field loses the keyboard.
+        let choosing_font = matches!(self.overlay, Overlay::Fonts { .. });
+        if self.title_edit.is_some() && !choosing_font && !self.text_focus.is_focused(window) {
+            self.end_title_edit(cx);
         }
 
         let title = format!("{} — Splice", self.doc.name());
@@ -174,7 +205,13 @@ impl Render for Editor {
         // Panel sizes: what was chosen, within what the window can give.
         let viewport = window.viewport_size();
         let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
-        let max_bin = (vw - VIEWER_MIN.0 - 3.0 * GAP).max(BIN_MIN);
+        let inspector_open = self.layout.inspector_open;
+        let inspector = if inspector_open {
+            inspector::INSPECTOR_WIDTH + GAP
+        } else {
+            0.0
+        };
+        let max_bin = (vw - VIEWER_MIN.0 - 3.0 * GAP - inspector).max(BIN_MIN);
         let max_timeline = (vh - TITLEBAR - STATUS - VIEWER_MIN.1 - GAP).max(TIMELINE_MIN);
         self.limits = (max_bin, max_timeline);
         let bin_width = self.layout.bin_width.clamp(BIN_MIN, max_bin);
@@ -240,6 +277,15 @@ impl Render for Editor {
                 this.layout.store();
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| {
+                this.layout.inspector_open = !this.layout.inspector_open;
+                this.layout.store();
+                cx.notify();
+            }))
+            .on_action(cx.listener(Self::add_text))
+            .on_action(cx.listener(|this, _: &ShowMedia, _, cx| this.show_shelf(Shelf::Media, cx)))
+            .on_action(cx.listener(|this, _: &ShowTextStyles, _, cx| this.show_shelf(Shelf::Text, cx)))
+            .on_action(cx.listener(|this, _: &ShowColours, _, cx| this.show_shelf(Shelf::Color, cx)))
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &ZoomWindow, window, _| window.zoom_window())
             .on_action(|_: &ToggleFullScreen, window, _| window.toggle_fullscreen())
@@ -265,7 +311,11 @@ impl Render for Editor {
                             .flex()
                             .when(bin_open, |d| d.child(self.render_bin(bin_width, cx)))
                             .child(self.divider(true, bin_open, bin_width, cx))
-                            .child(self.render_viewer(cx)),
+                            .child(self.render_viewer(cx))
+                            .when(inspector_open, |d| {
+                                d.child(div().w(px(GAP)).flex_none())
+                                    .child(self.render_inspector(window, cx))
+                            }),
                     )
                     .child(self.divider(false, true, timeline_height, cx))
                     .child(
@@ -282,25 +332,37 @@ impl Render for Editor {
             .children(self.render_overlay(cx))
             // While a divider is held, a sheet over everything follows the pointer
             // and keeps the resize cursor, whatever it passes over.
-            .when_some(resizing, |d, resize| {
+            // The same while something is dragged on the stage or a slider.
+            .when(resizing.is_some() || self.grab.is_some(), |d| {
                 d.child(
                     div()
                         .id("resizing")
                         .occlude()
                         .absolute()
                         .inset_0()
-                        .map(|d| match resize {
-                            Resize::Bin { .. } => d.cursor_col_resize(),
-                            Resize::Timeline { .. } => d.cursor_row_resize(),
+                        .map(|d| match (resizing, &self.grab) {
+                            (Some(Resize::Bin { .. }), _) => d.cursor_col_resize(),
+                            (Some(Resize::Timeline { .. }), _) => d.cursor_row_resize(),
+                            (_, Some(stage::Grab::Move { .. })) => d.cursor_grab(),
+                            (_, Some(stage::Grab::Scale { .. })) => d.cursor(gpui::CursorStyle::ResizeUpRightDownLeft),
+                            _ => d.cursor_pointer(),
                         })
                         .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                             if event.pressed_button == Some(MouseButton::Left) {
                                 this.resize_to(event.position, cx);
+                                this.grab_to(event.position, cx);
                             } else {
                                 this.end_resize(cx);
+                                this.grab_end(cx);
                             }
                         }))
-                        .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_resize(cx))),
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.end_resize(cx);
+                                this.grab_end(cx);
+                            }),
+                        ),
                 )
             })
     }
@@ -315,6 +377,15 @@ impl Editor {
     fn go_end(&mut self, cx: &mut Context<Self>) {
         self.seek(self.doc.project.duration(), cx);
         self.follow_playhead();
+    }
+
+    fn show_shelf(&mut self, shelf: Shelf, cx: &mut Context<Self>) {
+        self.shelf = shelf;
+        if !self.layout.bin_open {
+            self.layout.bin_open = true;
+            self.layout.store();
+        }
+        cx.notify();
     }
 
     fn toggle_media(&mut self, cx: &mut Context<Self>) {
@@ -618,6 +689,8 @@ impl Editor {
 
     fn render_bin(&mut self, width: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let fps = self.doc.project.settings.fps;
+        self.card_width = card_width(width);
+        let card = self.card_width;
         let items: Vec<AnyElement> = self
             .doc
             .project
@@ -639,6 +712,7 @@ impl Editor {
                     } else {
                         splice_core::model::IMAGE_DURATION
                     },
+                    generator: None,
                 };
                 let (kind_icon, badge) = match media.kind {
                     MediaKind::Image => ("image", None),
@@ -648,7 +722,7 @@ impl Editor {
                 div()
                     .id(("media", id.0 as usize))
                     .group(group.clone())
-                    .w(px(98.0))
+                    .w(px(card))
                     .flex()
                     .flex_col()
                     .gap(px(5.0))
@@ -669,8 +743,8 @@ impl Editor {
                     })
                     .child(
                         div()
-                            .w(px(98.0))
-                            .h(px(56.0))
+                            .w(px(card))
+                            .h(px(card * CARD_ASPECT))
                             .rounded(px(7.0))
                             .overflow_hidden()
                             .bg(Theme::crust())
@@ -684,7 +758,7 @@ impl Editor {
                             .items_center()
                             .justify_center()
                             .when_some(thumb, |d, image| {
-                                d.child(img(image).size_full().object_fit(ObjectFit::Cover))
+                                d.child(img(image).size_full().rounded(px(6.0)).object_fit(ObjectFit::Cover))
                             })
                             .when(media.kind == MediaKind::Audio, |d| {
                                 d.bg(Theme::clip_audio())
@@ -747,6 +821,7 @@ impl Editor {
                         div()
                             .px(px(1.0))
                             .text_size(px(10.5))
+                            .w(px(card))
                             .text_color(if selected { Theme::text() } else { Theme::muted() })
                             .truncate()
                             .child(media.name.clone()),
@@ -755,6 +830,10 @@ impl Editor {
             })
             .collect();
         let count = items.len();
+        let tabs = self.shelf_tabs(count, cx);
+        let action = self.shelf_header_action(cx);
+        let on_media = self.shelf == Shelf::Media;
+        let shelf = (!on_media).then(|| self.render_shelf(cx));
 
         panel()
             .id("bin")
@@ -766,99 +845,75 @@ impl Editor {
             .child(
                 div()
                     .h(px(40.0))
-                    .pl(px(14.0))
+                    .pl(px(8.0))
                     .pr(px(8.0))
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(caps("Media"))
-                            .when(count > 0, |d| {
-                                d.child(
-                                    div()
-                                        .text_size(px(10.0))
-                                        .text_color(Theme::surface2())
-                                        .child(count.to_string()),
-                                )
-                            }),
-                    )
-                    .child(
-                        icon_button("import", "plus", true)
-                            .tooltip(tip("Import media", Some("⌘I")))
-                            .on_click(cx.listener(|this, _, window, cx| this.import(&Import, window, cx))),
-                    ),
+                    .child(tabs)
+                    .children(action),
             )
-            .child(
-                div()
-                    .id("bin-items")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .px(px(14.0))
-                    .pb_3()
-                    .when(count == 0, |d| {
-                        d.child(
-                            div()
-                                .id("bin-empty")
-                                .mt_1()
-                                .h(px(150.0))
-                                .rounded(px(10.0))
-                                .border_1()
-                                .border_dashed()
-                                .border_color(Theme::surface1())
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .justify_center()
-                                .gap_2()
-                                .cursor_pointer()
-                                .hover(|s| s.bg(Theme::lane()))
-                                .on_click(cx.listener(|this, _, window, cx| this.import(&Import, window, cx)))
-                                .child(
-                                    div()
-                                        .size(px(32.0))
-                                        .rounded_full()
-                                        .bg(Theme::surface0())
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .child(icon("plus", Theme::subtext())),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .text_color(Theme::subtext())
-                                        .child("Drop media here"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(10.5))
-                                        .text_color(Theme::overlay())
-                                        .child("videos, images, sound · ⌘I"),
-                                ),
-                        )
-                    })
-                    .when(count > 0, |d| {
-                        d.child(div().flex().flex_wrap().gap(px(12.0)).children(items))
-                    }),
-            )
+            .children(shelf)
+            .when(on_media, |d| {
+                d.child(
+                    div()
+                        .id("bin-items")
+                        .flex_1()
+                        .overflow_y_scroll()
+                        .px(px(SHELF_PAD))
+                        .pb_3()
+                        .when(count == 0, |d| {
+                            d.child(
+                                div()
+                                    .id("bin-empty")
+                                    .mt_1()
+                                    .h(px(150.0))
+                                    .rounded(px(10.0))
+                                    .border_1()
+                                    .border_dashed()
+                                    .border_color(Theme::surface1())
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_2()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(Theme::lane()))
+                                    .on_click(cx.listener(|this, _, window, cx| this.import(&Import, window, cx)))
+                                    .child(
+                                        div()
+                                            .size(px(32.0))
+                                            .rounded_full()
+                                            .bg(Theme::surface0())
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(icon("plus", Theme::subtext())),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(12.0))
+                                            .text_color(Theme::subtext())
+                                            .child("Drop media here"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.5))
+                                            .text_color(Theme::overlay())
+                                            .child("videos, images, sound · ⌘I"),
+                                    ),
+                            )
+                        })
+                        .when(count > 0, |d| {
+                            d.child(div().flex().flex_wrap().gap(px(CARD_GAP)).children(items))
+                        }),
+                )
+            })
     }
 
     fn render_viewer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let project = &self.doc.project;
         let settings = project.settings;
-        let layers: Vec<(Arc<RenderImage>, (u32, u32))> = project
-            .visual_stack(self.player.position)
-            .into_iter()
-            .filter_map(|(clip, media)| {
-                let image = self.player.frame(clip.id, media.kind, &media.hash, &self.library)?;
-                Some((image.clone(), (media.width, media.height)))
-            })
-            .collect();
-        let stage_cell = self.stage_bounds.clone();
         let empty = project.is_empty();
         let position = self.player.position;
         let duration = project.duration();
@@ -875,46 +930,8 @@ impl Editor {
                 |(n, _, _)| n.to_string(),
             );
 
-        let stage = canvas(
-            move |bounds, _, _| {
-                // The largest rectangle with the canvas's shape, with room to breathe.
-                let (bw, bh) = (
-                    f32::from(bounds.size.width) - 48.0,
-                    f32::from(bounds.size.height) - 36.0,
-                );
-                let aspect = settings.width as f32 / settings.height.max(1) as f32;
-                let (w, h) = if bw / bh.max(1.0) > aspect {
-                    (bh * aspect, bh)
-                } else {
-                    (bw, bw / aspect)
-                };
-                let stage = Bounds::centered_at(bounds.center(), size(px(w.max(1.0)), px(h.max(1.0))));
-                stage_cell.set(stage);
-                stage
-            },
-            move |_, stage, window, _| {
-                window.paint_shadows(stage, Corners::all(px(3.0)), &shadow(0.55, 28.0, 10.0));
-                window.paint_quad(quad(
-                    stage,
-                    Corners::all(px(3.0)),
-                    gpui::black(),
-                    px(0.0),
-                    transparent_black(),
-                    Default::default(),
-                ));
-                window.with_content_mask(Some(gpui::ContentMask { bounds: stage }), |window| {
-                    for (image, (mw, mh)) in layers {
-                        // Contain-fit, centered: what export does.
-                        let (sw, sh) = (f32::from(stage.size.width), f32::from(stage.size.height));
-                        let scale = (sw / mw.max(1) as f32).min(sh / mh.max(1) as f32);
-                        let fit = size(px(mw as f32 * scale), px(mh as f32 * scale));
-                        let rect = Bounds::centered_at(stage.center(), fit);
-                        let _ = window.paint_image(rect, Corners::default(), image, 0, false);
-                    }
-                });
-            },
-        )
-        .size_full();
+        let roomy = f32::from(self.stage_bounds.get().size.width) > 560.0;
+        let stage = self.render_stage(cx);
 
         let transport_button = |id: &'static str, name: &'static str| icon_button(id, name, duration > 0);
 
@@ -924,39 +941,31 @@ impl Editor {
             .h_full()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .id("stage")
-                    .flex_1()
-                    .min_h_0()
-                    .relative()
-                    .child(stage)
-                    .when(empty, |d| {
-                        d.child(
+            .child(stage.when(empty, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .child(icon("film", Theme::surface2()).size(px(28.0)))
+                        .child(
                             div()
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .justify_center()
-                                .gap_2()
-                                .child(icon("film", Theme::surface2()).size(px(28.0)))
-                                .child(
-                                    div()
-                                        .text_size(px(13.0))
-                                        .text_color(Theme::muted())
-                                        .child("Nothing on the timeline yet"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .text_color(Theme::overlay())
-                                        .child("Drag media from the left, or double-click it"),
-                                ),
+                                .text_size(px(13.0))
+                                .text_color(Theme::muted())
+                                .child("Nothing on the timeline yet"),
                         )
-                    }),
-            )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(Theme::overlay())
+                                .child("Drag media from the left, or double-click it"),
+                        ),
+                )
+            }))
             .child(
                 div()
                     .h(px(50.0))
@@ -966,20 +975,27 @@ impl Editor {
                     .justify_between()
                     .child(
                         div()
-                            .w(px(190.0))
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
                             .font_family(MONO_FONT)
                             .text_size(px(11.5))
                             .flex()
                             .gap(px(6.0))
                             .child(div().text_color(Theme::text()).child(timecode(position, fps)))
-                            .child(div().text_color(Theme::surface2()).child("/"))
-                            .child(div().text_color(Theme::overlay()).child(timecode(duration, fps))),
+                            // The length too, when there is room for it.
+                            .when(roomy, |d| {
+                                d.child(div().text_color(Theme::surface2()).child("/"))
+                                    .child(div().text_color(Theme::overlay()).child(timecode(duration, fps)))
+                            }),
                     )
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap_2()
+                            .flex_none()
+                            .mx(px(12.0))
                             .child(
                                 transport_button("go-start", "start")
                                     .tooltip(tip("Go to start", Some("Home")))
@@ -1014,7 +1030,7 @@ impl Editor {
                             ),
                     )
                     .child(
-                        div().w(px(190.0)).flex().justify_end().child(
+                        div().flex_1().min_w_0().flex().justify_end().child(
                             div()
                                 .id("aspect")
                                 .h(px(24.0))
@@ -1290,7 +1306,12 @@ impl Editor {
             }))
             .on_drop(cx.listener(|this, drag: &MediaDrag, _, cx| {
                 if let Some(ghost) = this.ghost.take()
-                    && let Some(clip) = this.edit(cx, |p| p.insert_clip(drag.media, ghost.track, ghost.start))
+                    && let Some(clip) = this.edit(cx, |p| match &drag.generator {
+                        Some(generator) => {
+                            Some(p.insert_generated(generator.clone(), ghost.track, ghost.start, drag.duration))
+                        }
+                        None => p.insert_clip(drag.media, ghost.track, ghost.start),
+                    })
                 {
                     this.selection = vec![clip];
                 }
@@ -1514,6 +1535,93 @@ impl Editor {
                         }
                     }))
                     .child(footer("↑↓ move  ·  ⏎ run  ·  esc close"))
+            }
+            Overlay::Fonts {
+                clip,
+                query,
+                index,
+                list,
+            } => {
+                let clip = *clip;
+                let matches = Self::font_matches(list, query);
+                let index = (*index).min(matches.len().saturating_sub(1));
+                let current = match self.doc.project.clip(clip).and_then(|c| c.generator.as_ref()) {
+                    Some(Generator::Text(t)) => t.font.clone(),
+                    _ => String::new(),
+                };
+                let query = query.clone();
+                let count = matches.len();
+                // Only the rows near the choice: there can be hundreds of fonts.
+                let first = index.saturating_sub(5);
+                let rows: Vec<AnyElement> =
+                    matches
+                        .into_iter()
+                        .enumerate()
+                        .skip(first)
+                        .take(11)
+                        .map(|(i, font)| {
+                            let active = i == index;
+                            let chosen = font == current;
+                            let pick = font.clone();
+                            div()
+                                .id(("font", i))
+                                .h(px(38.0))
+                                .px(px(12.0))
+                                .rounded(px(7.0))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .cursor_pointer()
+                                .when(active, |d| d.bg(Theme::surface0()))
+                                .hover(|d| d.bg(Theme::surface0()))
+                                .child(
+                                    div()
+                                        .font_family(SharedString::from(font.clone()))
+                                        .text_size(px(17.0))
+                                        .text_color(if active { Theme::text() } else { Theme::subtext() })
+                                        .child(font.clone()),
+                                )
+                                .when(chosen, |d| {
+                                    d.child(div().size(px(6.0)).rounded_full().bg(Theme::accent()))
+                                })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.choose_font(clip, pick.clone(), window, cx)
+                                }))
+                                .into_any_element()
+                        })
+                        .collect();
+                panel()
+                    .child(
+                        div()
+                            .h(px(48.0))
+                            .px(px(16.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .border_b_1()
+                            .border_color(Theme::rule())
+                            .child(icon("text", Theme::overlay()))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .text_size(px(14.0))
+                                    .when(!query.is_empty(), |d| d.text_color(Theme::text()).child(query.clone()))
+                                    .child(div().w(px(1.5)).h(px(17.0)).bg(Theme::accent()))
+                                    .when(query.is_empty(), |d| {
+                                        d.child(div().ml(px(2.0)).text_color(Theme::overlay()).child("Search fonts"))
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .ml_auto()
+                                    .text_size(px(11.0))
+                                    .text_color(Theme::overlay())
+                                    .child(format!("{count} on this Mac")),
+                            ),
+                    )
+                    .child(div().id("font-rows").p(px(6.0)).flex().flex_col().children(rows))
+                    .child(footer("↑↓ move  ·  ⏎ use  ·  esc close"))
             }
             Overlay::Ask { text } => {
                 let presence = self.agent.presence();

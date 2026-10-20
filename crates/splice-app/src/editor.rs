@@ -9,6 +9,7 @@ use crate::player::Player;
 use crate::session::{Document, Layout, Recent, dirs};
 use crate::theme::{MONO_FONT, Theme, UI_FONT};
 use crate::timeline::{self, ClipArt, Ghost, GutterButton, Hit, View};
+use crate::titles;
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, Corners, DragMoveEvent, Entity, ExternalPaths, FocusHandle,
     HitboxBehavior, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
@@ -16,7 +17,7 @@ use gpui::{
     point, prelude::*, px, quad, relative, size, transparent_black,
 };
 use splice_core::export::{self, Quality};
-use splice_core::model::{ASPECTS, ClipId, Media, MediaId, MediaKind, Project};
+use splice_core::model::{ASPECTS, ClipId, Generator, Media, MediaId, MediaKind, Project};
 use splice_core::store::{EXTENSION, Store, VersionKind, hash_file};
 use splice_core::time::{SECOND, Time, secs, timecode};
 use std::cell::Cell;
@@ -29,7 +30,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 mod agent;
+mod inspector;
 mod render;
+mod shelf;
+mod stage;
 
 const AUTOSAVE_EVERY: Duration = Duration::from_millis(1500);
 
@@ -46,6 +50,8 @@ pub struct MediaDrag {
     media: MediaId,
     name: SharedString,
     duration: Time,
+    /// A title or colour from the shelf, rather than media.
+    generator: Option<Generator>,
 }
 
 struct DragChip(SharedString);
@@ -97,6 +103,13 @@ enum Overlay {
     Ask {
         text: String,
     },
+    /// Choosing a title's font, each shown in itself.
+    Fonts {
+        clip: ClipId,
+        query: String,
+        index: usize,
+        list: Vec<String>,
+    },
 }
 
 #[derive(Default)]
@@ -145,8 +158,34 @@ pub struct Editor {
     agent: agent::Agent,
     /// `splice ctl export --wait` callers, answered when the export ends.
     export_replies: Vec<std::sync::mpsc::Sender<String>>,
+    /// Titles and colours drawn for the viewer.
+    drawings: titles::Drawings,
+    /// Where each picture sat on the stage at the last paint, bottom first.
+    stage_layers: Rc<std::cell::RefCell<Vec<stage::Placed>>>,
+    /// Something held with the mouse on the stage or in the inspector.
+    grab: Option<stage::Grab>,
+    /// Centre lines shown while a picture snaps to them.
+    guides: (bool, bool),
+    slider_bounds: Rc<std::cell::RefCell<HashMap<inspector::Field, Bounds<Pixels>>>>,
+    /// A title's words being typed in the inspector.
+    title_edit: Option<inspector::TitleEdit>,
+    text_focus: FocusHandle,
+    /// Which shelf the left panel shows.
+    shelf: Shelf,
+    /// How wide each card in the left panel is, so a row fills it.
+    card_width: f32,
+    /// The timeline's layers were scrolled by hand, so they stay where put.
+    scrolled_layers: bool,
     _ctl: Task<()>,
     _autosave: Task<()>,
+}
+
+/// The left panel's tabs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Shelf {
+    Media,
+    Text,
+    Color,
 }
 
 impl Editor {
@@ -229,6 +268,16 @@ impl Editor {
             limits: (f32::MAX, f32::MAX),
             agent: agent::Agent::default(),
             export_replies: Vec::new(),
+            drawings: titles::Drawings::default(),
+            stage_layers: Rc::default(),
+            grab: None,
+            guides: (false, false),
+            slider_bounds: Rc::default(),
+            title_edit: None,
+            text_focus: cx.focus_handle(),
+            shelf: Shelf::Media,
+            card_width: render::CARD_MIN,
+            scrolled_layers: false,
             _ctl: ctl,
             _autosave: autosave,
         };
@@ -366,6 +415,16 @@ impl Editor {
             .ok();
         })
         .detach();
+    }
+
+    /// Where export finds this project's pictures.
+    fn resolver(&self) -> titles::Resolver<impl Fn(&Media) -> Option<PathBuf> + '_> {
+        let library = &self.library;
+        titles::Resolver {
+            media: move |m: &Media| library.path(&m.hash).map(Path::to_path_buf),
+            dir: titles::drawn_dir(),
+            canvas: (self.doc.project.settings.width, self.doc.project.settings.height),
+        }
     }
 
     // Import.
@@ -803,6 +862,9 @@ impl Editor {
             let height = f32::from(self.timeline_bounds.get().size.height);
             let max_y = (self.view.content_height(self.doc.project.tracks.len()) - height).max(0.0);
             self.view.scroll_y = (self.view.scroll_y.max(0.0) - dy).clamp(0.0, max_y);
+            if dy != 0.0 {
+                self.scrolled_layers = true;
+            }
         }
         cx.notify();
     }
@@ -1088,13 +1150,7 @@ impl Editor {
         reveal: bool,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let library = &self.library;
-        let plan = match export::plan(
-            &self.doc.project,
-            |m| library.path(&m.hash).map(Path::to_path_buf),
-            &output,
-            quality,
-        ) {
+        let plan = match export::plan(&self.doc.project, &self.resolver(), &output, quality) {
             Ok(plan) => plan,
             Err(e) => return Err(format!("Cannot export: {e}")),
         };
@@ -1279,6 +1335,35 @@ impl Editor {
                 _ if !command => {
                     if let Some(c) = typed.filter(|c| !c.chars().any(char::is_control)) {
                         text.push_str(&c);
+                    }
+                }
+                _ => {}
+            },
+            Overlay::Fonts {
+                clip,
+                query,
+                index,
+                list,
+            } => match key {
+                "escape" => return self.close_overlay(window, cx),
+                "up" => *index = index.saturating_sub(1),
+                "down" => *index += 1,
+                "backspace" => {
+                    query.pop();
+                    *index = 0;
+                }
+                "enter" => {
+                    let chosen = Self::font_matches(list, query).into_iter().nth(*index);
+                    let clip = *clip;
+                    match chosen {
+                        Some(font) => return self.choose_font(clip, font, window, cx),
+                        None => return self.close_overlay(window, cx),
+                    }
+                }
+                _ if !command => {
+                    if let Some(c) = typed.filter(|c| !c.chars().any(char::is_control)) {
+                        query.push_str(&c);
+                        *index = 0;
                     }
                 }
                 _ => {}

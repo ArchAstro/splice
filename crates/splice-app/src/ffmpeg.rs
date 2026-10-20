@@ -160,6 +160,13 @@ pub fn fit(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
     (even(src_w as f64 * scale), even(src_h as f64 * scale))
 }
 
+fn with_filters(base: String, extra: Option<&str>) -> String {
+    match extra {
+        Some(extra) => format!("{base},{extra}"),
+        None => base,
+    }
+}
+
 /// BGRA bytes as an image gpui can paint.
 pub fn render_image(width: u32, height: u32, bgra: Vec<u8>) -> Option<Arc<RenderImage>> {
     let buffer = image::RgbaImage::from_raw(width, height, bgra)?;
@@ -167,7 +174,8 @@ pub fn render_image(width: u32, height: u32, bgra: Vec<u8>) -> Option<Arc<Render
 }
 
 /// One decoded frame of `path` at `at`, scaled to `width` x `height`.
-pub fn still(path: &Path, at: Time, width: u32, height: u32) -> Result<Arc<RenderImage>> {
+/// `filters` (a key or mask) run on the frame after scaling.
+pub fn still(path: &Path, at: Time, width: u32, height: u32, filters: Option<&str>) -> Result<Arc<RenderImage>> {
     let mut command = base_command()?;
     if at > 0 {
         command.args(["-ss", &format!("{:.6}", secs(at))]);
@@ -176,7 +184,7 @@ pub fn still(path: &Path, at: Time, width: u32, height: u32) -> Result<Arc<Rende
         .arg("-i")
         .arg(path)
         .args(["-frames:v", "1", "-an", "-sn", "-vf"])
-        .arg(format!("scale={width}:{height}:flags=bilinear"))
+        .arg(with_filters(format!("scale={width}:{height}:flags=bilinear"), filters))
         .args(["-f", "rawvideo", "-pix_fmt", "bgra", "pipe:1"])
         .stderr(Stdio::null())
         .output()?;
@@ -277,7 +285,14 @@ pub struct FrameStream {
 }
 
 impl FrameStream {
-    pub fn open(path: &Path, from: Time, fps: u32, width: u32, height: u32) -> Result<FrameStream> {
+    pub fn open(
+        path: &Path,
+        from: Time,
+        fps: u32,
+        width: u32,
+        height: u32,
+        filters: Option<&str>,
+    ) -> Result<FrameStream> {
         let mut command = base_command()?;
         if from > 0 {
             command.args(["-ss", &format!("{:.6}", secs(from))]);
@@ -286,7 +301,10 @@ impl FrameStream {
             .arg("-i")
             .arg(path)
             .args(["-an", "-sn", "-vf"])
-            .arg(format!("fps={fps},scale={width}:{height}:flags=fast_bilinear"))
+            .arg(with_filters(
+                format!("fps={fps},scale={width}:{height}:flags=fast_bilinear"),
+                filters,
+            ))
             .args(["-f", "rawvideo", "-pix_fmt", "bgra", "pipe:1"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -392,9 +410,9 @@ mod tests {
         assert!(probe.has_audio);
         assert!((probe.duration - 2 * SECOND).abs() < SECOND / 10);
 
-        assert!(still(&path, SECOND, 32, 18).is_ok());
+        assert!(still(&path, SECOND, 32, 18, None).is_ok());
 
-        let mut stream = FrameStream::open(&path, SECOND / 2, 30, 32, 18).unwrap();
+        let mut stream = FrameStream::open(&path, SECOND / 2, 30, 32, 18, None).unwrap();
         let start = std::time::Instant::now();
         let mut frames = 0;
         while frames < 10 && start.elapsed() < std::time::Duration::from_secs(5) {

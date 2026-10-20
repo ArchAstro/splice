@@ -12,6 +12,7 @@ mod player;
 mod session;
 mod theme;
 mod timeline;
+mod titles;
 
 use editor::Editor;
 use gpui::{App, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*, px, size};
@@ -27,6 +28,7 @@ fn main() {
     }
     let open = args.iter().find(|a| !a.starts_with('-')).map(PathBuf::from);
 
+    titles::warm();
     Application::new().with_assets(icons::Icons).run(move |cx: &mut App| {
         actions::bind(cx);
         cx.set_menus(actions::menus());

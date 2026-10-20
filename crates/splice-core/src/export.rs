@@ -1,11 +1,14 @@
 //! Export: the timeline as one ffmpeg invocation.
 //!
 //! The picture starts as a solid black canvas. Each visible clip, bottom
-//! track first, is an input trimmed by input seeking, scaled to fit the
-//! canvas, shifted to its timeline start and overlaid centered. Sound from
-//! every audible clip is delayed to its start and mixed over silence.
+//! track first, is an input trimmed by input seeking; its key and mask run
+//! on its own pixels, then it is sized, faded, shifted to its timeline start
+//! and overlaid where its look puts it (both can move over time). Titles and
+//! colours arrive as pictures the app drew. Sound from every audible clip is
+//! delayed to its start and mixed over silence.
 
-use crate::model::{Media, MediaKind, Project};
+use crate::look::MotionKind;
+use crate::model::{Clip, Generator, Media, MediaKind, Project, Source};
 use crate::time::{Time, secs};
 use std::path::{Path, PathBuf};
 
@@ -41,28 +44,33 @@ pub struct Plan {
     pub duration: Time,
 }
 
+/// A title or colour drawn by the app: a PNG at canvas resolution, with any
+/// mask already applied.
+pub struct Rendered {
+    pub path: PathBuf,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Where export finds its pictures.
+pub trait Resolve {
+    /// A readable file for a piece of media.
+    fn media(&self, media: &Media) -> Option<PathBuf>;
+    /// The picture for a title or colour clip.
+    fn generated(&self, clip: &Clip, generator: &Generator) -> Option<Rendered>;
+}
+
 /// Builds the ffmpeg arguments that render `project` to `output` (an `.mp4`).
-/// `resolve` finds a readable file for each piece of media.
-pub fn plan(
-    project: &Project,
-    resolve: impl Fn(&Media) -> Option<PathBuf>,
-    output: &Path,
-    quality: Quality,
-) -> Result<Plan, String> {
+pub fn plan(project: &Project, resolve: &impl Resolve, output: &Path, quality: Quality) -> Result<Plan, String> {
     if project.duration() <= 0 {
         return Err("the timeline is empty".into());
     }
-    build(project, resolve, output, Some(quality))
+    build(project, resolve, output, Some(quality), None)
 }
 
 /// The picture at timeline time `t`, composited exactly as export would,
 /// written as a still image (the format follows `output`'s extension).
-pub fn plan_still(
-    project: &Project,
-    resolve: impl Fn(&Media) -> Option<PathBuf>,
-    t: Time,
-    output: &Path,
-) -> Result<Plan, String> {
+pub fn plan_still(project: &Project, resolve: &impl Resolve, t: Time, output: &Path) -> Result<Plan, String> {
     if t < 0 || t >= project.duration().max(1) {
         return Err(format!(
             "{:.3}s is outside the movie (0 to {:.3}s)",
@@ -70,33 +78,43 @@ pub fn plan_still(
             secs(project.duration())
         ));
     }
-    // A one-frame movie of whatever is under `t`.
-    let frame = project.frame();
     let mut moment = project.clone();
     for track in &mut moment.tracks {
         track.muted = true;
         track.clips.retain(|c| c.contains(t));
-        for clip in &mut track.clips {
-            let timed = project.media(clip.media).is_some_and(Media::is_timed);
-            if timed {
-                clip.source_in += t - clip.start;
-            }
-            clip.start = 0;
-            clip.duration = frame;
-        }
     }
-    let mut plan = build(&moment, resolve, output, None)?;
-    plan.duration = frame;
+    let mut plan = build(&moment, resolve, output, None, Some(t))?;
+    plan.duration = project.frame();
     Ok(plan)
 }
 
+/// The size a clip has at scale 1 on a `w` x `h` canvas: media fitted inside
+/// the canvas, a drawn picture as drawn.
+pub fn natural_size(source: Source, rendered: Option<(u32, u32)>, w: u32, h: u32) -> (f64, f64) {
+    match (source, rendered) {
+        (Source::Generated(_), Some((rw, rh))) => (rw as f64, rh as f64),
+        (Source::Media(m), _) if m.width > 0 && m.height > 0 => {
+            let fit = (w as f64 / m.width as f64).min(h as f64 / m.height as f64);
+            (m.width as f64 * fit, m.height as f64 * fit)
+        }
+        _ => (w as f64, h as f64),
+    }
+}
+
+/// `still_at` renders the single frame at that timeline time instead of the movie.
 fn build(
     project: &Project,
-    resolve: impl Fn(&Media) -> Option<PathBuf>,
+    resolve: &impl Resolve,
     output: &Path,
     quality: Option<Quality>,
+    still_at: Option<Time>,
 ) -> Result<Plan, String> {
-    let duration = project.duration().max(project.frame());
+    let frame = project.frame();
+    let duration = if still_at.is_some() {
+        frame
+    } else {
+        project.duration().max(frame)
+    };
     let s = project.settings;
     let (w, h, fps) = (s.width, s.height, s.fps);
     let d = fmt(duration);
@@ -119,29 +137,64 @@ fn build(
 
     for (track_index, track) in project.tracks.iter().enumerate() {
         for clip in &track.clips {
-            let media = project.media(clip.media).ok_or("a clip refers to missing media")?;
-            let shows = !track.hidden && media.is_visual();
-            let sounds_out = !track.muted && media.has_audio && clip.volume > 0.0;
+            let source = project.source(clip).ok_or("a clip refers to missing media")?;
+            let shows = !track.hidden && source.is_visual();
+            let has_audio = matches!(source, Source::Media(m) if m.has_audio);
+            let sounds_out = !track.muted && has_audio && clip.volume > 0.0;
             if !shows && !sounds_out {
                 continue;
             }
-            let path = resolve(media).ok_or_else(|| format!("{} is offline", media.name))?;
-            let path = path.to_string_lossy().to_string();
-            let start = fmt(clip.start);
-            let length = fmt(clip.duration);
-            match media.kind {
-                MediaKind::Image => args.extend(strings(&[
-                    "-loop",
-                    "1",
-                    "-framerate",
-                    &fps.to_string(),
-                    "-t",
-                    &length,
-                    "-i",
-                    &path,
-                ])),
-                MediaKind::Video | MediaKind::Audio => {
-                    args.extend(strings(&["-ss", &fmt(clip.source_in), "-t", &length, "-i", &path]))
+            // For a still, each clip contributes one frame from `offset` into it.
+            let offset = still_at.map_or(0, |t| t - clip.start);
+            let length = if still_at.is_some() { frame } else { clip.duration };
+            let placed_at = if still_at.is_some() { 0 } else { clip.start };
+            let (start, len) = (fmt(placed_at), fmt(length));
+
+            let mut rendered = None;
+            match source {
+                Source::Generated(generator) => {
+                    let picture = resolve
+                        .generated(clip, generator)
+                        .ok_or_else(|| format!("{} could not be drawn", generator.name()))?;
+                    let path = picture.path.to_string_lossy().to_string();
+                    rendered = Some((picture.width, picture.height));
+                    args.extend(strings(&[
+                        "-loop",
+                        "1",
+                        "-framerate",
+                        &fps.to_string(),
+                        "-t",
+                        &len,
+                        "-i",
+                        &path,
+                    ]));
+                }
+                Source::Media(media) => {
+                    let path = resolve
+                        .media(media)
+                        .ok_or_else(|| format!("{} is offline", media.name))?;
+                    let path = path.to_string_lossy().to_string();
+                    if media.kind == MediaKind::Image {
+                        args.extend(strings(&[
+                            "-loop",
+                            "1",
+                            "-framerate",
+                            &fps.to_string(),
+                            "-t",
+                            &len,
+                            "-i",
+                            &path,
+                        ]));
+                    } else {
+                        args.extend(strings(&[
+                            "-ss",
+                            &fmt(clip.source_in + offset),
+                            "-t",
+                            &len,
+                            "-i",
+                            &path,
+                        ]));
+                    }
                 }
             }
             let i = next_input;
@@ -149,14 +202,72 @@ fn build(
             let tag = format!("t{track_index}c{}", clip.id.0);
 
             if shows {
+                let look = &clip.look;
+                let (nw, nh) = natural_size(source, rendered, w, h);
+                let pose = look.pose_expr(clip.duration);
+                // Local time inside the clip, in each filter's own clock.
+                let local = if offset > 0 {
+                    format!("(t+{})", fmt(offset))
+                } else {
+                    "t".into()
+                };
+                let mut chain = vec![format!("fps={fps}")];
+                if matches!(source, Source::Media(_))
+                    && let Some(pixels) = look.pixel_filters()
+                {
+                    chain.push(pixels);
+                }
+                chain.push("format=rgba".into());
+                // A still knows its exact opacity; a movie fades over time.
+                let opacity = match still_at {
+                    Some(_) => look.pose(clip.duration, offset).opacity as f32,
+                    None => look.opacity,
+                };
+                if opacity < 1.0 {
+                    chain.push(format!("colorchannelmixer=aa={:.4}", opacity.max(0.0)));
+                }
+                match pose.scale.constant() {
+                    Some(k) => chain.push(format!("scale={}:{}", even((nw * k).round()), even((nh * k).round()))),
+                    None => {
+                        let k = pose.scale.ffmpeg(&local);
+                        chain.push(format!(
+                            "scale=w='max(2,trunc({nw:.3}*{k}/2)*2)':h='max(2,trunc({nh:.3}*{k}/2)*2)':eval=frame"
+                        ));
+                    }
+                }
+                for (motion, inward) in [(look.enter, true), (look.exit, false)] {
+                    if motion.kind == MotionKind::None || still_at.is_some() {
+                        continue;
+                    }
+                    let fd = secs(motion.duration.min(clip.duration));
+                    let st = if inward { 0.0 } else { secs(clip.duration) - fd };
+                    chain.push(format!(
+                        "fade=t={}:st={st:.6}:d={fd:.6}:alpha=1",
+                        if inward { "in" } else { "out" }
+                    ));
+                }
+                chain.push(format!("format=yuva420p,setpts=PTS-STARTPTS+{start}/TB"));
+                filters.push(format!("[{i}:v]{}[v{tag}]", chain.join(",")));
+
+                let end = fmt(placed_at + length);
+                let since = if placed_at > 0 {
+                    format!("(t-{start})")
+                } else {
+                    "t".to_string()
+                };
+                let since = if offset > 0 {
+                    format!("({since}+{})", fmt(offset))
+                } else {
+                    since
+                };
+                let animated =
+                    pose.x.constant().is_none() || pose.y.constant().is_none() || pose.scale.constant().is_none();
+                let x = format!("(W-w)/2+{}*W", pose.x.ffmpeg(&since));
+                let y = format!("(H-h)/2+{}*H", pose.y.ffmpeg(&since));
                 filters.push(format!(
-                    "[{i}:v]fps={fps},scale={w}:{h}:force_original_aspect_ratio=decrease,\
-                     format=yuva420p,setpts=PTS-STARTPTS+{start}/TB[v{tag}]"
-                ));
-                let end = fmt(clip.end());
-                filters.push(format!(
-                    "[{picture}][v{tag}]overlay=x=(W-w)/2:y=(H-h)/2:eof_action=pass:\
-                     enable='between(t,{start},{end})'[p{tag}]"
+                    "[{picture}][v{tag}]overlay=x='{x}':y='{y}':{}eof_action=pass:\
+                     enable='between(t,{start},{end})'[p{tag}]",
+                    if animated { "eval=frame:" } else { "" }
                 ));
                 picture = format!("p{tag}");
             }
@@ -223,6 +334,10 @@ pub fn parse_progress(line: &str) -> Option<Time> {
     value.trim().parse::<Time>().ok()
 }
 
+fn even(v: f64) -> u32 {
+    ((v.max(2.0) as u32) / 2) * 2
+}
+
 fn fmt(t: Time) -> String {
     format!("{:.6}", secs(t))
 }
@@ -234,24 +349,48 @@ fn strings(items: &[&str]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Media, MediaId};
+    use crate::look::{Key, Mask};
+    use crate::model::{Generator, MediaId, Title};
     use crate::time::SECOND;
 
-    #[test]
-    fn plans_layers_and_sound() {
-        let mut p = Project::default();
-        let video = p.add_media(Media {
+    struct Fake;
+
+    impl Resolve for Fake {
+        fn media(&self, media: &Media) -> Option<PathBuf> {
+            Some(PathBuf::from(format!("/m/{}", media.hash)))
+        }
+        fn generated(&self, clip: &Clip, _: &Generator) -> Option<Rendered> {
+            Some(Rendered {
+                path: PathBuf::from(format!("/g/{}.png", clip.id.0)),
+                width: 600,
+                height: 120,
+            })
+        }
+    }
+
+    fn video(p: &mut Project, hash: &str, seconds: i64) -> MediaId {
+        p.add_media(Media {
             id: MediaId(0),
             name: "v".into(),
-            hash: "a".into(),
+            hash: hash.into(),
             ext: "mp4".into(),
             kind: MediaKind::Video,
-            duration: 4 * SECOND,
+            duration: seconds * SECOND,
             width: 1920,
             height: 1080,
             has_audio: true,
             source: PathBuf::new(),
-        });
+        })
+    }
+
+    fn graph(plan: &Plan) -> &str {
+        &plan.args[plan.args.iter().position(|a| a == "-filter_complex").unwrap() + 1]
+    }
+
+    #[test]
+    fn plans_layers_and_sound() {
+        let mut p = Project::default();
+        let v = video(&mut p, "a", 4);
         let image = p.add_media(Media {
             id: MediaId(0),
             name: "i".into(),
@@ -264,58 +403,77 @@ mod tests {
             has_audio: false,
             source: PathBuf::new(),
         });
-        p.append_clip(video);
+        p.append_clip(v);
         p.insert_clip(image, 0, SECOND);
-        let plan = plan(
-            &p,
-            |m| Some(PathBuf::from(format!("/m/{}", m.hash))),
-            Path::new("/o.mp4"),
-            Quality::Draft,
-        )
-        .unwrap();
-        let graph = &plan.args[plan.args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
+        let plan = plan(&p, &Fake, Path::new("/o.mp4"), Quality::Draft).unwrap();
+        let graph = graph(&plan);
         assert_eq!(graph.matches("overlay=").count(), 2);
         assert!(graph.contains("amix=inputs=2"));
+        assert!(
+            graph.contains("scale=1080:1080"),
+            "the square image fits the 1920x1080 canvas: {graph}"
+        );
         assert!(plan.args.contains(&"/m/b".to_string()));
         assert_eq!(plan.duration, 6 * SECOND, "the image runs 1s to 6s");
     }
 
     #[test]
+    fn titles_keys_masks_and_motion() {
+        let mut p = Project::default();
+        let v = video(&mut p, "a", 4);
+        let clip = p.append_clip(v).unwrap();
+        p.set_look(clip, |look| {
+            look.key = Some(Key::default());
+            look.mask = Some(Mask::default());
+            look.scale = 0.5;
+            look.x = 0.25;
+        });
+        let title = p.insert_generated(Generator::Text(Title::default()), 1, 0, 2 * SECOND);
+        p.set_look(title, |look| {
+            look.enter.kind = MotionKind::Pop;
+            look.exit.kind = MotionKind::Fade;
+        });
+        let plan = plan(&p, &Fake, Path::new("/o.mp4"), Quality::Draft).unwrap();
+        let graph = graph(&plan);
+        assert!(graph.contains("chromakey=0x00ff00"), "{graph}");
+        assert!(graph.contains("geq="));
+        assert!(graph.contains("scale=960:540"), "half of the fitted size");
+        assert!(graph.contains("x='(W-w)/2+0.250000*W'"));
+        assert!(plan.args.contains(&format!("/g/{}.png", title.0)));
+        assert!(graph.contains(":eval=frame"), "the pop animates the title's size");
+        assert!(graph.contains("fade=t=in:st=0.000000:d=0.500000:alpha=1"));
+        assert!(graph.contains("fade=t=out:st=1.500000:d=0.500000:alpha=1"));
+        assert_eq!(graph.matches("amix=inputs=2").count(), 1, "titles make no sound");
+    }
+
+    #[test]
     fn still_shows_what_is_under_the_time() {
         let mut p = Project::default();
-        let video = p.add_media(Media {
-            id: MediaId(0),
-            name: "v".into(),
-            hash: "a".into(),
-            ext: "mp4".into(),
-            kind: MediaKind::Video,
-            duration: 4 * SECOND,
-            width: 1920,
-            height: 1080,
-            has_audio: true,
-            source: PathBuf::new(),
-        });
-        p.append_clip(video);
-        p.append_clip(video);
-        let plan = plan_still(
-            &p,
-            |m| Some(PathBuf::from(format!("/m/{}", m.hash))),
-            5 * SECOND,
-            Path::new("/o.png"),
-        )
-        .unwrap();
-        let graph = &plan.args[plan.args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
-        assert_eq!(graph.matches("overlay=").count(), 1, "only the second clip is under 5s");
+        let v = video(&mut p, "a", 4);
+        p.append_clip(v);
+        let second = p.append_clip(v).unwrap();
+        p.set_look(second, |look| look.enter.kind = MotionKind::Fade);
+        let plan = plan_still(&p, &Fake, 4 * SECOND + SECOND / 4, Path::new("/o.png")).unwrap();
+        let graph = graph(&plan);
+        assert_eq!(
+            graph.matches("overlay=").count(),
+            1,
+            "only the second clip is under 4.25s"
+        );
         assert!(!graph.contains("amix"), "a still has no sound");
         let seek = plan.args.iter().position(|a| a == "-ss").unwrap();
-        assert_eq!(plan.args[seek + 1], "1.000000", "5s is 1s into the second clip");
+        assert_eq!(plan.args[seek + 1], "0.250000", "a quarter second into the second clip");
+        assert!(
+            graph.contains("colorchannelmixer=aa=0.5000") && !graph.contains("fade="),
+            "the fade is half done: {graph}"
+        );
         assert!(plan.args.ends_with(&["/o.png".to_string()]));
-        assert!(plan_still(&p, |_| None, 9 * SECOND, Path::new("/o.png")).is_err());
+        assert!(plan_still(&p, &Fake, 9 * SECOND, Path::new("/o.png")).is_err());
     }
 
     #[test]
     fn empty_timeline_is_an_error() {
-        assert!(plan(&Project::default(), |_| None, Path::new("/o.mp4"), Quality::Draft).is_err());
+        assert!(plan(&Project::default(), &Fake, Path::new("/o.mp4"), Quality::Draft).is_err());
     }
 
     #[test]

@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::ctl::{Incoming, fail};
+use crate::titles;
 use serde_json::{Value, json};
 use splice_core::time::from_secs;
 use std::collections::VecDeque;
@@ -45,6 +46,65 @@ impl Agent {
 
 fn s(t: Time) -> f64 {
     (secs(t) * 1000.0).round() / 1000.0
+}
+
+/// `#rrggbb`, or `#rrggbbaa` when not opaque.
+fn hex(color: u32) -> String {
+    if color & 0xff == 0xff {
+        format!("#{:06x}", color >> 8)
+    } else {
+        format!("#{color:08x}")
+    }
+}
+
+/// A colour from `#rgb`, `#rrggbb`, `#rrggbbaa` or a few names: 0xRRGGBBAA.
+pub fn parse_color(text: &str) -> Option<u32> {
+    let named = match text.to_lowercase().as_str() {
+        "white" => Some(0xffffffff),
+        "black" => Some(0x000000ff),
+        "red" => Some(0xe5484dff),
+        "green" => Some(0x00ff00ff),
+        "blue" => Some(0x0047bbff),
+        "yellow" | "gold" => Some(0xf2c14eff),
+        "paper" => Some(0xf3eee4ff),
+        "ink" => Some(0x12151fff),
+        "vermilion" | "accent" => Some(0xef6a55ff),
+        "clear" | "transparent" => Some(0),
+        _ => None,
+    };
+    if named.is_some() {
+        return named;
+    }
+    let digits = text.trim_start_matches('#');
+    let value = u32::from_str_radix(digits, 16).ok()?;
+    match digits.len() {
+        3 => {
+            let (r, g, b) = ((value >> 8) & 0xf, (value >> 4) & 0xf, value & 0xf);
+            Some((r * 17) << 24 | (g * 17) << 16 | (b * 17) << 8 | 0xff)
+        }
+        6 => Some(value << 8 | 0xff),
+        8 => Some(value),
+        _ => None,
+    }
+}
+
+fn look_json(look: &splice_core::look::Look) -> Value {
+    json!({
+        "x": look.x,
+        "y": look.y,
+        "scale": look.scale,
+        "opacity": look.opacity,
+        "enter": { "kind": look.enter.kind.name(), "duration": s(look.enter.duration) },
+        "exit": { "kind": look.exit.kind.name(), "duration": s(look.exit.duration) },
+        "drift": look.drift,
+        "key": look.key.map(|k| json!({
+            "color": hex(k.color << 8 | 0xff),
+            "similarity": k.similarity,
+            "blend": k.blend,
+            "despill": k.despill,
+        })),
+        "mask": look.mask,
+    })
 }
 
 fn kind(kind: MediaKind) -> &'static str {
@@ -261,6 +321,126 @@ impl Editor {
                 });
                 self.edited()
             }
+            "text" | "color" => {
+                let generator = if cmd == "text" {
+                    let mut title = splice_core::model::Title {
+                        text: text("text").unwrap_or("Title").to_string(),
+                        ..Default::default()
+                    };
+                    if let Err(e) = self.apply_style(&mut title, request) {
+                        return Some(fail(e));
+                    }
+                    Generator::Text(title)
+                } else {
+                    match text("color").map(parse_color) {
+                        Some(Some(color)) => Generator::Color { color },
+                        _ => {
+                            return Some(fail(
+                                "`color` is #rrggbb, #rrggbbaa or a name (black, white, paper, ink…)",
+                            ));
+                        }
+                    }
+                };
+                let at = match self.time(request, "at") {
+                    Ok(t) => t.unwrap_or(self.player.position),
+                    Err(e) => return Some(fail(e)),
+                };
+                let duration = match self.time(request, "duration") {
+                    Ok(d) => d.unwrap_or(3 * SECOND),
+                    Err(e) => return Some(fail(e)),
+                };
+                let track = self.track(request).unwrap_or_else(|| {
+                    // Over whatever is there.
+                    self.doc
+                        .project
+                        .tracks
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, t)| t.clips.iter().any(|c| c.start < at + duration && c.end() > at))
+                        .map(|(i, _)| i + 1)
+                        .max()
+                        .unwrap_or(0)
+                });
+                let mut look = splice_core::look::Look::default();
+                if let Err(e) = apply_look(&mut look, request) {
+                    return Some(fail(e));
+                }
+                let id = self.edit(cx, |p| {
+                    let id = p.insert_generated(generator, track, at, duration);
+                    p.set_look(id, |l| *l = look);
+                    id
+                });
+                self.edited_with(json!({ "clip": self.clip_json(id) }))
+            }
+            "style" => {
+                let ids = match self.clips(request) {
+                    Ok(ids) => ids,
+                    Err(e) => return Some(fail(e)),
+                };
+                let mut titles = Vec::new();
+                for &id in &ids {
+                    match self.doc.project.clip(id).and_then(|c| c.generator.clone()) {
+                        Some(Generator::Text(mut title)) => {
+                            if let Some(words) = text("text") {
+                                title.text = words.to_string();
+                            }
+                            if let Err(e) = self.apply_style(&mut title, request) {
+                                return Some(fail(e));
+                            }
+                            titles.push((id, Generator::Text(title)));
+                        }
+                        Some(Generator::Color { .. }) => match text("color").map(parse_color) {
+                            Some(Some(color)) => titles.push((id, Generator::Color { color })),
+                            _ => return Some(fail("give a colour clip a new `color`")),
+                        },
+                        None => {
+                            return Some(fail(format!(
+                                "clip {} is media; `style` is for text and colour clips",
+                                id.0
+                            )));
+                        }
+                    }
+                }
+                self.edit(cx, |p| {
+                    for (id, generator) in titles {
+                        p.set_generator(id, |g| *g = generator);
+                    }
+                });
+                let clips: Vec<Value> = ids.iter().map(|id| self.clip_json(*id)).collect();
+                self.edited_with(json!({ "clips": clips }))
+            }
+            "look" => {
+                let ids = match self.clips(request) {
+                    Ok(ids) => ids,
+                    Err(e) => return Some(fail(e)),
+                };
+                let mut looks = Vec::new();
+                for &id in &ids {
+                    let Some(clip) = self.doc.project.clip(id) else {
+                        continue;
+                    };
+                    let mut look = clip.look.clone();
+                    if let Err(e) = apply_look(&mut look, request) {
+                        return Some(fail(e));
+                    }
+                    if look.key.is_some() && clip.generator.is_some() {
+                        return Some(fail("a green-screen key is for video and pictures, not text or colour"));
+                    }
+                    looks.push((id, look));
+                }
+                self.edit(cx, |p| {
+                    for (id, look) in looks {
+                        p.set_look(id, |l| *l = look);
+                    }
+                });
+                let clips: Vec<Value> = ids.iter().map(|id| self.clip_json(*id)).collect();
+                self.edited_with(json!({ "clips": clips }))
+            }
+            "fonts" => {
+                let query = text("query").unwrap_or("");
+                let fonts = Self::font_matches(&titles::families(), query);
+                json!({ "ok": true, "count": fonts.len(), "fonts": fonts })
+            }
             "canvas" => {
                 let mut settings = self.doc.project.settings;
                 if let Some(aspect) = text("aspect") {
@@ -360,13 +540,7 @@ impl Editor {
                     Ok(t) => t.unwrap_or(self.player.position),
                     Err(e) => return Some(fail(e)),
                 };
-                let library = &self.library;
-                let plan = export::plan_still(
-                    &self.doc.project,
-                    |m| library.path(&m.hash).map(Path::to_path_buf),
-                    at,
-                    &path,
-                );
+                let plan = export::plan_still(&self.doc.project, &self.resolver(), at, &path);
                 let plan = match plan {
                     Ok(plan) => plan,
                     Err(e) => return Some(fail(e)),
@@ -442,6 +616,48 @@ impl Editor {
         Some(answer)
     }
 
+    /// Text style fields from a request, onto `title`.
+    fn apply_style(&self, title: &mut splice_core::model::Title, request: &Value) -> Result<(), String> {
+        let text = |key: &str| request.get(key).and_then(Value::as_str);
+        let flag = |key: &str| request.get(key).and_then(Value::as_bool);
+        if let Some(font) = text("font") {
+            let families = titles::families();
+            match families.iter().find(|f| f.eq_ignore_ascii_case(font)) {
+                Some(found) => title.font = found.clone(),
+                None => {
+                    return Err(format!(
+                        "no font named `{font}` here; `splice ctl fonts --query {font}` searches"
+                    ));
+                }
+            }
+        }
+        if let Some(size) = request.get("size").and_then(Value::as_f64) {
+            // Pixels on the canvas, or a fraction of its height.
+            let h = self.doc.project.settings.height as f64;
+            title.size = if size > 1.0 { size / h } else { size }.clamp(0.005, 0.6) as f32;
+        }
+        if let Some(c) = text("color") {
+            title.color = parse_color(c).ok_or(format!("`color` {c} is not #rrggbb or a name"))?;
+        }
+        match text("box") {
+            Some("none") => title.background = None,
+            Some(c) => title.background = Some(parse_color(c).ok_or(format!("`box` {c} is not #rrggbbaa or a name"))?),
+            None => {}
+        }
+        if let Some(align) = text("align") {
+            title.align = match align {
+                "left" => splice_core::model::Align::Left,
+                "center" | "centre" => splice_core::model::Align::Center,
+                "right" => splice_core::model::Align::Right,
+                _ => return Err("`align` is left, center or right".into()),
+            };
+        }
+        title.bold = flag("bold").unwrap_or(title.bold);
+        title.italic = flag("italic").unwrap_or(title.italic);
+        title.shadow = flag("shadow").unwrap_or(title.shadow);
+        Ok(())
+    }
+
     fn agent_name(&self) -> Option<&str> {
         self.agent
             .working
@@ -506,19 +722,46 @@ impl Editor {
         let (Some(slot), Some(clip)) = (project.slot(id), project.clip(id)) else {
             return json!({ "id": id.0, "gone": true });
         };
-        let media = project.media(clip.media);
-        json!({
+        let kind = match &clip.generator {
+            Some(Generator::Text(_)) => "text",
+            Some(Generator::Color { .. }) => "color",
+            None => project.media(clip.media).map_or("missing", |m| kind(m.kind)),
+        };
+        let mut value = json!({
             "id": clip.id.0,
-            "media": clip.media.0,
-            "name": media.map(|m| m.name.as_str()),
-            "kind": media.map(|m| kind(m.kind)),
+            "name": project.clip_name(clip),
+            "kind": kind,
             "track": slot.track + 1,
             "start": s(clip.start),
             "end": s(clip.end()),
             "duration": s(clip.duration),
-            "source_in": s(clip.source_in),
-            "volume": clip.volume,
-        })
+        });
+        match &clip.generator {
+            None => {
+                value["media"] = json!(clip.media.0);
+                value["source_in"] = json!(s(clip.source_in));
+                value["volume"] = json!(clip.volume);
+            }
+            Some(Generator::Text(title)) => {
+                let h = project.settings.height as f32;
+                value["text"] = json!({
+                    "text": title.text,
+                    "font": title.font,
+                    "size": (title.size * h).round(),
+                    "bold": title.bold,
+                    "italic": title.italic,
+                    "color": hex(title.color),
+                    "align": title.align,
+                    "box": title.background.map(hex),
+                    "shadow": title.shadow,
+                });
+            }
+            Some(Generator::Color { color }) => value["color"] = json!(hex(*color)),
+        }
+        if clip.look != splice_core::look::Look::default() {
+            value["look"] = look_json(&clip.look);
+        }
+        value
     }
 
     fn ctl_status(&self) -> Value {
@@ -647,4 +890,75 @@ impl Editor {
             .map(|m| m.id)
             .ok_or(format!("no media matches {spec}; `splice ctl read` lists it"))
     }
+}
+
+/// Look fields from a request, onto `look`.
+fn apply_look(look: &mut splice_core::look::Look, request: &Value) -> Result<(), String> {
+    use splice_core::look::{Drift, Key, Mask, MotionKind, Shape};
+    let text = |key: &str| request.get(key).and_then(Value::as_str);
+    let number = |key: &str| request.get(key).and_then(Value::as_f64).map(|v| v as f32);
+    let flag = |key: &str| request.get(key).and_then(Value::as_bool);
+    look.x = number("x").unwrap_or(look.x);
+    look.y = number("y").unwrap_or(look.y);
+    look.scale = number("scale").map_or(look.scale, |v| v.clamp(0.01, 20.0));
+    look.opacity = number("opacity").map_or(look.opacity, |v| v.clamp(0.0, 1.0));
+    for (key, motion) in [("enter", &mut look.enter), ("exit", &mut look.exit)] {
+        if let Some(kind) = text(key) {
+            motion.kind = MotionKind::parse(kind).ok_or_else(|| {
+                let names: Vec<_> = MotionKind::ALL.iter().map(|k| k.name()).collect();
+                format!("`{key}` is one of {}", names.join(", "))
+            })?;
+        }
+        if let Some(d) = number(&format!("{key}_for")) {
+            motion.duration = from_secs(d.clamp(0.05, 10.0) as f64);
+        }
+    }
+    if let Some(drift) = text("drift") {
+        look.drift = match drift {
+            "none" => Drift::None,
+            "zoom-in" => Drift::ZoomIn,
+            "zoom-out" => Drift::ZoomOut,
+            _ => return Err("`drift` is none, zoom-in or zoom-out".into()),
+        };
+    }
+    match text("key") {
+        Some("none") => look.key = None,
+        Some(color) => {
+            let rgba = parse_color(color).ok_or(format!("`key` {color} is green, blue, #rrggbb or none"))?;
+            look.key = Some(Key {
+                color: rgba >> 8,
+                ..look.key.unwrap_or_default()
+            });
+        }
+        None => {}
+    }
+    if let Some(key) = &mut look.key {
+        key.similarity = number("similarity").map_or(key.similarity, |v| v.clamp(0.01, 0.6));
+        key.blend = number("blend").map_or(key.blend, |v| v.clamp(0.0, 0.5));
+        key.despill = flag("despill").unwrap_or(key.despill);
+    }
+    match text("mask") {
+        Some("none") => look.mask = None,
+        Some(shape) => {
+            let shape = match shape {
+                "ellipse" | "circle" => Shape::Ellipse,
+                "rect" | "box" => Shape::Rect,
+                _ => return Err("`mask` is ellipse, rect or none".into()),
+            };
+            look.mask = Some(Mask {
+                shape,
+                ..look.mask.unwrap_or_default()
+            });
+        }
+        None => {}
+    }
+    if let Some(mask) = &mut look.mask {
+        mask.x = number("mask_x").unwrap_or(mask.x);
+        mask.y = number("mask_y").unwrap_or(mask.y);
+        mask.width = number("mask_width").map_or(mask.width, |v| v.max(0.01));
+        mask.height = number("mask_height").map_or(mask.height, |v| v.max(0.01));
+        mask.feather = number("feather").map_or(mask.feather, |v| v.clamp(0.001, 1.0));
+        mask.invert = flag("invert").unwrap_or(mask.invert);
+    }
+    Ok(())
 }
