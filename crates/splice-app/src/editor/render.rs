@@ -283,6 +283,21 @@ impl Render for Editor {
                 cx.notify();
             }))
             .on_action(cx.listener(Self::add_text))
+            .on_action(cx.listener(|this, _: &ChooseFont, window, cx| {
+                if matches!(this.overlay, Overlay::Fonts { .. }) {
+                    return this.close_overlay(window, cx);
+                }
+                match this.inspected().filter(|id| {
+                    this.doc
+                        .project
+                        .clip(*id)
+                        .is_some_and(|c| matches!(c.generator, Some(Generator::Text(_))))
+                }) {
+                    Some(id) => this.open_fonts(id, window, cx),
+                    None => this.say("Select a title to choose its font"),
+                }
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &NewScore, window, cx| this.new_score(window, cx)))
             .on_action(cx.listener(|this, _: &NewScene, window, cx| this.new_scene(window, cx)))
             .on_action(cx.listener(|this, _: &ShowMedia, _, cx| this.show_shelf(Shelf::Media, cx)))
@@ -530,6 +545,22 @@ impl Editor {
                         .text_color(Theme::text())
                         .child(format!("Exporting {:.0}%", progress * 100.0)),
                 ),
+            None if self.doc.project.is_empty() => div()
+                .id("export")
+                .occlude()
+                .h(px(26.0))
+                .px(px(11.0))
+                .rounded(px(7.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .bg(Theme::surface0())
+                .text_color(Theme::overlay())
+                .text_size(px(12.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .tooltip(tip("Nothing to export yet", None))
+                .child(icon("export", Theme::overlay()).size(px(13.0)))
+                .child("Export"),
             None => div()
                 .id("export")
                 .occlude()
@@ -695,7 +726,6 @@ impl Editor {
     }
 
     fn render_bin(&mut self, width: f32, cx: &mut Context<Self>) -> impl IntoElement {
-        let fps = self.doc.project.settings.fps;
         self.card_width = card_width(width);
         let card = self.card_width;
         let items: Vec<AnyElement> = self
@@ -723,9 +753,10 @@ impl Editor {
                 };
                 let (kind_icon, badge) = match media.kind {
                     MediaKind::Image => ("image", None),
-                    MediaKind::Audio if media.recipe.is_some() => ("score", Some(timecode(media.duration, fps))),
-                    MediaKind::Audio => ("music", Some(timecode(media.duration, fps))),
-                    MediaKind::Video => ("film", Some(timecode(media.duration, fps))),
+                    MediaKind::Audio if media.recipe.is_some() => ("score", Some(clock(media.duration))),
+                    MediaKind::Audio => ("music", Some(clock(media.duration))),
+                    MediaKind::Video if media.recipe.is_some() => ("scene", Some(clock(media.duration))),
+                    MediaKind::Video => ("film", Some(clock(media.duration))),
                 };
                 div()
                     .id(("media", id.0 as usize))
@@ -773,13 +804,8 @@ impl Editor {
                             })
                             .when(media.kind == MediaKind::Audio, |d| {
                                 let made = media.recipe.is_some();
-                                d.bg(Theme::clip_audio()).child(
-                                    icon(
-                                        if made { "score" } else { "music" },
-                                        if made { Theme::accent() } else { Theme::wave() },
-                                    )
-                                    .size(px(20.0)),
-                                )
+                                d.bg(Theme::clip_audio())
+                                    .child(icon(if made { "score" } else { "music" }, Theme::wave()).size(px(20.0)))
                             })
                             .when(loading, |d| {
                                 d.child(
@@ -955,6 +981,14 @@ impl Editor {
                 |(n, _, _)| n.to_string(),
             );
 
+        // What to do first, given what there is to work with.
+        let hint = if project.media.is_empty() {
+            "Import with ⌘I, or drop files anywhere"
+        } else if self.layout.bin_open {
+            "Drag media onto the timeline, or double-click it"
+        } else {
+            "Show media (⌘1), then drag it onto the timeline"
+        };
         let roomy = f32::from(self.stage_bounds.get().size.width) > 560.0;
         let stage = self.render_stage(cx);
 
@@ -983,12 +1017,7 @@ impl Editor {
                                 .text_color(Theme::muted())
                                 .child("Nothing on the timeline yet"),
                         )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(Theme::overlay())
-                                .child("Drag media from the left, or double-click it"),
-                        ),
+                        .child(div().text_size(px(11.0)).text_color(Theme::overlay()).child(hint)),
                 )
             }))
             .child(
@@ -1034,15 +1063,28 @@ impl Editor {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .cursor_pointer()
-                                    .bg(Theme::text())
-                                    .shadow(shadow(0.4, 12.0, 3.0))
-                                    .hover(|s| s.bg(Theme::subtext()))
+                                    .map(|d| {
+                                        if duration > 0 {
+                                            d.cursor_pointer()
+                                                .bg(Theme::text())
+                                                .shadow(shadow(0.4, 12.0, 3.0))
+                                                .hover(|s| s.bg(Theme::subtext()))
+                                        } else {
+                                            d.bg(Theme::surface0())
+                                        }
+                                    })
                                     .tooltip(tip(if playing { "Pause" } else { "Play" }, Some("Space")))
                                     .child(
-                                        icon(if playing { "pause" } else { "play" }, Theme::ground())
-                                            .size(px(16.0))
-                                            .when(!playing, |i| i.ml(px(2.0))),
+                                        icon(
+                                            if playing { "pause" } else { "play" },
+                                            if duration > 0 {
+                                                Theme::ground()
+                                            } else {
+                                                Theme::surface2()
+                                            },
+                                        )
+                                        .size(px(16.0))
+                                        .when(!playing, |i| i.ml(px(2.0))),
                                     )
                                     .on_click(
                                         cx.listener(|this, _, window, cx| this.play_pause(&PlayPause, window, cx)),
@@ -1109,12 +1151,12 @@ impl Editor {
                     .items_center()
                     .gap(px(2.0))
                     .child(
-                        icon_button("undo", "undo", true)
+                        icon_button("undo", "undo", self.doc.can_undo())
                             .tooltip(tip("Undo", Some("⌘Z")))
                             .on_click(cx.listener(|t, _, w, cx| t.undo(&Undo, w, cx))),
                     )
                     .child(
-                        icon_button("redo", "redo", true)
+                        icon_button("redo", "redo", self.doc.can_redo())
                             .tooltip(tip("Redo", Some("⇧⌘Z")))
                             .on_click(cx.listener(|t, _, w, cx| t.redo(&Redo, w, cx))),
                     )
@@ -1245,8 +1287,24 @@ impl Editor {
         // Per-track controls, laid over the painted gutter so they can hover and click.
         let n = self.doc.project.tracks.len();
         let view = self.view;
-        let controls = self.doc.project.tracks.iter().enumerate().map(|(i, track)| {
+        let project = &self.doc.project;
+        let controls = project.tracks.iter().enumerate().map(|(i, track)| {
             let y = view.track_y(i, n) - timeline::RULER;
+            // Only the toggles this layer's clips can use; both while it is empty.
+            let (mut picture, mut sound) = (track.clips.is_empty(), track.clips.is_empty());
+            for clip in &track.clips {
+                match project.source(clip) {
+                    Some(splice_core::model::Source::Media(m)) => {
+                        picture |= m.kind != MediaKind::Audio;
+                        sound |= m.has_audio;
+                    }
+                    _ => picture = true,
+                }
+            }
+            // Hidden or muted stays in reach, so it can be undone.
+            picture |= track.hidden;
+            sound |= track.muted;
+            let spacer = || div().size(px(22.0)).flex_none();
             let toggle = |id: &'static str, on_icon: &'static str, off_icon: &'static str, off: bool| {
                 let group: SharedString = format!("{id}-{i}").into();
                 div()
@@ -1286,34 +1344,40 @@ impl Editor {
                         .text_color(Theme::surface2())
                         .child((i + 1).to_string()),
                 )
-                .child(
-                    toggle("hide", "eye", "eye-off", track.hidden)
-                        .tooltip(tip(
-                            if track.hidden {
-                                "Show this layer"
-                            } else {
-                                "Hide this layer"
-                            },
-                            None,
-                        ))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.edit(cx, |p| p.tracks[i].hidden = !p.tracks[i].hidden);
-                        })),
-                )
-                .child(
-                    toggle("mute", "volume", "volume-off", track.muted)
-                        .tooltip(tip(
-                            if track.muted {
-                                "Unmute this layer"
-                            } else {
-                                "Mute this layer"
-                            },
-                            None,
-                        ))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.edit(cx, |p| p.tracks[i].muted = !p.tracks[i].muted);
-                        })),
-                )
+                .when(!picture, |d| d.child(spacer()))
+                .when(picture, |d| {
+                    d.child(
+                        toggle("hide", "eye", "eye-off", track.hidden)
+                            .tooltip(tip(
+                                if track.hidden {
+                                    "Show this layer"
+                                } else {
+                                    "Hide this layer"
+                                },
+                                None,
+                            ))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.edit(cx, |p| p.tracks[i].hidden = !p.tracks[i].hidden);
+                            })),
+                    )
+                })
+                .when(!sound, |d| d.child(spacer()))
+                .when(sound, |d| {
+                    d.child(
+                        toggle("mute", "volume", "volume-off", track.muted)
+                            .tooltip(tip(
+                                if track.muted {
+                                    "Unmute this layer"
+                                } else {
+                                    "Mute this layer"
+                                },
+                                None,
+                            ))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.edit(cx, |p| p.tracks[i].muted = !p.tracks[i].muted);
+                            })),
+                    )
+                })
         });
 
         div()
@@ -1405,9 +1469,13 @@ impl Editor {
                     .child(
                         div()
                             .id("menu")
+                            .flex()
+                            .items_center()
+                            .gap(px(5.0))
                             .cursor_pointer()
                             .hover(|d| d.text_color(Theme::text()))
-                            .child("menu")
+                            .child("Commands")
+                            .child(div().font_family(MONO_FONT).text_size(px(10.0)).child("⌘/"))
                             .on_click(cx.listener(|t, _, w, cx| t.open_palette(&CommandMenu, w, cx))),
                     ),
             )
@@ -1430,13 +1498,18 @@ impl Editor {
                 .shadow(shadow(0.6, 40.0, 16.0))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         };
+        const ROWS_SHOWN: usize = 9;
         type Pick = fn(&mut Editor, usize, &mut Window, &mut Context<Editor>);
-        let rows = |items: Vec<(String, String, bool, &'static str)>, cx: &mut Context<Self>, on_pick: Pick| {
+        let scroll = self.overlay_scroll.clone();
+        let rows = |items: Vec<(String, String, bool, Option<&'static str>)>, cx: &mut Context<Self>, on_pick: Pick| {
             div()
                 .id("overlay-rows")
+                .flex_1()
+                .min_h_0()
                 .flex()
                 .flex_col()
                 .overflow_y_scroll()
+                .track_scroll(&scroll)
                 .px(px(6.0))
                 .pb(px(6.0))
                 .children(
@@ -1461,10 +1534,12 @@ impl Editor {
                                         .flex()
                                         .items_center()
                                         .gap(px(10.0))
-                                        .child(
-                                            icon(glyph, if active { Theme::accent() } else { Theme::overlay() })
-                                                .size(px(13.0)),
-                                        )
+                                        .when_some(glyph, |d, glyph| {
+                                            d.child(
+                                                icon(glyph, if active { Theme::accent() } else { Theme::overlay() })
+                                                    .size(px(13.0)),
+                                            )
+                                        })
                                         .child(
                                             div()
                                                 .text_size(px(12.5))
@@ -1492,6 +1567,7 @@ impl Editor {
         let footer = |hint: &'static str| {
             div()
                 .h(px(30.0))
+                .flex_none()
                 .px(px(14.0))
                 .flex()
                 .items_center()
@@ -1513,7 +1589,7 @@ impl Editor {
                 let items: Vec<_> = matches
                     .iter()
                     .enumerate()
-                    .map(|(i, (l, k, _))| (l.to_string(), k.to_string(), i == index, "command"))
+                    .map(|(i, (l, k, _))| (l.to_string(), k.to_string(), i == index, None))
                     .collect();
                 let none = items.is_empty();
                 let query = self.overlay_query();
@@ -1521,6 +1597,7 @@ impl Editor {
                     .child(
                         div()
                             .h(px(48.0))
+                            .flex_none()
                             .px(px(16.0))
                             .flex()
                             .items_center()
@@ -1540,7 +1617,7 @@ impl Editor {
                                     }),
                             ),
                     )
-                    .child(div().h(px(6.0)))
+                    .child(div().h(px(6.0)).flex_none())
                     .when(none, |d| {
                         d.child(
                             div()
@@ -1577,13 +1654,14 @@ impl Editor {
                 let query = query.clone();
                 let count = matches.len();
                 // Only the rows near the choice: there can be hundreds of fonts.
-                let first = index.saturating_sub(5);
+                // As many as fit the panel with its search and footer.
+                let first = index.saturating_sub(4);
                 let rows: Vec<AnyElement> =
                     matches
                         .into_iter()
                         .enumerate()
                         .skip(first)
-                        .take(11)
+                        .take(ROWS_SHOWN)
                         .map(|(i, font)| {
                             let active = i == index;
                             let chosen = font == current;
@@ -1619,6 +1697,7 @@ impl Editor {
                     .child(
                         div()
                             .h(px(48.0))
+                            .flex_none()
                             .px(px(16.0))
                             .flex()
                             .items_center()
@@ -1671,13 +1750,13 @@ impl Editor {
                 let matches = Self::instrument_matches(&query);
                 let count = matches.len();
                 let index = (*index).min(count.saturating_sub(1));
-                let first = index.saturating_sub(5);
+                let first = index.saturating_sub(4);
                 let rows: Vec<AnyElement> =
                     matches
                         .into_iter()
                         .enumerate()
                         .skip(first)
-                        .take(11)
+                        .take(ROWS_SHOWN)
                         .map(|(i, (choice, name))| {
                             let active = i == index;
                             let chosen = current == Some(choice);
@@ -1735,6 +1814,7 @@ impl Editor {
                     .child(
                         div()
                             .h(px(48.0))
+                            .flex_none()
                             .px(px(16.0))
                             .flex()
                             .items_center()
@@ -1775,10 +1855,11 @@ impl Editor {
                     Some(agent::Presence::Listening(n) | agent::Presence::Working(n)) => n.clone(),
                     None => "the assistant".into(),
                 };
+                let connected = presence.is_some();
                 let state = match presence {
                     Some(agent::Presence::Listening(_)) => "listening".to_string(),
                     Some(agent::Presence::Working(_)) => "busy — this will wait its turn".to_string(),
-                    None => "not connected — an assistant connects with `splice ctl wait`".to_string(),
+                    None => "not connected".to_string(),
                 };
                 let fps = self.doc.project.settings.fps;
                 let n = self.selection.len();
@@ -1798,6 +1879,7 @@ impl Editor {
                     .child(
                         div()
                             .h(px(48.0))
+                            .flex_none()
                             .px(px(16.0))
                             .flex()
                             .items_center()
@@ -1843,7 +1925,18 @@ impl Editor {
                                 }))
                             }),
                     )
-                    .child(div().px(px(16.0)).pb(px(12.0)).text_size(px(11.0)).text_color(Theme::overlay()).child(context))
+                    .child(
+                        div()
+                            .px(px(16.0))
+                            .pb(px(12.0))
+                            .text_size(px(11.0))
+                            .text_color(Theme::overlay())
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(context)
+                            .when(!connected, |d| d.child("An assistant connects by running splice ctl wait.")),
+                    )
                     .child(footer("⏎ send  ·  ⇧⏎ new line  ·  esc close"))
             }
             Overlay::Versions { list, index } => {
@@ -1857,13 +1950,14 @@ impl Editor {
                             VersionKind::Auto => ("Autosave", "layers"),
                         };
                         let label = v.label.clone().map_or(kind.to_string(), |l| format!("{kind} · {l}"));
-                        (label, ago(now, v.created), i == *index, glyph)
+                        (label, ago(now, v.created), i == *index, Some(glyph))
                     })
                     .collect();
                 panel()
                     .child(
                         div()
                             .h(px(48.0))
+                            .flex_none()
                             .px(px(16.0))
                             .flex()
                             .items_center()
@@ -1879,7 +1973,7 @@ impl Editor {
                                     .child("kept inside this project file"),
                             ),
                     )
-                    .child(div().h(px(6.0)))
+                    .child(div().h(px(6.0)).flex_none())
                     .child(rows(items, cx, |this, i, window, cx| {
                         if let Overlay::Versions { list, .. } = &this.overlay
                             && let Some(v) = list.get(i)
@@ -1919,6 +2013,12 @@ impl Editor {
             _ => String::new(),
         }
     }
+}
+
+/// A length as a clock reads it: `0:08`, `1:05`.
+fn clock(t: Time) -> String {
+    let s = secs(t).round() as u64;
+    format!("{}:{:02}", s / 60, s % 60)
 }
 
 pub(super) fn ago(now: SystemTime, then: SystemTime) -> String {

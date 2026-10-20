@@ -139,6 +139,18 @@ const COLORS: &[(&str, u32)] = &[
     ("Tint", 0x00000080),
 ];
 
+/// What a title or colour is called on the timeline: a colour by its shelf
+/// name when it has one ("Ink"), else as the model names it.
+pub(crate) fn generated_name(generator: &Generator) -> String {
+    match generator {
+        Generator::Color { color } => COLORS
+            .iter()
+            .find(|(_, c)| c == color)
+            .map_or_else(|| generator.name(), |(name, _)| name.to_string()),
+        _ => generator.name(),
+    }
+}
+
 /// Light and dark squares, for showing what is see-through.
 fn checkerboard() -> impl IntoElement {
     const SQUARE: f32 = 8.0;
@@ -217,19 +229,27 @@ impl Editor {
                     .into_iter()
                     .map(|preset| {
                         let t = &preset.title;
-                        let sample = t.text.lines().next().unwrap_or("").to_string();
+                        let mut sample = t.text.lines().next().unwrap_or("").to_string();
                         // As big as the style is, but never wider than the card: letters
                         // run about 0.6 of their size wide (more when bold or capitals),
                         // and a box adds padding.
-                        let room = self.card_width - if t.background.is_some() { 36.0 } else { 18.0 };
+                        let room = self.card_width - if t.background.is_some() { 44.0 } else { 20.0 };
                         let lower = sample.chars().any(|c| c.is_lowercase());
-                        let em = 0.6 + if t.bold { 0.08 } else { 0.0 } + if lower { 0.0 } else { 0.1 };
-                        let fits = room / (sample.chars().count().max(1) as f32 * em);
+                        let em = 0.62 + if t.bold { 0.1 } else { 0.0 } + if lower { 0.0 } else { 0.12 };
+                        let fits = |s: &str| room / (s.chars().count().max(1) as f32 * em);
+                        // Far too long for a narrow card (the estimate runs wide, so
+                        // well under the 9 px floor): its first word stands for it.
+                        if fits(&sample) < 6.0
+                            && let Some((first, _)) = sample.split_once(' ')
+                        {
+                            sample = first.to_string();
+                        }
+                        let fits = fits(&sample);
                         let size = (t.size * 2.65 * self.card_width)
                             .min(fits)
                             .clamp(9.0, self.card_width * 0.22);
                         let words = div()
-                            .max_w_full()
+                            .max_w(px(self.card_width - 14.0))
                             .truncate()
                             .font_family(SharedString::from(t.font.clone()))
                             .text_size(px(size))

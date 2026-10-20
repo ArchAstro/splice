@@ -152,6 +152,9 @@ impl Editor {
         let cmd = text("cmd").unwrap_or("");
         let answer = match cmd {
             "score" | "scene" | "open" => return self.ctl_made(cmd, request, reply, window, cx),
+            "ui" | "click" | "hover" | "drag" | "scroll" | "key" | "type" => {
+                return self.ctl_input(cmd, request, reply, window, cx);
+            }
             "status" => self.ctl_status(),
             "read" => self.ctl_read(),
             "versions" => {

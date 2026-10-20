@@ -79,7 +79,8 @@ struct Shown {
     echo: bool,
 }
 
-const PART_COLORS: [u32; 7] = [0xef6a55, 0xf2c14e, 0x86cfc0, 0x6c9ef8, 0xc792ea, 0xf39c6b, 0x9ccc65];
+/// No vermilion: in the roll that is the playhead's.
+const PART_COLORS: [u32; 7] = [0x6c9ef8, 0xf2c14e, 0x86cfc0, 0xc792ea, 0x9ccc65, 0x7fc8e8, 0xe59ac0];
 /// Grid the mouse snaps notes to, in beats.
 const SNAP: f64 = 0.25;
 const LANE_HEADER: f32 = 176.0;
@@ -271,7 +272,7 @@ impl Editor {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(icon(glyph, Theme::accent()).size(px(15.0))),
+                    .child(icon(glyph, Theme::subtext()).size(px(15.0))),
             )
             .child(
                 div()
@@ -451,6 +452,7 @@ impl Editor {
                                         format!("{bpm:.0}")
                                     }),
                             )
+                            .child(div().text_size(px(10.5)).text_color(Theme::overlay()).child("bpm"))
                             .child(faster),
                     )
                     .child(
@@ -1070,19 +1072,24 @@ impl Editor {
         let transparent = scene.transparent;
         let length = secs(scene.duration);
         let stage = self.render_stage(cx);
-        let lengths: Vec<AnyElement> = [3.0, 5.0, 8.0, 12.0]
+        // The presets, and the scene's own length when it is none of them.
+        let mut choices = vec![3.0, 5.0, 8.0, 12.0];
+        if !choices.iter().any(|s| (length - s).abs() < 0.01) {
+            choices.push(length);
+            choices.sort_by(f64::total_cmp);
+        }
+        let lengths: Vec<AnyElement> = choices
             .into_iter()
             .map(|s| {
                 let on = (length - s).abs() < 0.01;
-                self.chip(
-                    format!("scene-len-{s}"),
-                    &format!("{s:.0}s"),
-                    on,
-                    cx,
-                    move |this, cx| {
-                        this.change_scene(id, cx, |sc| sc.duration = from_secs(s));
-                    },
-                )
+                let label = if (s - s.round()).abs() < 0.05 {
+                    format!("{s:.0}s")
+                } else {
+                    format!("{s:.1}s")
+                };
+                self.chip(format!("scene-len-{s}"), &label, on, cx, move |this, cx| {
+                    this.change_scene(id, cx, |sc| sc.duration = from_secs(s));
+                })
                 .into_any_element()
             })
             .collect();

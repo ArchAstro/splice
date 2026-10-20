@@ -70,7 +70,7 @@ impl Field {
             Field::Scale => "Size",
             Field::Opacity => "Opacity",
             Field::Volume => "Volume",
-            Field::TextSize => "Size",
+            Field::TextSize => "Text size",
             Field::KeySimilarity => "Strength",
             Field::KeyBlend => "Softness",
             Field::MaskX => "Across",
@@ -521,6 +521,69 @@ impl Editor {
             .child(div().pb(px(2.0)).child(caps(title)))
     }
 
+    /// A section that folds away while unused: open when in use, or when
+    /// opened by hand. Closed, its header says what it is set to.
+    fn fold(
+        &self,
+        id: ClipId,
+        title: &'static str,
+        in_use: bool,
+        summary: String,
+        cx: &mut Context<Self>,
+    ) -> (gpui::Div, bool) {
+        let open = self.folds.get(&(id, title)).copied().unwrap_or(in_use);
+        let group: SharedString = format!("fold-{title}").into();
+        let header = div()
+            .id(SharedString::from(format!("fold-{title}")))
+            .group(group.clone())
+            .h(px(16.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(12.0))
+            .cursor_pointer()
+            .child(caps(title).flex_none())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(6.0))
+                    .when(!open, |d| {
+                        d.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(11.0))
+                                .text_color(if in_use { Theme::subtext() } else { Theme::overlay() })
+                                .child(summary),
+                        )
+                    })
+                    .child(
+                        icon(if open { "chevron" } else { "chevron-right" }, Theme::overlay())
+                            .size(px(12.0))
+                            .group_hover(group, |s| s.text_color(Theme::text())),
+                    ),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.folds.insert((id, title), !open);
+                cx.notify();
+            }));
+        let section = div()
+            .px(px(16.0))
+            .pt(px(14.0))
+            .pb(px(if open { 12.0 } else { 14.0 }))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .border_b_1()
+            .border_color(Theme::edge())
+            .child(div().when(open, |d| d.pb(px(2.0))).child(header));
+        (section, open)
+    }
+
     fn inspect_canvas(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let s = self.doc.project.settings;
         let chips: Vec<AnyElement> = ASPECTS
@@ -577,7 +640,10 @@ impl Editor {
             Some(Source::Generated(Generator::Color { .. })) => ("swatch", "Colour", true, false, false),
             None => ("film", "Missing", false, false, false),
         };
-        let name = project.clip_name(&clip);
+        let name = match &clip.generator {
+            Some(generator) => shelf::generated_name(generator),
+            None => project.clip_name(&clip),
+        };
         let detail = format!(
             "{kind} · {} long · starts at {}",
             seconds(clip.duration),
@@ -615,8 +681,8 @@ impl Editor {
                             .justify_center()
                             .gap(px(7.0))
                             .cursor_pointer()
-                            .bg(Theme::accent())
-                            .hover(|s| s.opacity(0.9))
+                            .bg(Theme::text())
+                            .hover(|s| s.bg(Theme::subtext()))
                             .child(icon(glyph, Theme::ground()).size(px(13.0)))
                             .child(
                                 div()
@@ -865,7 +931,7 @@ impl Editor {
                             .text_size(px(14.0))
                             .child(font),
                     )
-                    .child(div().text_size(px(10.0)).text_color(Theme::overlay()).child("change"))
+                    .child(icon("chevron", Theme::overlay()).size(px(12.0)))
                     .on_click(cx.listener(move |this, _, window, cx| this.open_fonts(id, window, cx))),
             )
             .child(self.slider(id, clip, Field::TextSize, cx))
@@ -1042,19 +1108,46 @@ impl Editor {
                 .text_color(Theme::overlay())
                 .child(text.to_string())
         };
-        self.section("Animate")
-            .child(label("In"))
-            .child(enter)
-            .when(look.enter.kind != MotionKind::None, |d| {
-                d.child(self.slider(id, clip, Field::EnterDuration, cx))
-            })
-            .child(label("Out"))
-            .child(exit)
-            .when(look.exit.kind != MotionKind::None, |d| {
-                d.child(self.slider(id, clip, Field::ExitDuration, cx))
-            })
-            .child(label("Across the clip"))
-            .child(grid(drifts))
+        // Closed, the header says what moves: "Fade in · Slide down out".
+        let said = |k: MotionKind| match k {
+            MotionKind::SlideUp => "Slide up",
+            MotionKind::SlideDown => "Slide down",
+            MotionKind::SlideLeft => "Slide left",
+            MotionKind::SlideRight => "Slide right",
+            k => names(k),
+        };
+        let mut used = Vec::new();
+        if look.enter.kind != MotionKind::None {
+            used.push(format!("{} in", said(look.enter.kind)));
+        }
+        if look.exit.kind != MotionKind::None {
+            used.push(format!("{} out", said(look.exit.kind)));
+        }
+        match look.drift {
+            Drift::ZoomIn => used.push("Slow zoom".into()),
+            Drift::ZoomOut => used.push("Slow zoom out".into()),
+            Drift::None => {}
+        }
+        let summary = if used.is_empty() {
+            "None".into()
+        } else {
+            used.join(" · ")
+        };
+        let (section, open) = self.fold(id, "Animate", !used.is_empty(), summary, cx);
+        section.when(open, |d| {
+            d.child(label("In"))
+                .child(enter)
+                .when(look.enter.kind != MotionKind::None, |d| {
+                    d.child(self.slider(id, clip, Field::EnterDuration, cx))
+                })
+                .child(label("Out"))
+                .child(exit)
+                .when(look.exit.kind != MotionKind::None, |d| {
+                    d.child(self.slider(id, clip, Field::ExitDuration, cx))
+                })
+                .child(label("Across the clip"))
+                .child(grid(drifts))
+        })
     }
 
     fn key_section(&mut self, id: ClipId, clip: &Clip, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1093,19 +1186,28 @@ impl Editor {
                     .into_any_element()
             })
             .collect();
-        self.section("Green screen")
-            .child(
-                self.toggle("key-on", "Remove the background colour", on, cx, move |this, cx| {
-                    this.change(id, cx, |c| {
-                        c.look.key = if c.look.key.is_some() {
-                            None
-                        } else {
-                            Some(Key::default())
-                        };
-                    });
-                }),
-            )
-            .when(on, |d| {
+        let summary = match key.map(|k| k.color) {
+            None => "Off",
+            Some(0x00ff00) => "Green",
+            Some(0x0047bb) => "Blue",
+            Some(_) => "On",
+        };
+        let (section, open) = self.fold(id, "Green screen", on, summary.into(), cx);
+        section
+            .when(open, |d| {
+                d.child(
+                    self.toggle("key-on", "Remove the background colour", on, cx, move |this, cx| {
+                        this.change(id, cx, |c| {
+                            c.look.key = if c.look.key.is_some() {
+                                None
+                            } else {
+                                Some(Key::default())
+                            };
+                        });
+                    }),
+                )
+            })
+            .when(open && on, |d| {
                 d.child(div().flex().gap(px(14.0)).children(colors))
                     .child(self.slider(id, clip, Field::KeySimilarity, cx))
                     .child(self.slider(id, clip, Field::KeyBlend, cx))
@@ -1146,14 +1248,22 @@ impl Editor {
             .into_any_element()
         })
         .collect();
-        self.section("Mask")
-            .child(
-                div()
-                    .flex()
-                    .gap(px(5.0))
-                    .children(shapes.into_iter().map(|c| div().flex_1().flex().flex_col().child(c))),
-            )
-            .when(mask.is_some(), |d| {
+        let summary = match mask.map(|m| m.shape) {
+            None => "Off",
+            Some(Shape::Ellipse) => "Circle",
+            Some(Shape::Rect) => "Box",
+        };
+        let (section, open) = self.fold(id, "Mask", mask.is_some(), summary.into(), cx);
+        section
+            .when(open, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .gap(px(5.0))
+                        .children(shapes.into_iter().map(|c| div().flex_1().flex().flex_col().child(c))),
+                )
+            })
+            .when(open && mask.is_some(), |d| {
                 d.child(self.slider(id, clip, Field::MaskWidth, cx))
                     .child(self.slider(id, clip, Field::MaskHeight, cx))
                     .child(self.slider(id, clip, Field::MaskX, cx))
@@ -1295,7 +1405,7 @@ impl Editor {
 
     // Fonts.
 
-    fn open_fonts(&mut self, clip: ClipId, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_fonts(&mut self, clip: ClipId, window: &mut Window, cx: &mut Context<Self>) {
         let current = match self.doc.project.clip(clip).and_then(|c| c.generator.as_ref()) {
             Some(Generator::Text(t)) => t.font.clone(),
             _ => return,

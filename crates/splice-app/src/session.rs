@@ -136,6 +136,14 @@ impl Document {
         changed
     }
 
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo()
+    }
+
     pub fn redo(&mut self) -> bool {
         let changed = self.history.redo(&mut self.project);
         if changed {

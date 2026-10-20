@@ -86,6 +86,16 @@ Scenes (animation and diagrams: layers of shapes, lines, paths and words that mo
                                  validate without changing anything: errors, warnings, an outline
   open --media M                 open a score or scene in Splice's own editor
 
+Operating the window (as a person would: for checking the interface)
+  ui                             window size and scale, mouse, stage, timeline and picture bounds
+  click X Y [--double] [--right] [--shift|--cmd|--alt|--ctrl]
+  hover X Y                      move the pointer there (tooltips show after a moment)
+  drag X1 Y1 X2 Y2 [--shift…]    press, move, release
+  scroll X Y [--dy N] [--dx N]   scroll the panel under the point (negative --dy scrolls down)
+  key KEYS...                    press keys: cmd-t, escape, shift-left, enter, space
+  type TEXT                      type characters into whatever has the keyboard
+  Positions are window points from the top left: a Retina screenshot's pixels halved (see `ui`).
+
 Playing and the window
   seek T | play | pause
   select [--clip C]                        select clips (none: deselect)
@@ -298,6 +308,20 @@ fn build(args: &[String]) -> Result<Value, String> {
             "--opaque" | "--transparent" => {
                 request.insert("transparent".into(), json!(arg == "--transparent"));
             }
+            "--shift" | "--cmd" | "--alt" | "--ctrl" | "--right" => {
+                request.insert(arg[2..].into(), json!(true));
+            }
+            "--double" => {
+                request.insert("count".into(), json!(2));
+            }
+            "--count" => {
+                let n: u64 = next(arg)?.parse().map_err(|_| "--count expects a number".to_string())?;
+                request.insert("count".into(), json!(n));
+            }
+            "--dx" | "--dy" => {
+                let v: f64 = next(arg)?.parse().map_err(|_| format!("{arg} expects points"))?;
+                request.insert(arg[2..].into(), json!(v));
+            }
             "--ripple" | "--wait" => {
                 request.insert(arg[2..].into(), json!(true));
             }
@@ -383,6 +407,41 @@ fn build(args: &[String]) -> Result<Value, String> {
             command.as_str()
         }
         "open" => "open",
+        "ui" => "ui",
+        "click" | "hover" | "drag" | "scroll" => {
+            let numbers: Vec<f64> = words
+                .iter()
+                .map(|w| {
+                    w.parse::<f64>()
+                        .map_err(|_| format!("{command} expects positions in window points"))
+                })
+                .collect::<Result<_, _>>()?;
+            let names: &[&str] = if command == "drag" {
+                &["x", "y", "x2", "y2"]
+            } else {
+                &["x", "y"]
+            };
+            if numbers.len() != names.len() {
+                return Err(format!("{command} expects {} numbers", names.len()));
+            }
+            for (name, n) in names.iter().zip(numbers) {
+                request.insert((*name).into(), json!(n));
+            }
+            command.as_str()
+        }
+        "key" => {
+            if words.is_empty() {
+                return Err("key expects keys, e.g. cmd-t escape".into());
+            }
+            request.insert("keys".into(), json!(words));
+            "key"
+        }
+        "type" => {
+            if !request.contains_key("text") {
+                request.insert("text".into(), json!(words.join(" ")));
+            }
+            "type"
+        }
         "call" => return serde_json::from_str(&value("-")?).map_err(|e| format!("stdin is not JSON: {e}")),
         other => return Err(format!("unknown command `{other}`")),
     };

@@ -26,3 +26,9 @@ sha2 = "0.10"
 blake3 = "1"
 tiny-skia = "0.11"
 svgtypes = "0.15"
+objc = "0.2"
+raw-window-handle = "0.6"
+
+[lints.rust]
+# The objc crate's macros test `feature = "cargo-clippy"`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }

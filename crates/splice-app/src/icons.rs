@@ -88,6 +88,7 @@ fn icon(name: &str) -> Option<&'static str> {
         "close" => r#"<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>"#,
         "minus" => r#"<path d="M5 12h14"/>"#,
         "chevron" => r#"<path d="m7 9.5 5 5 5-5"/>"#,
+        "chevron-right" => r#"<path d="m9.5 7 5 5-5 5"/>"#,
         "text" => r#"<path d="M5 6.5V5h14v1.5"/><path d="M12 5v14"/><path d="M9 19h6"/>"#,
         "swatch" => {
             r#"<circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17" /><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="black"/>"#

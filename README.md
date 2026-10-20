@@ -130,6 +130,7 @@ with `make install-skill`) teaches Claude Code to use it.
 | `splice ctl open --media M` | opens a score or scene in its editor |
 | `splice ctl seek`, `play`, `pause`, `select`, `command` | the playhead, selection and any menu command |
 | `splice ctl save`, `versions`, `export FILE [--wait]` | versions and export |
+| `splice ctl ui`, `click`, `hover`, `drag`, `scroll`, `key`, `type` | operate the window as a person would, for checking the interface |
 | `splice ctl wait --name Claude` | connects an assistant and waits for your message |
 | `splice ctl say --text T` | shows a line in the status bar |
 

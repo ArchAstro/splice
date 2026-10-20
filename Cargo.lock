@@ -5376,6 +5376,8 @@ dependencies = [
  "futures",
  "gpui",
  "image",
+ "objc",
+ "raw-window-handle",
  "rustysynth",
  "serde",
  "serde_json",

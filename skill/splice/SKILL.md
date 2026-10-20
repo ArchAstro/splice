@@ -209,6 +209,26 @@ splice ctl export ~/Movies/cut.mp4 --wait          # --draft (fast), --high
 
 Export without `--wait` returns at once; `status` shows its `progress`.
 
+### Operating the window
+
+To check the interface itself, act as a person would. These go to Splice's
+own window (no system permissions needed):
+
+```sh
+splice ctl ui                      # window size and scale, stage/timeline bounds, picture boxes
+splice ctl click 160 52            # --double, --right, --shift/--cmd/--alt/--ctrl
+splice ctl hover 750 20            # tooltips appear after a moment
+splice ctl drag 300 1100 420 1100  # press, move, release
+splice ctl scroll 450 900 --dy -120
+splice ctl key cmd-/  escape       # any keys, in order
+splice ctl type "Opening night"    # into whatever has the keyboard
+```
+
+Positions are window points from the top left: a Retina screenshot's pixels
+divided by the `scale` that `ui` reports. Prefer the editing commands above
+for changing the project; use these to see and test how the interface
+behaves.
+
 ## 8. Taking requests from inside Splice
 
 The user can message you from the editor (Cmd-Shift-A, or the speech-bubble

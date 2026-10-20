@@ -288,7 +288,7 @@ pub fn paint(b: Bounds<Pixels>, frame: Frame, window: &mut Window, cx: &mut App)
                 let (art, fill) = match &clip.generator {
                     Some(generator) => {
                         let art = ClipArt {
-                            name: generator.name().into(),
+                            name: crate::editor::generated_name(generator).into(),
                             ..ClipArt::default()
                         };
                         let fill = match generator {
@@ -320,6 +320,8 @@ pub fn paint(b: Bounds<Pixels>, frame: Frame, window: &mut Window, cx: &mut App)
                         art.name.to_string()
                     };
                     let label_x = x0.max(GUTTER) + 6.0;
+                    // Under the ruler, the name stays on the part still in view.
+                    let y = y.max(RULER).min(y + ROW - 21.0);
                     if x1 - label_x > 24.0 {
                         let chars = (((x1 - label_x - 8.0) / 6.2) as usize).max(1);
                         let shown: String = if label.chars().count() > chars {
@@ -360,6 +362,19 @@ pub fn paint(b: Bounds<Pixels>, frame: Frame, window: &mut Window, cx: &mut App)
                 }
             }
         }
+        // Nothing yet: say where it goes.
+        if frame.ghost.is_none() && project.tracks.iter().all(|t| t.clips.is_empty()) {
+            let y = view.track_y(0, n);
+            text(
+                window,
+                cx,
+                "Drop media here",
+                at(GUTTER + 14.0, y + ROW / 2.0 - 7.0),
+                11.0,
+                Theme::overlay(),
+                ui.clone(),
+            );
+        }
         if let Some(ghost) = frame.ghost {
             let gx = view.x(ghost.start);
             let gy = view.track_y(ghost.track.min(n), n);
@@ -370,6 +385,19 @@ pub fn paint(b: Bounds<Pixels>, frame: Frame, window: &mut Window, cx: &mut App)
         if let Some(t) = frame.snap {
             let x = view.x(t);
             rect(window, area(x - 0.5, RULER, 1.0, h - RULER), Theme::subtext(), 0.0);
+        }
+        // More layers than fit: a thumb on the right edge says so, and where you are.
+        let content = view.content_height(n);
+        if content > h + 1.0 {
+            let track = h - RULER - 8.0;
+            let thumb = (track * (h - RULER) / (content - RULER)).max(24.0);
+            let along = (view.scroll_y / (content - h)).clamp(0.0, 1.0);
+            rect(
+                window,
+                area(w - 6.0, RULER + 4.0 + along * (track - thumb), 3.0, thumb),
+                Theme::surface2(),
+                1.5,
+            );
         }
     });
 

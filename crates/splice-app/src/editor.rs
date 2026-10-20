@@ -30,6 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 mod agent;
+mod input;
 mod inspector;
 mod made;
 mod render;
@@ -37,6 +38,8 @@ mod shelf;
 mod stage;
 mod syntax;
 mod workbench;
+
+pub(crate) use shelf::generated_name;
 
 const AUTOSAVE_EVERY: Duration = Duration::from_millis(1500);
 
@@ -156,6 +159,8 @@ pub struct Editor {
     /// Imports, unpacks and embeds still running.
     working: usize,
     overlay: Overlay,
+    /// The command menu's or versions' list, kept scrolled to the chosen row.
+    overlay_scroll: gpui::ScrollHandle,
     title: String,
     /// Keep the whole movie in view until the person zooms or scrolls.
     auto_fit: bool,
@@ -177,6 +182,8 @@ pub struct Editor {
     /// Centre lines shown while a picture snaps to them.
     guides: (bool, bool),
     slider_bounds: Rc<std::cell::RefCell<HashMap<inspector::Field, Bounds<Pixels>>>>,
+    /// Inspector sections opened or closed by hand, per clip.
+    folds: HashMap<(ClipId, &'static str), bool>,
     /// A title's words being typed in the inspector.
     title_edit: Option<inspector::TitleEdit>,
     text_focus: FocusHandle,
@@ -286,6 +293,7 @@ impl Editor {
             export: None,
             working: 0,
             overlay: Overlay::None,
+            overlay_scroll: gpui::ScrollHandle::new(),
             title: String::new(),
             auto_fit: true,
             layout: Layout::load(),
@@ -298,6 +306,7 @@ impl Editor {
             grab: None,
             guides: (false, false),
             slider_bounds: Rc::default(),
+            folds: HashMap::new(),
             title_edit: None,
             text_focus: cx.focus_handle(),
             shelf: Shelf::Media,
@@ -1150,12 +1159,18 @@ impl Editor {
         cx.notify();
     }
 
-    fn versions(&mut self, _: &Versions, _: &mut Window, cx: &mut Context<Self>) {
+    fn versions(&mut self, _: &Versions, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.overlay, Overlay::Versions { .. }) {
+            return self.close_overlay(window, cx);
+        }
         let _ = self.doc.autosave();
         self.overlay = Overlay::Versions {
             list: self.doc.versions(),
             index: 0,
         };
+        self.overlay_scroll = gpui::ScrollHandle::new();
+        // Its keys: arrows, return, escape.
+        window.focus(&self.palette_focus);
         cx.notify();
     }
 
@@ -1317,6 +1332,7 @@ impl Editor {
             query: String::new(),
             index: 0,
         };
+        self.overlay_scroll = gpui::ScrollHandle::new();
         window.focus(&self.palette_focus);
         cx.notify();
     }
@@ -1338,10 +1354,24 @@ impl Editor {
 
     fn palette_matches(query: &str) -> Vec<(&'static str, &'static str, Box<dyn gpui::Action>)> {
         let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
-        commands()
+        let typed = words.join(" ");
+        let mut found: Vec<_> = commands()
             .into_iter()
             .filter(|(label, _, _)| words.iter().all(|w| label.to_lowercase().contains(w)))
-            .collect()
+            .collect();
+        // What was typed exactly first, then what starts with it, so
+        // "show media" is Show media rather than Show / hide media.
+        found.sort_by_key(|(label, _, _)| {
+            let label = label.to_lowercase();
+            if label == typed {
+                0
+            } else if label.starts_with(&typed) {
+                1
+            } else {
+                2
+            }
+        });
+        found
     }
 
     fn overlay_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1353,7 +1383,7 @@ impl Editor {
             Overlay::Palette { query, index } => match key {
                 "escape" => return self.close_overlay(window, cx),
                 "up" => *index = index.saturating_sub(1),
-                "down" => *index += 1,
+                "down" => *index = (*index + 1).min(Self::palette_matches(query).len().saturating_sub(1)),
                 "backspace" => {
                     query.pop();
                     *index = 0;
@@ -1467,7 +1497,24 @@ impl Editor {
                 _ => {}
             },
         }
+        if let ("up" | "down", Overlay::Palette { index, .. } | Overlay::Versions { index, .. }) = (key, &self.overlay)
+        {
+            self.overlay_scroll.scroll_to_item(*index);
+        }
         cx.stop_propagation();
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_commands_come_first() {
+        let first = |q: &str| Editor::palette_matches(q).first().map(|(label, _, _)| *label);
+        assert_eq!(first("show media"), Some("Show media"));
+        assert_eq!(first("versions"), Some("Versions"));
+        assert_eq!(first("new score"), Some("New score (music to compose)"));
     }
 }

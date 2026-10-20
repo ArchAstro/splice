@@ -10,6 +10,7 @@ mod icons;
 mod library;
 mod music;
 mod player;
+mod pointer;
 mod scenes;
 mod session;
 mod theme;
