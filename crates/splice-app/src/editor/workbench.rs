@@ -84,6 +84,37 @@ const PART_COLORS: [u32; 7] = [0x6c9ef8, 0xf2c14e, 0x86cfc0, 0xc792ea, 0x9ccc65,
 /// Grid the mouse snaps notes to, in beats.
 const SNAP: f64 = 0.25;
 const LANE_HEADER: f32 = 176.0;
+/// The keyboard down the side of each roll.
+const KEYS: f32 = 42.0;
+/// A lane's margin and border, either side.
+const LANE_INSET: f32 = 11.0;
+
+fn is_black(key: u8) -> bool {
+    matches!(key % 12, 1 | 3 | 6 | 8 | 10)
+}
+
+/// Short names for the drum kit's keys, for the keyboard of a drum lane.
+fn drum_name(key: u8) -> Option<&'static str> {
+    Some(match key {
+        35 | 36 => "kick",
+        37 => "stick",
+        38 | 40 => "snare",
+        39 => "clap",
+        41 | 43 => "floor tom",
+        42 => "hat",
+        44 => "pedal hat",
+        45 | 47 => "low tom",
+        46 => "open hat",
+        48 | 50 => "high tom",
+        49 | 57 => "crash",
+        51 | 59 => "ride",
+        53 => "bell",
+        54 => "tamb",
+        55 => "splash",
+        56 => "cowbell",
+        _ => return None,
+    })
+}
 
 fn shown(part: &splice_core::score::Part) -> Vec<Shown> {
     let mut out = Vec::new();
@@ -108,6 +139,12 @@ fn shown(part: &splice_core::score::Part) -> Vec<Shown> {
         }
     }
     out
+}
+
+/// `1.5` → `1.5`, `2.0` → `2`.
+fn trim(n: f64) -> String {
+    let text = format!("{n:.2}");
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 fn snap(beat: f64) -> f64 {
@@ -398,7 +435,7 @@ impl Editor {
                     low = low.saturating_sub(pad);
                     high = (high + pad).min(127);
                 }
-                let height = ((high - low + 1) as f32 * 7.0).clamp(84.0, 230.0);
+                let height = ((high - low + 1) as f32 * 9.0).clamp(96.0, 270.0);
                 let sel: Vec<(usize, usize)> = selected.iter().filter(|s| s.0 == i).map(|s| (s.1, s.2)).collect();
                 self.lane(
                     id,
@@ -417,6 +454,87 @@ impl Editor {
                 )
             })
             .collect();
+
+        // What the selected note is, in words.
+        let readout = selected.first().and_then(|&(p, ph, n)| {
+            let part = score.parts.get(p)?;
+            let phrase = part.phrases.get(ph)?;
+            let note = phrase.notes.get(n)?;
+            let key = (pitch_to_midi(&note.pitch).ok()? as i32 + phrase.transpose.unwrap_or(0)).clamp(0, 127) as u8;
+            let drums = part.drums || splice_core::score::is_drums(&part.instrument);
+            let name = if drums {
+                drum_name(key).map_or_else(|| format!("drum {key}"), str::to_string)
+            } else {
+                midi_name(key)
+            };
+            let tick = ((phrase.at.unwrap_or(0.0) + note.at) * PPQ as f64).round() as i64;
+            let (bar, start) = bar_ticks
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, t)| **t <= tick)
+                .map_or((1, 0), |(i, t)| (i + 1, *t));
+            let beat = (tick - start) as f64 / PPQ as f64 + 1.0;
+            let length = if (note.duration - 1.0).abs() < 1e-9 {
+                "1 beat".to_string()
+            } else {
+                format!("{} beats", trim(note.duration))
+            };
+            let more = if selected.len() > 1 {
+                format!("  + {} more", selected.len() - 1)
+            } else {
+                String::new()
+            };
+            Some(format!(
+                "{name} · bar {bar}, beat {} · {length} · vel {:.0}{more}",
+                trim(beat),
+                note.velocity.unwrap_or(80.0)
+            ))
+        });
+        // Bar numbers over the rolls, thinned out when bars are narrow.
+        let roll_width = rolls
+            .borrow()
+            .values()
+            .next()
+            .map_or(500.0, |r| f32::from(r.bounds.size.width));
+        let bar_beats: Vec<f64> = bar_ticks
+            .iter()
+            .map(|t| *t as f64 / PPQ as f64)
+            .filter(|b| *b < beats)
+            .collect();
+        let narrowest = bar_beats
+            .windows(2)
+            .map(|w| (w[1] - w[0]) as f32 * roll_width / beats as f32)
+            .fold(f32::MAX, f32::min);
+        let every = if narrowest == f32::MAX {
+            1
+        } else {
+            (24.0 / narrowest).ceil().max(1.0) as usize
+        };
+        let numbers: Vec<AnyElement> = bar_beats
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % every == 0)
+            .map(|(i, b)| {
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(relative((*b / beats) as f32))
+                    .pl(px(3.0))
+                    .font_family(MONO_FONT)
+                    .text_size(px(10.0))
+                    .text_color(Theme::overlay())
+                    .child((i + 1).to_string())
+                    .into_any_element()
+            })
+            .collect();
+        let ruler = div()
+            .h(px(18.0))
+            .flex_none()
+            .flex()
+            .child(div().w(px(LANE_INSET + LANE_HEADER + KEYS)).flex_none())
+            .child(div().flex_1().min_w_0().relative().children(numbers))
+            .child(div().w(px(LANE_INSET)).flex_none());
 
         let parts = score.parts.len();
         div()
@@ -473,7 +591,19 @@ impl Editor {
                                 .child(bar_ticks.len().saturating_sub(1).max(1).to_string()),
                         ),
                     )
-                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(11.5))
+                            .text_color(if readout.is_some() {
+                                Theme::text()
+                            } else {
+                                Theme::overlay()
+                            })
+                            .child(readout.unwrap_or_else(|| "Click a note to see what it is".into())),
+                    )
                     .child(
                         div()
                             .id("add-part")
@@ -511,13 +641,14 @@ impl Editor {
                             })),
                     ),
             )
+            .child(div().pt(px(6.0)).child(ruler))
             .child(
                 div()
                     .id("score-lanes")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .py(px(8.0))
+                    .pb(px(8.0))
                     .flex()
                     .flex_col()
                     .gap(px(6.0))
@@ -589,6 +720,42 @@ impl Editor {
                 .child(label)
         };
         let bars: Vec<f64> = bars.iter().map(|t| *t as f64 / PPQ as f64).collect();
+        let used: Vec<u8> = notes.iter().map(|n| n.key).collect();
+        // Names on the notes that have room for them (judged from the last
+        // paint), placed as fractions of the roll so they sit on their note.
+        let span = (range.1 - range.0 + 1) as f64;
+        let last = rolls.borrow().get(&index).copied();
+        let labels: Vec<AnyElement> = last
+            .filter(|r| r.key_px() >= 8.5)
+            .map(|r| {
+                notes
+                    .iter()
+                    .filter(|n| !n.echo && n.length as f32 * r.beat_px() >= if drums { 40.0 } else { 26.0 })
+                    .map(|n| {
+                        let name = if drums {
+                            drum_name(n.key).unwrap_or("").to_string()
+                        } else {
+                            midi_name(n.key)
+                        };
+                        div()
+                            .absolute()
+                            .left(relative((n.beat / beats) as f32))
+                            .top(relative(((range.1 - n.key) as f64 / span) as f32))
+                            .h(relative((1.0 / span) as f32))
+                            .pl(px(3.0))
+                            .flex()
+                            .items_center()
+                            .font_family(MONO_FONT)
+                            .text_size(px(8.0))
+                            .line_height(px(9.0))
+                            .text_color(gpui::rgba(0x12151fd9))
+                            .whitespace_nowrap()
+                            .child(name)
+                            .into_any_element()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let draw_rolls = rolls.clone();
         let roll = canvas(
             |_, _, _| {},
@@ -600,13 +767,24 @@ impl Editor {
                     beats,
                 };
                 draw_rolls.borrow_mut().insert(index, roll);
-                // Ground, octave bands, beat and bar lines.
+                // Ground, a darker row for each black key, a line under each C,
+                // then beat and bar lines.
                 window.paint_quad(gpui::fill(bounds, Theme::crust()));
+                let row = px(roll.key_px());
                 for key in range.0..=range.1 {
-                    if key % 12 == 0 {
-                        let y = roll.y(key) + px(roll.key_px());
+                    let y = roll.y(key);
+                    if !drums && is_black(key) {
                         window.paint_quad(gpui::fill(
-                            Bounds::new(point(bounds.left(), y - px(0.5)), size(bounds.size.width, px(1.0))),
+                            Bounds::new(point(bounds.left(), y), size(bounds.size.width, row)),
+                            gpui::rgba(0x0000002e),
+                        ));
+                    }
+                    if drums || key % 12 == 0 {
+                        window.paint_quad(gpui::fill(
+                            Bounds::new(
+                                point(bounds.left(), y + row - px(0.5)),
+                                size(bounds.size.width, px(1.0)),
+                            ),
                             Theme::lane(),
                         ));
                     }
@@ -655,6 +833,47 @@ impl Editor {
             },
         )
         .size_full();
+
+        // The keyboard: a row per key, Cs named; a drum lane names its drums.
+        let rows = (range.1 - range.0 + 1) as usize;
+        let keyboard = div()
+            .w(px(KEYS))
+            .flex_none()
+            .h_full()
+            .flex()
+            .flex_col()
+            .border_r_1()
+            .border_color(Theme::edge())
+            .children((range.0..=range.1).rev().map(|key| {
+                let label = if drums {
+                    drum_name(key).filter(|_| used.contains(&key)).map(str::to_string)
+                } else {
+                    (key % 12 == 0).then(|| midi_name(key))
+                };
+                let black = !drums && is_black(key);
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .pr(px(4.0))
+                    .overflow_hidden()
+                    .bg(if black { Theme::ground() } else { Theme::surface0() })
+                    .when(key % 12 == 0 || drums, |d| d.border_b_1().border_color(Theme::edge()))
+                    .when_some(label, |d, label| {
+                        d.child(
+                            div()
+                                .font_family(MONO_FONT)
+                                .text_size(px(if drums { 8.0 } else { 9.0 }))
+                                .line_height(px(10.0))
+                                .text_color(Theme::subtext())
+                                .whitespace_nowrap()
+                                .child(label),
+                        )
+                    })
+            }));
+        let _ = rows;
 
         div()
             .id(("lane", index))
@@ -721,7 +940,6 @@ impl Editor {
                             .cursor_pointer()
                             .bg(Theme::crust())
                             .hover(|s| s.bg(Theme::surface0()))
-                            .tooltip(tip("Choose the instrument", None))
                             .child(
                                 div()
                                     .min_w_0()
@@ -736,6 +954,7 @@ impl Editor {
                             ),
                     ),
             )
+            .child(keyboard)
             .child(
                 div()
                     .id(("roll", index))
@@ -745,6 +964,7 @@ impl Editor {
                     .relative()
                     .cursor_crosshair()
                     .child(roll)
+                    .children(labels)
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, e: &MouseDownEvent, window, cx| this.roll_down(index, e, window, cx)),

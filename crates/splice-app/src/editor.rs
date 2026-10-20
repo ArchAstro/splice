@@ -783,6 +783,18 @@ impl Editor {
                     self.selection = vec![id];
                     return self.open_workbench(media, window, cx);
                 }
+                // A title, as on the stage: double-click to type.
+                if event.click_count >= 2
+                    && self
+                        .doc
+                        .project
+                        .clip(id)
+                        .is_some_and(|c| matches!(c.generator, Some(Generator::Text(_))))
+                {
+                    self.begin_title_edit(id, window, cx);
+                    window.prevent_default();
+                    return cx.notify();
+                }
                 if shift {
                     if let Some(i) = self.selection.iter().position(|s| *s == id) {
                         self.selection.remove(i);

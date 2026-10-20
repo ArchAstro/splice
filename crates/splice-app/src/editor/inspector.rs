@@ -924,7 +924,6 @@ impl Editor {
                     .justify_between()
                     .cursor_pointer()
                     .hover(|s| s.bg(Theme::lane()))
-                    .tooltip(tip("Choose a font", None))
                     .child(
                         div()
                             .font_family(SharedString::from(font.clone()))

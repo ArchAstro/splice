@@ -4,7 +4,7 @@
 use super::*;
 use gpui::{Hsla, Stateful};
 use splice_core::look::Pose;
-use splice_core::model::Source;
+use splice_core::model::{Recipe, Source};
 
 /// Something held with the mouse until it is let go. Changes land in the
 /// project live and become one undo step on release.
@@ -211,52 +211,55 @@ impl Editor {
         let outline_from = placed.clone();
         let overlay = canvas(
             |_, _, _| {},
-            move |_, _, window, _| {
+            move |bounds, _, window, _| {
                 let stage = cell.get();
-                let accent: Hsla = Theme::accent().into();
-                if guides.0 {
-                    let x = stage.center().x;
-                    window.paint_quad(gpui::fill(
-                        Bounds::new(point(x - px(0.5), stage.top()), size(px(1.0), stage.size.height)),
-                        accent,
-                    ));
-                }
-                if guides.1 {
-                    let y = stage.center().y;
-                    window.paint_quad(gpui::fill(
-                        Bounds::new(point(stage.left(), y - px(0.5)), size(stage.size.width, px(1.0))),
-                        accent,
-                    ));
-                }
-                let Some(rect) = selected.and_then(|id| {
-                    outline_from
-                        .borrow()
-                        .iter()
-                        .rev()
-                        .find(|(c, _, _)| *c == id)
-                        .map(|(_, r, _)| *r)
-                }) else {
-                    return;
-                };
-                window.paint_quad(quad(
-                    rect,
-                    Corners::default(),
-                    transparent_black(),
-                    px(1.5),
-                    accent,
-                    Default::default(),
-                ));
-                for corner in corners(rect) {
-                    let handle = Bounds::centered_at(corner, size(px(9.0), px(9.0)));
+                // A picture grown past the canvas keeps its outline inside the viewer.
+                window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+                    let accent: Hsla = Theme::accent().into();
+                    if guides.0 {
+                        let x = stage.center().x;
+                        window.paint_quad(gpui::fill(
+                            Bounds::new(point(x - px(0.5), stage.top()), size(px(1.0), stage.size.height)),
+                            accent,
+                        ));
+                    }
+                    if guides.1 {
+                        let y = stage.center().y;
+                        window.paint_quad(gpui::fill(
+                            Bounds::new(point(stage.left(), y - px(0.5)), size(stage.size.width, px(1.0))),
+                            accent,
+                        ));
+                    }
+                    let Some(rect) = selected.and_then(|id| {
+                        outline_from
+                            .borrow()
+                            .iter()
+                            .rev()
+                            .find(|(c, _, _)| *c == id)
+                            .map(|(_, r, _)| *r)
+                    }) else {
+                        return;
+                    };
                     window.paint_quad(quad(
-                        handle,
-                        Corners::all(px(2.0)),
-                        Hsla::from(Theme::text()),
+                        rect,
+                        Corners::default(),
+                        transparent_black(),
                         px(1.5),
                         accent,
                         Default::default(),
                     ));
-                }
+                    for corner in corners(rect) {
+                        let handle = Bounds::centered_at(corner, size(px(9.0), px(9.0)));
+                        window.paint_quad(quad(
+                            handle,
+                            Corners::all(px(2.0)),
+                            Hsla::from(Theme::text()),
+                            px(1.5),
+                            accent,
+                            Default::default(),
+                        ));
+                    }
+                });
             },
         )
         .absolute()
@@ -301,10 +304,26 @@ impl Editor {
             }
         }
 
-        // The topmost picture under the pointer: select it and move it.
-        match placed.iter().rev().find(|(_, rect, _)| rect.contains(&p)) {
-            Some((id, _, _)) => {
-                let id = *id;
+        // The topmost picture under the pointer, passing over see-through
+        // scenes, whose frame covers the stage though most of it is clear
+        // (they stay a click away on the timeline, or where nothing else is).
+        let under: Vec<ClipId> = placed
+            .iter()
+            .rev()
+            .filter(|(_, rect, _)| rect.contains(&p))
+            .map(|(id, _, _)| *id)
+            .collect();
+        let clear = |id: &ClipId| {
+            let project = &self.doc.project;
+            project
+                .clip(*id)
+                .filter(|c| c.generator.is_none())
+                .and_then(|c| project.media(c.media))
+                .is_some_and(|m| matches!(&m.recipe, Some(Recipe::Scene(s)) if s.transparent))
+        };
+        let pick = under.iter().find(|id| !clear(id)).or(under.first()).copied();
+        match pick {
+            Some(id) => {
                 if event.modifiers.shift || event.modifiers.platform {
                     if !self.selection.contains(&id) {
                         self.selection.push(id);
@@ -315,6 +334,9 @@ impl Editor {
                 let Some(clip) = self.doc.project.clip(id) else { return };
                 if event.click_count >= 2 && clip.generator.as_ref().is_some_and(|g| matches!(g, Generator::Text(_))) {
                     self.begin_title_edit(id, window, cx);
+                    // Keep the keyboard in the title: the workspace takes focus
+                    // on a mouse down unless told not to.
+                    window.prevent_default();
                     return cx.notify();
                 }
                 self.grab = Some(Grab::Move {

@@ -1607,6 +1607,8 @@ impl Editor {
                             .child(icon("command", Theme::overlay()))
                             .child(
                                 div()
+                                    .flex_1()
+                                    .min_w_0()
                                     .flex()
                                     .items_center()
                                     .text_size(px(14.0))
@@ -1707,6 +1709,8 @@ impl Editor {
                             .child(icon("text", Theme::overlay()))
                             .child(
                                 div()
+                                    .flex_1()
+                                    .min_w_0()
                                     .flex()
                                     .items_center()
                                     .text_size(px(14.0))
@@ -1718,7 +1722,7 @@ impl Editor {
                             )
                             .child(
                                 div()
-                                    .ml_auto()
+                                    .flex_none()
                                     .text_size(px(11.0))
                                     .text_color(Theme::overlay())
                                     .child(format!("{count} on this Mac")),
@@ -1824,6 +1828,8 @@ impl Editor {
                             .child(icon("score", Theme::overlay()))
                             .child(
                                 div()
+                                    .flex_1()
+                                    .min_w_0()
                                     .flex()
                                     .items_center()
                                     .text_size(px(14.0))
@@ -1840,7 +1846,7 @@ impl Editor {
                             )
                             .child(
                                 div()
-                                    .ml_auto()
+                                    .flex_none()
                                     .text_size(px(11.0))
                                     .text_color(Theme::overlay())
                                     .child(format!("{count} General MIDI")),
@@ -1989,6 +1995,8 @@ impl Editor {
         Some(
             div()
                 .id("overlay")
+                // Nothing under the scrim hovers or shows its tooltip.
+                .occlude()
                 .absolute()
                 .inset_0()
                 .flex()
