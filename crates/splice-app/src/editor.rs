@@ -35,6 +35,7 @@ mod made;
 mod render;
 mod shelf;
 mod stage;
+mod syntax;
 mod workbench;
 
 const AUTOSAVE_EVERY: Duration = Duration::from_millis(1500);
@@ -331,8 +332,6 @@ impl Editor {
     /// Last write before quitting or closing.
     pub fn flush(&mut self) {
         self.doc.finish();
-        // Clapper studios stop with Splice.
-        self.made.studios.clear();
     }
 
     fn replace_document(&mut self, doc: Document, cx: &mut Context<Self>) {

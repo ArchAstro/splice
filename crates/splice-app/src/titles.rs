@@ -256,6 +256,68 @@ fn draw_title(title: &Title, canvas: (u32, u32)) -> Picture {
     picture
 }
 
+/// Text alone, tightly drawn: for scenes. Lines wrap at `wrap` pixels.
+#[allow(clippy::too_many_arguments)]
+pub fn text_picture(
+    text: &str,
+    font: &str,
+    size: f32,
+    bold: bool,
+    italic: bool,
+    color: [u8; 4],
+    align: Align,
+    wrap: Option<f32>,
+) -> Picture {
+    let size = size.clamp(2.0, 2000.0);
+    let line = size * 1.2;
+    let text = if text.is_empty() { " " } else { text };
+    let mut guard = fonts().lock().unwrap();
+    let Fonts { system, cache } = &mut *guard;
+    let attrs = Attrs::new()
+        .family(Family::Name(font))
+        .weight(if bold { Weight::BOLD } else { Weight::NORMAL })
+        .style(if italic { Style::Italic } else { Style::Normal });
+    let align = match align {
+        Align::Left => cosmic_text::Align::Left,
+        Align::Center => cosmic_text::Align::Center,
+        Align::Right => cosmic_text::Align::Right,
+    };
+    let mut buffer = Buffer::new(system, Metrics::new(size, line));
+    buffer.set_size(wrap, None);
+    buffer.set_text(text, &attrs, Shaping::Advanced, None);
+    buffer.shape_until_scroll(system, false);
+    let widest = buffer
+        .layout_runs()
+        .map(|run| run.line_w)
+        .fold(0.0f32, f32::max)
+        .max(1.0);
+    buffer.set_size(Some(widest.ceil()), None);
+    buffer.set_text(text, &attrs, Shaping::Advanced, Some(align));
+    buffer.shape_until_scroll(system, false);
+    let height = buffer
+        .layout_runs()
+        .map(|run| run.line_top + run.line_height)
+        .fold(0.0f32, f32::max)
+        .max(line);
+    let pad = (size * 0.1).ceil();
+    let mut picture = Picture::new((widest + pad * 2.0).ceil() as u32, (height + pad * 2.0).ceil() as u32);
+    buffer.draw(
+        system,
+        cache,
+        Color::rgba(color[0], color[1], color[2], 255),
+        |x, y, gw, gh, c| {
+            let coverage = c.a() as f32 / 255.0;
+            let paint = [c.r(), c.g(), c.b(), color[3]];
+            for yy in 0..gh as i32 {
+                for xx in 0..gw as i32 {
+                    picture.blend(x + xx + pad as i32, y + yy + pad as i32, paint, coverage);
+                }
+            }
+        },
+    );
+    picture
+}
+
 /// A box blur of `radius` over a `w` x `h` grid, in place.
 fn blur(values: &mut [f32], w: usize, h: usize, radius: usize) {
     let mut tmp = vec![0f32; values.len()];

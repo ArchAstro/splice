@@ -71,18 +71,19 @@ with every clip of it following.
   instrument picker covering the 128 General MIDI instruments plus a drum kit.
   It plays with the timeline, so you hear it against the picture. Splice
   renders it with rustysynth and the GeneralUser GS SoundFont, which it
-  downloads once (32 MB) and checks. The format is
-  [Clapper](https://github.com/ArchAstro/clapper)'s score JSON, so the
-  assistant can compose it: **Ask** in the editor sends it what you have open.
-- **Scene**: an animation or diagram written as a React component and
-  rendered by Clapper, one frame at a time. The editor shows the code beside
-  the composited picture, with its length and a transparent background
-  (on by default, so it overlays what is under it). **Code** opens the file
-  in your editor; **Studio** opens Clapper's studio on it in the browser. A
-  save in either re-renders it in Splice within seconds. Splice uses
-  `clapper` from `$SPLICE_CLAPPER` or the PATH. If it finds neither, it
-  fetches Clapper's pinned v0.4.0 launcher, checking its checksum. On first
-  use the launcher downloads its runtime (Node, Chromium, ffmpeg).
+  downloads once (32 MB) and checks. The assistant can compose it from JSON
+  (the same shape as Clapper's scores); **Ask** in the editor sends it what
+  you have open.
+- **Scene**: an animation or diagram described as JSON: layers of rects,
+  ellipses, lines, SVG paths, text and groups, with keyframes, eases,
+  springs, staggered entrances and exits, outlines that draw themselves,
+  typed and counted text, gradients, soft shadows and a camera. Splice
+  paints every frame itself, with tiny-skia for shapes and cosmic-text for
+  words. It encodes to ProRes 4444 with a transparent background by default,
+  so a scene overlays what is under it, and a 5 s scene renders in about a
+  second. The editor shows the JSON with syntax colours (and a swatch by
+  each colour) beside the picture. **Edit** opens the file in your text
+  editor, and every save re-renders it.
 
 Renders are cached by what they are made from, and kept in the project file
 so it still opens anywhere.
@@ -123,8 +124,9 @@ with `make install-skill`) teaches Claude Code to use it.
 | `splice ctl track`, `canvas`, `undo`, `redo` | layers, canvas shape, history |
 | `splice ctl text`, `color`, `style`, `fonts` | titles in system fonts, colour cards and tints |
 | `splice ctl look` | position, size, opacity, animation, green screen, mask |
-| `splice ctl score new / read / write / instruments` | compose music: a score in Clapper's JSON |
-| `splice ctl scene new / read / write / studio` | animations and diagrams from React code |
+| `splice ctl score new / read / write / instruments` | compose music: a score as JSON |
+| `splice ctl scene new / read / write / help` | animations and diagrams, described as JSON |
+| `splice ctl scene sheet / frame / patch / add / remove / check` | see a scene's motion as a contact sheet; edit layers by name; validate first |
 | `splice ctl open --media M` | opens a score or scene in its editor |
 | `splice ctl seek`, `play`, `pause`, `select`, `command` | the playhead, selection and any menu command |
 | `splice ctl save`, `versions`, `export FILE [--wait]` | versions and export |

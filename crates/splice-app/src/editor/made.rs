@@ -32,13 +32,11 @@ pub struct Made {
     pub renders: HashMap<String, Render>,
     /// The last render that failed, per media, with why.
     pub errors: HashMap<MediaId, String>,
-    /// Clapper studios open on scenes.
-    pub studios: HashMap<MediaId, scenes::Studio>,
     /// When each scene's code file last changed, as last read.
     pub seen: HashMap<MediaId, SystemTime>,
 }
 
-/// Engine names, so a new synth or Clapper renders afresh.
+/// Engine names, so a new synth or painter renders afresh.
 pub fn engine(recipe: &Recipe) -> &'static str {
     match recipe {
         Recipe::Score(_) => music::ENGINE,
@@ -147,9 +145,6 @@ impl Editor {
                 "Fetching the instrument sounds ({} MB, once)…",
                 music::SOUNDFONT_SIZE_MB
             )),
-            Recipe::Scene(_) if scenes::launcher().is_none() => {
-                self.say("Fetching Clapper to render scenes (a few hundred MB, once)…")
-            }
             _ => {}
         }
         if let Some(assets) = self.library.assets.get_mut(&key) {
@@ -272,19 +267,22 @@ impl Editor {
     /// differs, so an open studio or editor shows what the project holds.
     fn sync_scene_file(&mut self, id: MediaId, scene: &Scene) {
         let path = scenes::workspace(scene).join(scenes::SOURCE);
-        if !path.exists() {
+        let modified = || std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        // A save from outside not picked up yet wins; `poll_scenes` takes it next.
+        if let (Some(on_disk), Some(seen)) = (modified(), self.made.seen.get(&id))
+            && on_disk != *seen
+        {
             return;
         }
-        if std::fs::read_to_string(&path).ok().as_deref() != Some(scene.source.as_str()) {
-            let _ = std::fs::write(&path, &scene.source);
-        }
-        if let Ok(modified) = std::fs::metadata(&path).and_then(|m| m.modified()) {
-            self.made.seen.insert(id, modified);
+        if scenes::write_file(scene).is_ok()
+            && let Some(m) = modified()
+        {
+            self.made.seen.insert(id, m);
         }
     }
 
-    /// Picks up saves to scenes' code made outside Splice: a text editor,
-    /// Clapper's studio, an agent.
+    /// Picks up saves to scenes' files made outside Splice: a text editor,
+    /// an assistant.
     pub(super) fn poll_scenes(&mut self, cx: &mut Context<Self>) {
         let mut changed = Vec::new();
         for media in &self.doc.project.media {
@@ -341,7 +339,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) -> (MediaId, Option<ClipId>) {
         let scene = Scene {
-            source: source.unwrap_or_else(|| scenes::STARTER.into()),
+            source: source.unwrap_or_else(|| splice_core::motion::Spec::starter().into()),
             duration,
             transparent,
             workspace: scenes::new_workspace(),
@@ -369,69 +367,26 @@ impl Editor {
         (id, clip)
     }
 
-    /// Opens Clapper's studio on a scene in the browser.
-    pub(super) fn open_studio(&mut self, id: MediaId, cx: &mut Context<Self>) {
-        if let Some(studio) = self.made.studios.get(&id) {
-            cx.open_url(&studio.url);
-            return;
-        }
-        let Some(Recipe::Scene(scene)) = self.doc.project.media(id).and_then(|m| m.recipe.clone()) else {
-            return;
-        };
-        let settings = self.doc.project.settings;
-        self.say("Starting the Clapper studio…");
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move { scenes::studio(&settings, &scene) })
-                .await;
-            this.update(cx, |editor, cx| {
-                match result {
-                    Ok(studio) => {
-                        cx.open_url(&studio.url);
-                        editor.say("The studio is open in your browser; saves there come back here.");
-                        editor.made.studios.insert(id, studio);
-                    }
-                    Err(e) => editor.say_error(format!("Could not start the studio: {e}")),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Opens a scene's code in the system's editor for .tsx files.
+    /// Opens a scene's JSON in a text editor; each save comes back here.
     pub(super) fn open_scene_code(&mut self, id: MediaId, cx: &mut Context<Self>) {
         let Some(Recipe::Scene(scene)) = self.doc.project.media(id).and_then(|m| m.recipe.clone()) else {
             return;
         };
-        let settings = self.doc.project.settings;
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    let launcher = scenes::ensure_launcher()?;
-                    let dir = scenes::prepare(&launcher, &settings, &scene)?;
-                    Ok::<_, anyhow::Error>(dir)
-                })
-                .await;
-            this.update(cx, |editor, cx| {
-                match result {
-                    Ok(dir) => {
-                        let file = dir.join(scenes::SOURCE);
-                        // VS Code when it is here (it knows TSX), else the default app.
-                        let code = std::process::Command::new("code").arg(&dir).arg(&file).spawn();
-                        if code.is_err() {
-                            let _ = std::process::Command::new("open").arg("-t").arg(&file).spawn();
-                        }
-                        editor.say("Editing the scene's code; every save re-renders it here.");
-                    }
-                    Err(e) => editor.say_error(format!("Could not open the scene: {e}")),
+        match scenes::write_file(&scene) {
+            Ok(file) => {
+                if let Ok(modified) = std::fs::metadata(&file).and_then(|m| m.modified()) {
+                    self.made.seen.insert(id, modified);
                 }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+                // VS Code when it is here, else the Mac's text editor.
+                let code = std::process::Command::new("code").arg(&file).spawn();
+                if code.is_err() {
+                    let _ = std::process::Command::new("open").arg("-t").arg(&file).spawn();
+                }
+                self.say("Editing the scene; every save re-renders it here.");
+            }
+            Err(e) => self.say_error(format!("Could not open the scene: {e}")),
+        }
+        cx.notify();
     }
 }
 
@@ -613,6 +568,11 @@ impl Editor {
                 });
                 answer(self, id, json!({}))
             }
+            ("scene", "help") => Some(json!({
+                "ok": true,
+                "format": splice_core::motion::GUIDE,
+                "example": serde_json::from_str::<Value>(splice_core::motion::Spec::starter()).unwrap_or(Value::Null),
+            })),
             ("scene", "new") => {
                 let duration = match self.time(request, "duration") {
                     Ok(d) => d.unwrap_or(5 * SECOND).max(SECOND / 10),
@@ -621,8 +581,93 @@ impl Editor {
                 let transparent = request.get("transparent").and_then(Value::as_bool).unwrap_or(true);
                 let name = text("name").unwrap_or("Scene").to_string();
                 let source = request.get("content").and_then(Value::as_str).map(str::to_string);
+                if let Some(Err(e)) = source.as_deref().map(splice_core::motion::Spec::parse) {
+                    return Some(fail(e.to_string()));
+                }
                 let (id, clip) = self.add_scene(name, source, duration, transparent, place, cx);
                 answer(self, id, json!({ "clip": clip.map(|c| c.0) }))
+            }
+            ("scene", "check") => {
+                let Some(content) = request.get("content").and_then(Value::as_str) else {
+                    return Some(fail("give the scene with --file scene.json"));
+                };
+                let seconds = match self.time(request, "duration") {
+                    Ok(d) => splice_core::time::secs(d.unwrap_or(5 * SECOND)),
+                    Err(e) => return Some(fail(e)),
+                };
+                Some(match splice_core::motion::Spec::parse(content) {
+                    Ok(spec) => json!({
+                        "ok": true,
+                        "warnings": self.scene_warnings(&spec, seconds),
+                        "outline": splice_core::motion::outline(&spec),
+                    }),
+                    Err(e) => fail(e.to_string()),
+                })
+            }
+            ("scene", "frame" | "sheet") => {
+                let media = match media(self, "scene") {
+                    Ok(m) => m,
+                    Err(e) => return Some(fail(e)),
+                };
+                let Some(Recipe::Scene(scene)) = media.recipe.clone() else {
+                    return None;
+                };
+                let Some(path) = text("path").map(PathBuf::from) else {
+                    return Some(fail("give a .png to write"));
+                };
+                let settings = self.doc.project.settings;
+                let seconds = splice_core::time::secs(scene.duration);
+                if sub == "frame" {
+                    let at = match self.time(request, "at") {
+                        Ok(t) => t.map_or(0.0, splice_core::time::secs),
+                        Err(e) => return Some(fail(e)),
+                    };
+                    return Some(match scenes::still(&settings, &scene.source, at, &path) {
+                        Ok(()) => json!({ "ok": true, "path": path, "at": at, "of": seconds }),
+                        Err(e) => fail(e.to_string()),
+                    });
+                }
+                let every = request.get("every").and_then(Value::as_f64);
+                Some(match scenes::sheet(&settings, &scene.source, seconds, every, &path) {
+                    Ok(times) => json!({ "ok": true, "path": path, "times": times, "of": seconds,
+                        "note": "Frames left to right, top to bottom; the checkerboard is see-through." }),
+                    Err(e) => fail(e.to_string()),
+                })
+            }
+            ("scene", "patch" | "add" | "remove") => {
+                let media = match media(self, "scene") {
+                    Ok(m) => m,
+                    Err(e) => return Some(fail(e)),
+                };
+                let Some(Recipe::Scene(mut scene)) = media.recipe.clone() else {
+                    return None;
+                };
+                let parse = |key: &str| -> Result<Value, String> {
+                    let raw = text(key).ok_or(format!("give the JSON with --{key}"))?;
+                    serde_json::from_str(raw).map_err(|e| format!("--{key} is not JSON: {e}"))
+                };
+                let edited = match sub {
+                    "patch" => parse("json")
+                        .map_err(anyhow::Error::msg)
+                        .and_then(|p| splice_core::motion::patch(&scene.source, text("layer"), &p)),
+                    "add" => parse("add")
+                        .map_err(anyhow::Error::msg)
+                        .and_then(|l| splice_core::motion::add(&scene.source, l, text("into"))),
+                    _ => match text("remove") {
+                        Some(name) => splice_core::motion::remove(&scene.source, name),
+                        None => Err(anyhow::anyhow!("name the layer with --remove NAME")),
+                    },
+                };
+                match edited {
+                    Ok(source) => scene.source = source,
+                    Err(e) => return Some(fail(e.to_string())),
+                }
+                let id = media.id;
+                let spec = splice_core::motion::Spec::parse(&scene.source).ok();
+                let seconds = splice_core::time::secs(scene.duration);
+                self.edit(cx, |p| p.set_recipe(id, Recipe::Scene(scene)));
+                let warnings = spec.map(|s| self.scene_warnings(&s, seconds)).unwrap_or_default();
+                answer(self, id, json!({ "warnings": warnings }))
             }
             ("scene", "read") => {
                 let media = match media(self, "scene") {
@@ -632,9 +677,13 @@ impl Editor {
                 let Some(Recipe::Scene(scene)) = &media.recipe else {
                     return None;
                 };
+                let spec = splice_core::motion::Spec::parse(&scene.source).ok();
+                let seconds = splice_core::time::secs(scene.duration);
                 Some(json!({
                     "ok": true,
                     "media": self.made_json(media.id),
+                    "outline": spec.as_ref().map(splice_core::motion::outline),
+                    "warnings": spec.as_ref().map(|s| self.scene_warnings(s, seconds)),
                     "source": scene.source,
                     "duration": splice_core::time::secs(scene.duration),
                     "transparent": scene.transparent,
@@ -651,6 +700,9 @@ impl Editor {
                     return None;
                 };
                 if let Some(content) = request.get("content").and_then(Value::as_str) {
+                    if let Err(e) = splice_core::motion::Spec::parse(content) {
+                        return Some(fail(e.to_string()));
+                    }
                     scene.source = content.to_string();
                 }
                 match self.time(request, "duration") {
@@ -670,14 +722,6 @@ impl Editor {
                     }
                 });
                 answer(self, id, json!({}))
-            }
-            ("scene", "studio") => {
-                let media = match media(self, "scene") {
-                    Ok(m) => m,
-                    Err(e) => return Some(fail(e)),
-                };
-                self.open_studio(media.id, cx);
-                Some(json!({ "ok": true, "opening": true }))
             }
             ("open", _) => {
                 let id = match self.find_media(&request["media"]) {
@@ -708,13 +752,19 @@ impl Editor {
             Some(Recipe::Scene(scene)) => {
                 out["file"] = serde_json::json!(scenes::workspace(scene).join(scenes::SOURCE));
                 out["how"] = serde_json::json!(format!(
-                    "splice ctl scene read --media {0}; change it with splice ctl scene write --media {0} --file scene.tsx --wait",
+                    "splice ctl scene read --media {0}; change it with splice ctl scene write --media {0} --file scene.json --wait; splice ctl scene help has the format",
                     id.0
                 ));
             }
             None => {}
         }
         out
+    }
+
+    /// What might be wrong with a scene that still renders.
+    fn scene_warnings(&self, spec: &splice_core::motion::Spec, seconds: f64) -> Vec<String> {
+        let families: Vec<String> = crate::titles::families().iter().map(|f| f.to_lowercase()).collect();
+        splice_core::motion::lint(spec, seconds, |font| families.contains(&font.to_lowercase()))
     }
 
     /// A score or scene as `read` shows it.

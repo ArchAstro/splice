@@ -600,7 +600,7 @@ impl Editor {
                 (
                     "scene",
                     "Edit the scene",
-                    "Its React code and preview, Clapper's studio, or ask the assistant.",
+                    "Its layers and motion beside the picture, or ask the assistant.",
                 )
             };
             sections.push(

@@ -82,7 +82,9 @@ fn icon(name: &str) -> Option<&'static str> {
         "score" => {
             r#"<path d="M3.5 7h17M3.5 11h17M3.5 15h17"/><path d="M14.5 15.5V5l4-1"/><ellipse cx="12.4" cy="16" rx="2.4" ry="1.9" fill="black"/><path d="M6.5 19h4"/>"#
         }
-        "scene" => r#"<path d="m8.5 7.5-5 4.5 5 4.5"/><path d="m15.5 7.5 5 4.5-5 4.5"/><path d="m13.5 5-3 14"/>"#,
+        "scene" => {
+            r#"<circle cx="7.5" cy="8" r="3.5"/><rect x="13" y="4.5" width="7" height="7" rx="1.5"/><path d="M8 13.5 12 20H4z"/><path d="M14 17.5h6"/>"#
+        }
         "close" => r#"<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>"#,
         "minus" => r#"<path d="M5 12h14"/>"#,
         "chevron" => r#"<path d="m7 9.5 5 5 5-5"/>"#,

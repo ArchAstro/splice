@@ -55,7 +55,7 @@ pub struct Media {
     #[serde(default)]
     pub source: PathBuf,
     /// Media Splice makes rather than imports: music from a score, a scene
-    /// from React code. `hash` then names the render of this recipe.
+    /// described as layers that move. `hash` then names the render of this recipe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe: Option<Recipe>,
 }
@@ -66,7 +66,7 @@ pub struct Media {
 pub enum Recipe {
     /// Music: instruments and notes, played by a General MIDI synth.
     Score(crate::score::Score),
-    /// Pictures that move: a React component Clapper renders frame by frame.
+    /// Pictures that move: layers described as JSON (`motion::Spec`), painted frame by frame.
     Scene(Scene),
 }
 
@@ -111,13 +111,13 @@ impl Recipe {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Scene {
-    /// A TSX module whose default export is the scene's component.
+    /// The scene's JSON, as written (a `motion::Spec`).
     pub source: String,
     pub duration: Time,
     /// See-through where nothing is drawn, so it overlays what is under it.
     #[serde(default = "yes")]
     pub transparent: bool,
-    /// Names the folder its Clapper project lives in while it is edited.
+    /// Names the folder its file lives in, for editing outside Splice.
     pub workspace: String,
 }
 

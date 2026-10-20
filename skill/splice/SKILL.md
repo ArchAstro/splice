@@ -1,6 +1,6 @@
 ---
 name: splice
-description: Work with the user inside their Splice video editor - see the project they have open, place, move, trim, split and delete clips on the timeline, import media, compose music as a score, write animated scenes and diagrams in React, look at any frame, export, and take requests they send from the editor. Use when the user asks for help editing a video they have open in Splice, says "my edit/timeline/movie", or asks you to listen for requests from Splice.
+description: Work with the user inside their Splice video editor - see the project they have open, place, move, trim, split and delete clips on the timeline, import media, compose music as a score, make animated scenes and diagrams, look at any frame, export, and take requests they send from the editor. Use when the user asks for help editing a video they have open in Splice, says "my edit/timeline/movie", or asks you to listen for requests from Splice.
 ---
 
 # Working in the user's Splice editor
@@ -99,8 +99,7 @@ splice ctl look --clip 3 --drift zoom-in --enter fade --enter-for 1
 
 A score is media made from notes: instruments, a tempo, notes in beats. Splice
 plays it with General MIDI instruments (a SoundFont) and it sits on the
-timeline like any sound; every clip of it follows when you change it. The
-format is Clapper's, so `@archastro/clapper-music` scores work as JSON.
+timeline like any sound; every clip of it follows when you change it.
 
 ```sh
 splice ctl score instruments                         # the 128 instruments, and the drum kit's keys
@@ -138,40 +137,62 @@ splice ctl score write --media 20 --file score.json --wait
 - You cannot hear it. Check what you can (`score read` ranges and lengths,
   `frame` for picture sync) and say so; ask the person to listen.
 
-## 6. Scenes: animation and diagrams in React
+## 6. Scenes: animation and diagrams
 
-A scene is media made from a React component that Clapper renders frame by
-frame (github.com/ArchAstro/clapper). It is see-through where nothing is
-drawn, so it overlays the footage: diagrams, charts, callouts, kinetic type.
+A scene is media made from a description: layers of shapes, lines, paths and
+words, and how they move. Splice paints it itself, frame by frame. It is
+see-through where nothing is drawn, so it overlays the footage: diagrams,
+charts, callouts, kinetic type, lower thirds.
 
 ```sh
-splice ctl scene new --file scene.tsx --duration 6 --at 12 --name "Pipeline" --wait
-splice ctl scene read --media 23                     # its code, length, file, and render error if any
-splice ctl scene write --media 23 --file scene.tsx --wait     # also --duration, --opaque
-splice ctl scene studio --media 23                   # Clapper's studio in the browser, live
+splice ctl scene help                                # the format in full, and an example
+splice ctl scene check --file scene.json --duration 6          # validate first: errors, warnings, outline
+splice ctl scene new --file scene.json --duration 6 --at 12 --name "Pipeline" --wait
+splice ctl scene read --media 23                     # outline, warnings, its JSON, file, render error
+splice ctl scene sheet --media 23 /tmp/sheet.png     # frames across it in a grid, timed: SEE the motion
+splice ctl scene frame --media 23 1.5 /tmp/f.png     # one frame of the scene alone
+splice ctl scene patch --media 23 --layer title --json '{"text": "Q3", "fill": "#f2c14e"}' --wait
+splice ctl scene add --media 23 --into steps --add '{"type": "rect", "name": "four", …}' --wait
+splice ctl scene remove --media 23 --remove four --wait
+splice ctl scene write --media 23 --file scene.json --wait    # replace it all; also --duration, --opaque
 ```
 
-```tsx
-import { AbsoluteFill, interpolate, spring, Easing, useFrame, useVideoConfig } from "@archastro/clapper-core";
+- Name the layers you will change (`"name": "title"`); `patch`, `add
+  --into` and `remove` find them anywhere in the scene. `patch` merges
+  (JSON merge patch: `null` removes a field); without `--layer` it patches
+  the scene itself (`{"camera": null}`, `{"background": "#000"}`).
+- Work in small steps: `check`, then `new` or `patch`, then `sheet`. Read
+  the sheet before you say you are done; it shows crowding, things off the
+  edge, and timing that a single frame cannot.
 
-export default function Scene() {
-  const frame = useFrame();                         // the only clock: everything is a function of it
-  const { fps, width, height } = useVideoConfig();  // Splice's canvas and the scene's length
-  const s = spring({ frame, fps, config: { damping: 12 } });
-  const x = interpolate(frame, [10, 40], [0, 1], { extrapolate: "clamp", easing: Easing.outCubic });
-  return <AbsoluteFill>{/* SVG, divs, text; nothing drawn stays see-through */}</AbsoluteFill>;
-}
+```json
+{ "layers": [
+  { "type": "line", "x": "25%", "y": "50%", "from": [110, 0], "to": ["25%", 0],
+    "stroke": "#f3eee4", "strokeWidth": 6, "draw": { "at": 0.6, "duration": 0.5 } },
+  { "type": "group", "stagger": 0.25, "children": [
+    { "type": "rect", "x": "25%", "y": "50%", "width": 200, "height": 120, "radius": 20,
+      "fill": "#ef6a55", "shadow": { "blur": 28, "y": 12 }, "enter": "pop",
+      "children": [{ "type": "text", "text": "Idea", "size": 38, "bold": true }] }
+  ] },
+  { "type": "text", "x": "50%", "y": "25%", "size": 64, "bold": true, "fill": "#f2c14e",
+    "counter": { "to": 12500, "duration": 2, "prefix": "$" }, "enter": "rise" }
+], "camera": { "zoom": [[0, 1], [4, 1.2, "inOutSine"]] } }
 ```
 
-- The file's default export is the scene; Splice supplies the canvas size,
-  fps and length. Also there: `Sequence`, `Series`, `useTime`, `Typewriter`,
-  `Counter`, `Draw` (SVG strokes), `Camera`, `useRandom(seed)`.
-- Keep it frame-pure: no `Math.random`, `Date.now`, timers or effects that
-  animate by themselves.
-- A render takes a few seconds. If it fails, `--wait` (and `scene read`)
-  return the error; fix and write again. Check the result with `frame`.
-- The person may edit the same file (Code button, or the studio); `read`
-  before you write so you do not undo their change.
+- Positions are the centre of a layer, in canvas pixels or `"50%"`;
+  children are placed from their parent. Later layers draw on top.
+- Anything numeric can be keyframes: `[[seconds, value], [seconds, value,
+  "outBack"]]`. `enter`/`exit` take fade, pop, zoom, rise, drop,
+  slide-left, slide-right, spin, or `{at, duration, ease, spring, from}`.
+  `draw` draws lines and outlines; `typewriter` types text; `counter`
+  counts; a group's `stagger` spaces its children's entrances.
+- Text uses installed fonts (`splice ctl fonts`).
+- A render takes about a second. Edits refuse JSON that does not parse or
+  validate and say where; `warnings` flag fonts that are not installed and
+  motion that runs past the end. Check the scene over the footage with
+  `splice ctl frame` once it is placed.
+- While the person has a scene open they may edit the same file (its
+  `file` in `read`); `read` before you write so you do not undo their change.
 
 ## 7. Playback, the window, versions, export
 

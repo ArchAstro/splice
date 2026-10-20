@@ -5381,6 +5381,8 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "splice-core",
+ "svgtypes",
+ "tiny-skia",
 ]
 
 [[package]]

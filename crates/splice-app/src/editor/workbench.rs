@@ -310,14 +310,9 @@ impl Editor {
             )
             .when(is_scene, |d| {
                 d.child(
-                    button("bench-code", "Code", "scene")
-                        .tooltip(tip("Edit the code in your editor; saves come back here", None))
+                    button("bench-code", "Edit", "scene")
+                        .tooltip(tip("Edit the scene in a text editor; each save re-renders here", None))
                         .on_click(cx.listener(move |this, _, _, cx| this.open_scene_code(id, cx))),
-                )
-                .child(
-                    button("bench-studio", "Studio", "export")
-                        .tooltip(tip("Open Clapper's studio on this scene in the browser", None))
-                        .on_click(cx.listener(move |this, _, _, cx| this.open_studio(id, cx))),
                 )
             })
             .child(
@@ -995,14 +990,61 @@ impl Editor {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let error = self.made.errors.get(&id).cloned();
+        let broken = error.as_deref().and_then(syntax::error_line);
         let lines: Vec<AnyElement> = scene
             .source
             .lines()
             .enumerate()
             .map(|(i, line)| {
-                let comment = line.trim_start().starts_with("//");
+                let text = if line.is_empty() {
+                    " ".to_string()
+                } else {
+                    line.replace('\t', "    ")
+                };
+                let paint = |t: syntax::Token| -> Hsla {
+                    match t {
+                        syntax::Token::Key => rgb(0x9ab4f5),
+                        syntax::Token::Str => rgb(0x86cfc0),
+                        syntax::Token::Number => rgb(0xf2c14e),
+                        syntax::Token::Word => rgb(0xc792ea),
+                        syntax::Token::Mark => Theme::overlay().into(),
+                    }
+                };
+                let highlights: Vec<_> = syntax::json(&text)
+                    .into_iter()
+                    .map(|(range, t)| {
+                        (
+                            range,
+                            gpui::HighlightStyle {
+                                color: Some(paint(t)),
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .collect();
+                let swatches: Vec<AnyElement> = syntax::colors(&text)
+                    .into_iter()
+                    .map(|c| {
+                        div()
+                            .size(px(10.0))
+                            .flex_none()
+                            .rounded(px(3.0))
+                            .border_1()
+                            .border_color(gpui::rgba(0xffffff33))
+                            .bg(gpui::Rgba {
+                                r: c[0] as f32 / 255.0,
+                                g: c[1] as f32 / 255.0,
+                                b: c[2] as f32 / 255.0,
+                                a: c[3] as f32 / 255.0,
+                            })
+                            .into_any_element()
+                    })
+                    .collect();
+                let wrong = broken == Some(i + 1);
                 div()
                     .flex()
+                    .items_center()
+                    .when(wrong, |d| d.bg(gpui::rgba(0xef6a5526)))
                     .child(
                         div()
                             .w(px(34.0))
@@ -1010,19 +1052,18 @@ impl Editor {
                             .pr(px(10.0))
                             .flex()
                             .justify_end()
-                            .text_color(Theme::surface2())
+                            .text_color(if wrong { Theme::error() } else { Theme::surface2() })
                             .child((i + 1).to_string()),
                     )
                     .child(
                         div()
                             .whitespace_nowrap()
-                            .text_color(if comment { Theme::overlay() } else { Theme::subtext() })
-                            .child(if line.is_empty() {
-                                " ".to_string()
-                            } else {
-                                line.replace('\t', "    ")
-                            }),
+                            .text_color(Theme::subtext())
+                            .child(gpui::StyledText::new(text).with_highlights(highlights)),
                     )
+                    .when(!swatches.is_empty(), |d| {
+                        d.child(div().ml(px(8.0)).flex().gap(px(4.0)).children(swatches))
+                    })
                     .into_any_element()
             })
             .collect();

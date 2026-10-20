@@ -479,7 +479,7 @@ impl Editor {
                 "make-scene",
                 "scene",
                 "New scene",
-                "An animation from React code, rendered by Clapper",
+                "An animation or diagram: shapes, lines and words that move",
             )
             .on_click(cx.listener(|this, _, window, cx| this.new_scene(window, cx)))
             .into_any_element(),

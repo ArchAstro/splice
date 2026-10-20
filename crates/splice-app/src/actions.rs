@@ -258,7 +258,7 @@ pub fn commands() -> Vec<(&'static str, &'static str, Box<dyn Action>)> {
         ("Show / hide inspector", "⌘2", Box::new(ToggleInspector)),
         ("Add text at the playhead", "T  ⌘T", Box::new(AddText)),
         ("New score (music to compose)", "", Box::new(NewScore)),
-        ("New scene (animation from React code)", "", Box::new(NewScene)),
+        ("New scene (animation or diagram)", "", Box::new(NewScene)),
         ("Show media", "", Box::new(ShowMedia)),
         ("Show text styles", "", Box::new(ShowTextStyles)),
         ("Show colours", "", Box::new(ShowColours)),

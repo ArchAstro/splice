@@ -63,17 +63,27 @@ Music (a score: instruments and notes, played by General MIDI sounds)
   score write --media M --file score.json [--wait]
                                  replace the score; it re-renders, and every clip of it follows
   score instruments              the instruments (General MIDI) and the drum kit's keys
-  The format is Clapper's: {title, tempo, meter, tracks: [{id, instrument, clips: [{at, notes:
+  The format: {title, tempo, meter, tracks: [{id, instrument, clips: [{at, notes:
   [{at, duration, pitch, velocity}], repeat, length, transpose}], gain, pan, reverb, drums}]}.
   Times are in beats (quarter notes); pitches "C4" or MIDI numbers.
 
-Scenes (moving pictures from React code, rendered by Clapper)
-  scene new [--file scene.tsx] [--name N] [--duration D] [--at T] [--track N] [--opaque] [--wait]
+Scenes (animation and diagrams: layers of shapes, lines, paths and words that move)
+  scene new [--file scene.json] [--name N] [--duration D] [--at T] [--track N] [--opaque] [--wait]
                                  add a scene (a starter diagram if no file); see-through unless --opaque
-  scene read --media M           its code, length, folder, and how its render went
-  scene write --media M [--file scene.tsx] [--duration D] [--opaque|--transparent] [--wait]
-                                 change it; it re-renders (a few seconds) and its clips follow
-  scene studio --media M         open Clapper's studio on it in the browser (live preview)
+  scene read --media M           its JSON, length, file, and how its render went
+  scene write --media M [--file scene.json] [--duration D] [--opaque|--transparent] [--wait]
+                                 change it; it re-renders (about a second) and its clips follow
+  scene help                     the scene format, with an example
+  scene sheet --media M <file.png> [--every S]
+                                 frames across the scene in a grid, each with its time: see the motion
+  scene frame --media M [T] <file.png>     the scene alone at T seconds into it
+  scene patch --media M [--layer NAME] --json '{"text": "Plan"}' [--wait]
+                                 merge into one named layer (or the scene); null removes a field
+  scene add --media M --add '{"type": "text", …}' [--into NAME] [--wait]
+                                 add a layer on top, or inside the group or shape NAME
+  scene remove --media M --remove NAME [--wait]
+  scene check --file scene.json [--duration D]
+                                 validate without changing anything: errors, warnings, an outline
   open --media M                 open a score or scene in Splice's own editor
 
 Playing and the window
@@ -261,6 +271,10 @@ fn build(args: &[String]) -> Result<Value, String> {
                 let n: u64 = next(arg)?.parse().map_err(|_| format!("{arg} expects a number"))?;
                 request.insert(arg[2..].into(), json!(n));
             }
+            "--every" => {
+                let v: f64 = next(arg)?.parse().map_err(|_| "--every expects seconds".to_string())?;
+                request.insert("every".into(), json!(v));
+            }
             "--value" => {
                 let v: f64 = next(arg)?.parse().map_err(|_| "--value expects a number".to_string())?;
                 request.insert("value".into(), json!(v));
@@ -274,7 +288,7 @@ fn build(args: &[String]) -> Result<Value, String> {
                 let m = next(arg)?;
                 request.insert("media".into(), m.parse::<u64>().map_or(json!(m), |id| json!(id)));
             }
-            "--text" | "--label" | "--name" | "--aspect" => {
+            "--text" | "--label" | "--name" | "--aspect" | "--layer" | "--into" | "--remove" | "--json" | "--add" => {
                 request.insert(arg[2..].into(), json!(value(next(arg)?)?));
             }
             "--file" => {
@@ -352,6 +366,20 @@ fn build(args: &[String]) -> Result<Value, String> {
         "score" | "scene" => {
             let sub = words.first().ok_or(format!("{command} expects new, read, write…"))?;
             request.insert("sub".into(), json!(sub));
+            match (sub.as_str(), &words[1..]) {
+                ("frame", [file]) => {
+                    request.insert("path".into(), json!(absolute(file)));
+                }
+                ("frame", [time, file]) => {
+                    request.insert("at".into(), time_value("frame", time)?);
+                    request.insert("path".into(), json!(absolute(file)));
+                }
+                ("sheet", [file]) => {
+                    request.insert("path".into(), json!(absolute(file)));
+                }
+                ("frame" | "sheet", _) => return Err(format!("{command} {sub} expects [T] <file.png>")),
+                _ => {}
+            }
             command.as_str()
         }
         "open" => "open",
@@ -379,8 +407,7 @@ pub fn cli(args: &[String]) -> i32 {
         }
     };
     let patient = matches!(request["cmd"].as_str(), Some("wait" | "import" | "frame"))
-        || (matches!(request["cmd"].as_str(), Some("export" | "score" | "scene")) && request["wait"] == json!(true))
-        || (request["cmd"] == "scene" && request["sub"] == json!("studio"));
+        || (matches!(request["cmd"].as_str(), Some("export" | "score" | "scene")) && request["wait"] == json!(true));
     let Some(reply) = send(&request.to_string(), patient) else {
         println!("{}", fail("Splice is not running; open it with `splice` or `make run`"));
         return 1;
