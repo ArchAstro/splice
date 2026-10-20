@@ -335,6 +335,7 @@ mod tests {
             height: 360,
             has_audio: false,
             source: source.clone(),
+            recipe: None,
         });
         project.append_clip(media);
 

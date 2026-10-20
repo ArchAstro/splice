@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 /// Version of the project JSON. Bump it and add a step to `migrate` when the
 /// shape changes.
-pub const SCHEMA: u32 = 2;
+pub const SCHEMA: u32 = 3;
 
 /// How long a still image runs when it is first placed.
 pub const IMAGE_DURATION: Time = 5 * SECOND;
@@ -54,6 +54,75 @@ pub struct Media {
     /// Where the file was imported from, for relinking if the embedded copy is lost.
     #[serde(default)]
     pub source: PathBuf,
+    /// Media Splice makes rather than imports: music from a score, a scene
+    /// from React code. `hash` then names the render of this recipe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<Recipe>,
+}
+
+/// What made media is made from.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Recipe {
+    /// Music: instruments and notes, played by a General MIDI synth.
+    Score(crate::score::Score),
+    /// Pictures that move: a React component Clapper renders frame by frame.
+    Scene(Scene),
+}
+
+impl Recipe {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Recipe::Score(_) => "score",
+            Recipe::Scene(_) => "scene",
+        }
+    }
+
+    /// Names one render of this recipe: the same recipe, canvas and renderer
+    /// (`engine`) always render the same bytes, so this is their hash too.
+    pub fn key(&self, settings: &Settings, engine: &str) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(engine.as_bytes());
+        hasher.update(&[0]);
+        match self {
+            Recipe::Score(score) => {
+                hasher.update(serde_json::to_string(score).unwrap_or_default().as_bytes());
+            }
+            Recipe::Scene(scene) => {
+                let shape = format!(
+                    "{}x{}@{}|{}|{}|",
+                    settings.width, settings.height, settings.fps, scene.duration, scene.transparent
+                );
+                hasher.update(shape.as_bytes());
+                hasher.update(scene.source.as_bytes());
+            }
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
+    /// How long its render runs.
+    pub fn duration(&self) -> anyhow::Result<Time> {
+        match self {
+            Recipe::Score(score) => Ok(crate::time::from_secs(score.compile()?.seconds)),
+            Recipe::Scene(scene) => Ok(scene.duration),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Scene {
+    /// A TSX module whose default export is the scene's component.
+    pub source: String,
+    pub duration: Time,
+    /// See-through where nothing is drawn, so it overlays what is under it.
+    #[serde(default = "yes")]
+    pub transparent: bool,
+    /// Names the folder its Clapper project lives in while it is edited.
+    pub workspace: String,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Media {
@@ -398,6 +467,50 @@ impl Project {
         id
     }
 
+    /// Points made media at a finished render of its recipe, keeping its
+    /// clips inside the new length.
+    pub fn set_render(&mut self, id: MediaId, hash: &str, duration: Time) {
+        let Some(media) = self.media.iter_mut().find(|m| m.id == id) else {
+            return;
+        };
+        let old = media.duration;
+        media.hash = hash.to_string();
+        media.duration = duration;
+        let frame = self.frame();
+        for track in &mut self.tracks {
+            let starts: Vec<Time> = track.clips.iter().map(|c| c.start).collect();
+            for clip in track
+                .clips
+                .iter_mut()
+                .filter(|c| c.media == id && c.generator.is_none())
+            {
+                // A clip of the whole thing stays the whole thing, as far as
+                // the next clip allows.
+                let whole = clip.source_in == 0 && (clip.duration - old).abs() <= frame;
+                clip.source_in = clip.source_in.min((duration - frame).max(0));
+                let room = starts
+                    .iter()
+                    .copied()
+                    .filter(|s| *s > clip.start)
+                    .min()
+                    .map_or(Time::MAX, |s| s - clip.start);
+                clip.duration = if whole {
+                    duration.min(room)
+                } else {
+                    clip.duration.min(duration - clip.source_in)
+                }
+                .max(frame);
+            }
+        }
+    }
+
+    /// Changes what made media is made from.
+    pub fn set_recipe(&mut self, id: MediaId, recipe: Recipe) {
+        if let Some(media) = self.media.iter_mut().find(|m| m.id == id) {
+            media.recipe = Some(recipe);
+        }
+    }
+
     /// Removes media from the library along with every clip that uses it.
     pub fn remove_media(&mut self, id: MediaId) {
         self.media.retain(|m| m.id != id);
@@ -724,8 +837,8 @@ fn migrate(value: &mut serde_json::Value) -> anyhow::Result<()> {
     if schema > SCHEMA {
         anyhow::bail!("this project was saved by a newer Splice (schema {schema}); this build reads up to {SCHEMA}");
     }
-    // Schema 2 added `look` and `generator` to clips; both default, so
-    // older projects need nothing. Future steps: `if schema < 3 { ... }`.
+    // Schema 2 added `look` and `generator` to clips, schema 3 `recipe` to
+    // media; all default, so older projects need nothing.
     value["schema"] = SCHEMA.into();
     Ok(())
 }
@@ -746,6 +859,7 @@ mod tests {
             height: 720,
             has_audio: kind != MediaKind::Image,
             source: PathBuf::new(),
+            recipe: None,
         }
     }
 

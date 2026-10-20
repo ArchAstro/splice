@@ -152,6 +152,23 @@ impl Player {
         self.retired.extend(images);
     }
 
+    /// Drops what was decoded from `media`, whose file changed.
+    pub fn forget(&mut self, media: MediaId) {
+        self.streams.retain(|_, s| s.media != media);
+        let gone: Vec<ClipId> = self
+            .shown
+            .iter()
+            .filter(|(_, s)| s.media == media)
+            .map(|(c, _)| *c)
+            .collect();
+        for clip in gone {
+            if let Some(shown) = self.shown.remove(&clip) {
+                self.retired.push(shown.image);
+            }
+            self.failed.remove(&clip);
+        }
+    }
+
     /// Drops everything decoded, e.g. when another project opens.
     pub fn reset(&mut self) {
         self.pause();

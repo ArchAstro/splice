@@ -56,6 +56,26 @@ Titles, colours and looks
                 [--feather F] [--invert/--no-invert]   (mask numbers are fractions of the clip's frame)
   C is #rrggbb, #rrggbbaa or a name: white, black, paper, ink, vermilion, gold, green, blue, clear.
 
+Music (a score: instruments and notes, played by General MIDI sounds)
+  score new [--file score.json] [--name N] [--at T] [--track N] [--wait]
+                                 add a score to the media (the starter if no file); with --at, place it
+  score read --media M           the score as JSON, and what it compiles to: length, notes per part
+  score write --media M --file score.json [--wait]
+                                 replace the score; it re-renders, and every clip of it follows
+  score instruments              the instruments (General MIDI) and the drum kit's keys
+  The format is Clapper's: {title, tempo, meter, tracks: [{id, instrument, clips: [{at, notes:
+  [{at, duration, pitch, velocity}], repeat, length, transpose}], gain, pan, reverb, drums}]}.
+  Times are in beats (quarter notes); pitches "C4" or MIDI numbers.
+
+Scenes (moving pictures from React code, rendered by Clapper)
+  scene new [--file scene.tsx] [--name N] [--duration D] [--at T] [--track N] [--opaque] [--wait]
+                                 add a scene (a starter diagram if no file); see-through unless --opaque
+  scene read --media M           its code, length, folder, and how its render went
+  scene write --media M [--file scene.tsx] [--duration D] [--opaque|--transparent] [--wait]
+                                 change it; it re-renders (a few seconds) and its clips follow
+  scene studio --media M         open Clapper's studio on it in the browser (live preview)
+  open --media M                 open a score or scene in Splice's own editor
+
 Playing and the window
   seek T | play | pause
   select [--clip C]                        select clips (none: deselect)
@@ -257,6 +277,13 @@ fn build(args: &[String]) -> Result<Value, String> {
             "--text" | "--label" | "--name" | "--aspect" => {
                 request.insert(arg[2..].into(), json!(value(next(arg)?)?));
             }
+            "--file" => {
+                let file = next(arg)?;
+                request.insert("content".into(), json!(value(&format!("@{file}"))?));
+            }
+            "--opaque" | "--transparent" => {
+                request.insert("transparent".into(), json!(arg == "--transparent"));
+            }
             "--ripple" | "--wait" => {
                 request.insert(arg[2..].into(), json!(true));
             }
@@ -322,6 +349,12 @@ fn build(args: &[String]) -> Result<Value, String> {
             request.insert("command".into(), json!(words.join(" ")));
             "command"
         }
+        "score" | "scene" => {
+            let sub = words.first().ok_or(format!("{command} expects new, read, write…"))?;
+            request.insert("sub".into(), json!(sub));
+            command.as_str()
+        }
+        "open" => "open",
         "call" => return serde_json::from_str(&value("-")?).map_err(|e| format!("stdin is not JSON: {e}")),
         other => return Err(format!("unknown command `{other}`")),
     };
@@ -346,7 +379,8 @@ pub fn cli(args: &[String]) -> i32 {
         }
     };
     let patient = matches!(request["cmd"].as_str(), Some("wait" | "import" | "frame"))
-        || (request["cmd"] == "export" && request["wait"] == json!(true));
+        || (matches!(request["cmd"].as_str(), Some("export" | "score" | "scene")) && request["wait"] == json!(true))
+        || (request["cmd"] == "scene" && request["sub"] == json!("studio"));
     let Some(reply) = send(&request.to_string(), patient) else {
         println!("{}", fail("Splice is not running; open it with `splice` or `make run`"));
         return 1;

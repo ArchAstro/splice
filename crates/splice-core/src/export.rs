@@ -380,6 +380,7 @@ mod tests {
             height: 1080,
             has_audio: true,
             source: PathBuf::new(),
+            recipe: None,
         })
     }
 
@@ -402,6 +403,7 @@ mod tests {
             height: 500,
             has_audio: false,
             source: PathBuf::new(),
+            recipe: None,
         });
         p.append_clip(v);
         p.insert_clip(image, 0, SECOND);

@@ -283,6 +283,8 @@ impl Render for Editor {
                 cx.notify();
             }))
             .on_action(cx.listener(Self::add_text))
+            .on_action(cx.listener(|this, _: &NewScore, window, cx| this.new_score(window, cx)))
+            .on_action(cx.listener(|this, _: &NewScene, window, cx| this.new_scene(window, cx)))
             .on_action(cx.listener(|this, _: &ShowMedia, _, cx| this.show_shelf(Shelf::Media, cx)))
             .on_action(cx.listener(|this, _: &ShowTextStyles, _, cx| this.show_shelf(Shelf::Text, cx)))
             .on_action(cx.listener(|this, _: &ShowColours, _, cx| this.show_shelf(Shelf::Color, cx)))
@@ -311,10 +313,15 @@ impl Render for Editor {
                             .flex()
                             .when(bin_open, |d| d.child(self.render_bin(bin_width, cx)))
                             .child(self.divider(true, bin_open, bin_width, cx))
-                            .child(self.render_viewer(cx))
-                            .when(inspector_open, |d| {
-                                d.child(div().w(px(GAP)).flex_none())
-                                    .child(self.render_inspector(window, cx))
+                            .map(|d| {
+                                if self.workbench.is_some() {
+                                    d.child(self.render_workbench(window, cx))
+                                } else {
+                                    d.child(self.render_viewer(cx)).when(inspector_open, |d| {
+                                        d.child(div().w(px(GAP)).flex_none())
+                                            .child(self.render_inspector(window, cx))
+                                    })
+                                }
                             }),
                     )
                     .child(self.divider(false, true, timeline_height, cx))
@@ -716,6 +723,7 @@ impl Editor {
                 };
                 let (kind_icon, badge) = match media.kind {
                     MediaKind::Image => ("image", None),
+                    MediaKind::Audio if media.recipe.is_some() => ("score", Some(timecode(media.duration, fps))),
                     MediaKind::Audio => ("music", Some(timecode(media.duration, fps))),
                     MediaKind::Video => ("film", Some(timecode(media.duration, fps))),
                 };
@@ -730,6 +738,9 @@ impl Editor {
                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         window.focus(&this.focus);
                         this.bin_selection = Some(id);
+                        if event.click_count() >= 2 && this.doc.project.media(id).is_some_and(|m| m.recipe.is_some()) {
+                            return this.open_workbench(id, window, cx);
+                        }
                         if event.click_count() >= 2 {
                             let at = this.player.position;
                             if let Some(clip) = this.edit(cx, |p| p.insert_clip(id, 0, at)) {
@@ -761,8 +772,14 @@ impl Editor {
                                 d.child(img(image).size_full().rounded(px(6.0)).object_fit(ObjectFit::Cover))
                             })
                             .when(media.kind == MediaKind::Audio, |d| {
-                                d.bg(Theme::clip_audio())
-                                    .child(icon("music", Theme::wave()).size(px(20.0)))
+                                let made = media.recipe.is_some();
+                                d.bg(Theme::clip_audio()).child(
+                                    icon(
+                                        if made { "score" } else { "music" },
+                                        if made { Theme::accent() } else { Theme::wave() },
+                                    )
+                                    .size(px(20.0)),
+                                )
                             })
                             .when(loading, |d| {
                                 d.child(
@@ -830,6 +847,11 @@ impl Editor {
             })
             .collect();
         let count = items.len();
+        let mut items = items;
+        let mut makes = self.make_cards(cx);
+        if count > 0 {
+            items.append(&mut makes);
+        }
         let tabs = self.shelf_tabs(count, cx);
         let action = self.shelf_header_action(cx);
         let on_media = self.shelf == Shelf::Media;
@@ -903,6 +925,9 @@ impl Editor {
                                             .child("videos, images, sound · ⌘I"),
                                     ),
                             )
+                        })
+                        .when(count == 0, |d| {
+                            d.child(div().mt(px(14.0)).flex().flex_wrap().gap(px(CARD_GAP)).children(makes))
                         })
                         .when(count > 0, |d| {
                             d.child(div().flex().flex_wrap().gap(px(CARD_GAP)).children(items))
@@ -1621,6 +1646,127 @@ impl Editor {
                             ),
                     )
                     .child(div().id("font-rows").p(px(6.0)).flex().flex_col().children(rows))
+                    .child(footer("↑↓ move  ·  ⏎ use  ·  esc close"))
+            }
+            Overlay::Instruments {
+                media,
+                part,
+                query,
+                index,
+            } => {
+                let (part, query) = (*part, query.clone());
+                let current = match self.doc.project.media(*media).and_then(|m| m.recipe.as_ref()) {
+                    Some(splice_core::model::Recipe::Score(s)) => s.parts.get(part).map(|p| {
+                        if p.drums || splice_core::score::is_drums(&p.instrument) {
+                            None
+                        } else {
+                            Some(
+                                p.program
+                                    .unwrap_or_else(|| splice_core::score::program_for(&p.instrument)),
+                            )
+                        }
+                    }),
+                    _ => None,
+                };
+                let matches = Self::instrument_matches(&query);
+                let count = matches.len();
+                let index = (*index).min(count.saturating_sub(1));
+                let first = index.saturating_sub(5);
+                let rows: Vec<AnyElement> =
+                    matches
+                        .into_iter()
+                        .enumerate()
+                        .skip(first)
+                        .take(11)
+                        .map(|(i, (choice, name))| {
+                            let active = i == index;
+                            let chosen = current == Some(choice);
+                            let family = match choice {
+                                None => "drums".to_string(),
+                                Some(p) => [
+                                    "piano",
+                                    "chromatic percussion",
+                                    "organ",
+                                    "guitar",
+                                    "bass",
+                                    "strings",
+                                    "ensemble",
+                                    "brass",
+                                    "reed",
+                                    "pipe",
+                                    "synth lead",
+                                    "synth pad",
+                                    "synth effects",
+                                    "world",
+                                    "percussive",
+                                    "sound effects",
+                                ][p as usize / 8]
+                                    .to_string(),
+                            };
+                            div()
+                                .id(("instrument-row", i))
+                                .h(px(34.0))
+                                .px(px(12.0))
+                                .rounded(px(7.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(10.0))
+                                .cursor_pointer()
+                                .when(active, |d| d.bg(Theme::surface0()))
+                                .hover(|d| d.bg(Theme::surface0()))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_size(px(13.0))
+                                        .text_color(if active { Theme::text() } else { Theme::subtext() })
+                                        .child(name),
+                                )
+                                .child(div().text_size(px(10.5)).text_color(Theme::overlay()).child(family))
+                                .when(chosen, |d| {
+                                    d.child(div().size(px(6.0)).rounded_full().bg(Theme::accent()))
+                                })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.choose_instrument(part, choice, window, cx)
+                                }))
+                                .into_any_element()
+                        })
+                        .collect();
+                panel()
+                    .child(
+                        div()
+                            .h(px(48.0))
+                            .px(px(16.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .border_b_1()
+                            .border_color(Theme::rule())
+                            .child(icon("score", Theme::overlay()))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .text_size(px(14.0))
+                                    .when(!query.is_empty(), |d| d.text_color(Theme::text()).child(query.clone()))
+                                    .child(div().w(px(1.5)).h(px(17.0)).bg(Theme::accent()))
+                                    .when(query.is_empty(), |d| {
+                                        d.child(
+                                            div()
+                                                .ml(px(2.0))
+                                                .text_color(Theme::overlay())
+                                                .child("Search instruments"),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .ml_auto()
+                                    .text_size(px(11.0))
+                                    .text_color(Theme::overlay())
+                                    .child(format!("{count} General MIDI")),
+                            ),
+                    )
+                    .child(div().id("instrument-rows").p(px(6.0)).flex().flex_col().children(rows))
                     .child(footer("↑↓ move  ·  ⏎ use  ·  esc close"))
             }
             Overlay::Ask { text } => {

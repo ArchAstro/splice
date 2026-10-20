@@ -2,7 +2,7 @@
 //! Anything on a shelf drags onto the timeline, or lands at the playhead with
 //! a click.
 
-use super::render::tip;
+use super::render::{icon, tip};
 use super::*;
 use gpui::{FontWeight, Rgba};
 use splice_core::look::Look;
@@ -427,5 +427,91 @@ impl Editor {
                 .on_click(cx.listener(|this, _, window, cx| this.import(&Import, window, cx)))
                 .into_any_element()
         })
+    }
+
+    /// Tiles after the media that make new media: a score, a scene.
+    pub(super) fn make_cards(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let card = self.card_width;
+        let tile = |id: &'static str, glyph: &'static str, label: &'static str, hint: &'static str| {
+            div()
+                .id(id)
+                .group(id)
+                .w(px(card))
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .cursor_pointer()
+                .tooltip(tip(hint, None))
+                .child(
+                    div()
+                        .w(px(card))
+                        .h(px(card * render::CARD_ASPECT))
+                        .rounded(px(7.0))
+                        .border_1()
+                        .border_dashed()
+                        .border_color(Theme::surface1())
+                        .group_hover(id, |s| s.border_color(Theme::accent()).bg(Theme::lane()))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon(glyph, Theme::subtext()).size(px(18.0))),
+                )
+                .child(
+                    div()
+                        .w(px(card))
+                        .px(px(1.0))
+                        .text_size(px(10.5))
+                        .text_color(Theme::muted())
+                        .truncate()
+                        .child(label),
+                )
+        };
+        vec![
+            tile(
+                "make-score",
+                "score",
+                "New score",
+                "Music to compose, or ask the assistant to",
+            )
+            .on_click(cx.listener(|this, _, window, cx| this.new_score(window, cx)))
+            .into_any_element(),
+            tile(
+                "make-scene",
+                "scene",
+                "New scene",
+                "An animation from React code, rendered by Clapper",
+            )
+            .on_click(cx.listener(|this, _, window, cx| this.new_scene(window, cx)))
+            .into_any_element(),
+        ]
+    }
+
+    /// A starter score at the playhead, open in its editor.
+    pub(super) fn new_score(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let at = self.player.position;
+        let track = self.doc.project.tracks.len();
+        let (id, _) = self.add_score(None, Some((at, track)), cx);
+        self.open_workbench(id, window, cx);
+        self.say("A starter score: edit the notes, or Ask the assistant to compose (⇧⌘A)");
+    }
+
+    /// A starter scene over what is at the playhead, open in its editor.
+    pub(super) fn new_scene(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let at = self.player.position;
+        let track = self.layer_above(at, 5 * SECOND);
+        let n = self
+            .doc
+            .project
+            .media
+            .iter()
+            .filter(|m| matches!(m.recipe, Some(splice_core::model::Recipe::Scene(_))))
+            .count();
+        let name = if n == 0 {
+            "Scene".to_string()
+        } else {
+            format!("Scene {}", n + 1)
+        };
+        let (id, _) = self.add_scene(name, None, 5 * SECOND, true, Some((at, track)), cx);
+        self.open_workbench(id, window, cx);
     }
 }

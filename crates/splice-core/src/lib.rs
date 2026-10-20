@@ -6,5 +6,6 @@ pub mod export;
 pub mod history;
 pub mod look;
 pub mod model;
+pub mod score;
 pub mod store;
 pub mod time;

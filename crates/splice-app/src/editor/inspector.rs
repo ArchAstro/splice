@@ -351,7 +351,7 @@ impl Editor {
 
     // Small controls.
 
-    fn chip(
+    pub(super) fn chip(
         &self,
         id: impl Into<SharedString>,
         label: &str,
@@ -420,7 +420,7 @@ impl Editor {
             .on_click(cx.listener(move |this, _, _, cx| f(this, cx)))
     }
 
-    fn toggle(
+    pub(super) fn toggle(
         &self,
         id: &'static str,
         label: &str,
@@ -564,6 +564,10 @@ impl Editor {
         let id = clip.id;
         let project = &self.doc.project;
         let (glyph, kind, visual, audio, media_clip) = match project.source(&clip) {
+            Some(Source::Media(m)) if m.recipe.is_some() => match m.kind {
+                MediaKind::Audio => ("score", "Score", false, true, false),
+                _ => ("scene", "Scene", true, false, false),
+            },
             Some(Source::Media(m)) => match m.kind {
                 MediaKind::Video => ("film", "Video", true, m.has_audio, true),
                 MediaKind::Image => ("image", "Picture", true, false, true),
@@ -581,6 +585,58 @@ impl Editor {
         );
 
         let mut sections: Vec<AnyElement> = Vec::new();
+        let made = project
+            .media(clip.media)
+            .filter(|_| clip.generator.is_none())
+            .and_then(|m| m.recipe.as_ref().map(|r| (m.id, r.kind())));
+        if let Some((media, kind)) = made {
+            let (glyph, label, hint) = if kind == "score" {
+                (
+                    "score",
+                    "Edit the score",
+                    "Notes, instruments and tempo, or ask the assistant to compose.",
+                )
+            } else {
+                (
+                    "scene",
+                    "Edit the scene",
+                    "Its React code and preview, Clapper's studio, or ask the assistant.",
+                )
+            };
+            sections.push(
+                self.section(if kind == "score" { "Score" } else { "Scene" })
+                    .child(
+                        div()
+                            .id("open-workbench")
+                            .h(px(32.0))
+                            .rounded(px(8.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap(px(7.0))
+                            .cursor_pointer()
+                            .bg(Theme::accent())
+                            .hover(|s| s.opacity(0.9))
+                            .child(icon(glyph, Theme::ground()).size(px(13.0)))
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(Theme::ground())
+                                    .child(label),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| this.open_workbench(media, window, cx))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .line_height(px(16.0))
+                            .text_color(Theme::overlay())
+                            .child(hint),
+                    )
+                    .into_any_element(),
+            );
+        }
         match &clip.generator {
             Some(Generator::Text(title)) => sections.push(
                 self.text_section(id, &clip, title.clone(), window, cx)

@@ -27,6 +27,8 @@ pub enum Grab {
     },
     /// Dragging an inspector slider.
     Slider { field: inspector::Field, before: Project },
+    /// Dragging notes in a score's roll.
+    Note(workbench::NoteGrab),
 }
 
 /// A picture's clip, the part of the stage it shows in (inside its mask),
@@ -369,6 +371,7 @@ impl Editor {
                 let field = *field;
                 self.slide(field, at, cx);
             }
+            Some(Grab::Note(_)) => return self.note_drag(at, cx),
             None => return,
         }
         cx.notify();
@@ -378,6 +381,10 @@ impl Editor {
     pub(super) fn grab_end(&mut self, cx: &mut Context<Self>) {
         let before = match self.grab.take() {
             Some(Grab::Move { before, .. } | Grab::Scale { before, .. } | Grab::Slider { before, .. }) => before,
+            Some(Grab::Note(grab)) => {
+                self.note_drop(grab.before, cx);
+                return cx.notify();
+            }
             None => return,
         };
         self.guides = (false, false);

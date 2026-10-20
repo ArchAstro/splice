@@ -70,6 +70,7 @@ fn new(path: &Path, media: &[String]) -> anyhow::Result<()> {
             height: probe.height,
             has_audio: probe.has_audio,
             source: std::fs::canonicalize(&file).unwrap_or(file.clone()),
+            recipe: None,
         });
         project.append_clip(id);
     }

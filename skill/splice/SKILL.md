@@ -1,6 +1,6 @@
 ---
 name: splice
-description: Work with the user inside their Splice video editor - see the project they have open, place, move, trim, split and delete clips on the timeline, import media, look at any frame, export, and take requests they send from the editor. Use when the user asks for help editing a video they have open in Splice, says "my edit/timeline/movie", or asks you to listen for requests from Splice.
+description: Work with the user inside their Splice video editor - see the project they have open, place, move, trim, split and delete clips on the timeline, import media, compose music as a score, write animated scenes and diagrams in React, look at any frame, export, and take requests they send from the editor. Use when the user asks for help editing a video they have open in Splice, says "my edit/timeline/movie", or asks you to listen for requests from Splice.
 ---
 
 # Working in the user's Splice editor
@@ -95,7 +95,85 @@ splice ctl look --clip 3 --drift zoom-in --enter fade --enter-for 1
   `look`.
 - Always check with `frame` afterwards: it is drawn exactly as export draws.
 
-## 5. Playback, the window, versions, export
+## 5. Music: compose a score
+
+A score is media made from notes: instruments, a tempo, notes in beats. Splice
+plays it with General MIDI instruments (a SoundFont) and it sits on the
+timeline like any sound; every clip of it follows when you change it. The
+format is Clapper's, so `@archastro/clapper-music` scores work as JSON.
+
+```sh
+splice ctl score instruments                         # the 128 instruments, and the drum kit's keys
+splice ctl score new --file score.json --at 0 --wait # add it (and place it); --wait until it renders
+splice ctl score read --media 20                     # the JSON, plus length, notes and range per part
+splice ctl score write --media 20 --file score.json --wait
+```
+
+```json
+{ "title": "Morning Light", "tempo": 100, "meter": [4, 4], "tail": 2,
+  "tracks": [
+    { "id": "melody", "instrument": "flute", "gain": 0.85, "reverb": 0.4, "pan": 0.15,
+      "clips": [{ "notes": [{ "at": 0, "duration": 1, "pitch": "F#5", "velocity": 88 }] }] },
+    { "id": "drums", "instrument": "drums", "drums": true, "gain": 0.6,
+      "clips": [{ "at": 4, "length": 4, "repeat": 7,
+                  "notes": [{ "at": 0, "duration": 0.25, "pitch": 36 }, { "at": 1, "duration": 0.25, "pitch": 38 }] }] }
+  ] }
+```
+
+- Times are quarter-note beats. `tempo` is BPM or `[{at, bpm}]`; `meter` is
+  `[n, d]`. A clip's notes are relative to its `at`; `repeat` plays it again
+  every `length` beats; `transpose` shifts it by semitones. Pitches are
+  `"C4"` (middle C, 60), `"F#5"`, `"Bb2"`, or MIDI numbers. Velocity 1–127.
+- `instrument` is a General MIDI name from `score instruments` (`program`
+  overrides it). Drums: `"drums": true`, and the pitch picks the drum (36
+  kick, 38 snare, 42 closed hat, 46 open hat, 49 crash, 51 ride).
+- Compose like a composer: pick a key, meter, tempo and a short motif; give
+  parts jobs (melody, harmony, bass, rhythm); keep each in its register
+  (bass E1–G3, melody around C4–C6); build an arc (statement, development,
+  contrast, return, cadence) and develop the motif rather than wandering.
+  Match the length to the picture: `read` the timeline, and fit the bars to
+  the cuts (seconds = beats × 60 / tempo).
+- Write the JSON with a script when it is long (loops for chords and
+  patterns). `write` refuses a score that does not compile and says why.
+- You cannot hear it. Check what you can (`score read` ranges and lengths,
+  `frame` for picture sync) and say so; ask the person to listen.
+
+## 6. Scenes: animation and diagrams in React
+
+A scene is media made from a React component that Clapper renders frame by
+frame (github.com/ArchAstro/clapper). It is see-through where nothing is
+drawn, so it overlays the footage: diagrams, charts, callouts, kinetic type.
+
+```sh
+splice ctl scene new --file scene.tsx --duration 6 --at 12 --name "Pipeline" --wait
+splice ctl scene read --media 23                     # its code, length, file, and render error if any
+splice ctl scene write --media 23 --file scene.tsx --wait     # also --duration, --opaque
+splice ctl scene studio --media 23                   # Clapper's studio in the browser, live
+```
+
+```tsx
+import { AbsoluteFill, interpolate, spring, Easing, useFrame, useVideoConfig } from "@archastro/clapper-core";
+
+export default function Scene() {
+  const frame = useFrame();                         // the only clock: everything is a function of it
+  const { fps, width, height } = useVideoConfig();  // Splice's canvas and the scene's length
+  const s = spring({ frame, fps, config: { damping: 12 } });
+  const x = interpolate(frame, [10, 40], [0, 1], { extrapolate: "clamp", easing: Easing.outCubic });
+  return <AbsoluteFill>{/* SVG, divs, text; nothing drawn stays see-through */}</AbsoluteFill>;
+}
+```
+
+- The file's default export is the scene; Splice supplies the canvas size,
+  fps and length. Also there: `Sequence`, `Series`, `useTime`, `Typewriter`,
+  `Counter`, `Draw` (SVG strokes), `Camera`, `useRandom(seed)`.
+- Keep it frame-pure: no `Math.random`, `Date.now`, timers or effects that
+  animate by themselves.
+- A render takes a few seconds. If it fails, `--wait` (and `scene read`)
+  return the error; fix and write again. Check the result with `frame`.
+- The person may edit the same file (Code button, or the studio); `read`
+  before you write so you do not undo their change.
+
+## 7. Playback, the window, versions, export
 
 ```sh
 splice ctl seek 4.2
@@ -110,7 +188,7 @@ splice ctl export ~/Movies/cut.mp4 --wait          # --draft (fast), --high
 
 Export without `--wait` returns at once; `status` shows its `progress`.
 
-## 6. Taking requests from inside Splice
+## 8. Taking requests from inside Splice
 
 The user can message you from the editor (Cmd-Shift-A, or the speech-bubble
 button in the title bar). To receive those, wait:
@@ -124,7 +202,9 @@ splice ctl wait --name Claude
   bar; after it returns, `Claude working` until you wait again.
 - The message JSON has `message` (what they typed), `playhead`, `selection`
   (the clips they had selected, in full) and `media_selected`. "This clip",
-  "here" and "now" mean those.
+  "here" and "now" mean those. When they wrote from a score or scene's
+  editor, `editing` names it ("this music", "this scene") and says how to
+  read and change it.
 - Act, check with `frame`, then tell them in one line with `say`.
 - Then run `splice ctl wait` again to stay connected. Stop when the user
   tells you to, or when Splice is no longer running.

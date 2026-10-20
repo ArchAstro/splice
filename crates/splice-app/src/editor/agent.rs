@@ -151,6 +151,7 @@ impl Editor {
         let flag = |key: &str| request.get(key).and_then(Value::as_bool);
         let cmd = text("cmd").unwrap_or("");
         let answer = match cmd {
+            "score" | "scene" | "open" => return self.ctl_made(cmd, request, reply, window, cx),
             "status" => self.ctl_status(),
             "read" => self.ctl_read(),
             "versions" => {
@@ -677,6 +678,7 @@ impl Editor {
             "playhead": s(self.player.position),
             "selection": selection,
             "media_selected": self.bin_selection.and_then(|id| self.doc.project.media(id)).map(|m| json!({ "id": m.id.0, "name": m.name })),
+            "editing": self.workbench.as_ref().map(|b| self.editing_json(b.media)),
         })
         .to_string();
         let mut message = Some(message);
@@ -701,7 +703,7 @@ impl Editor {
         self.edited_with(json!({}))
     }
 
-    fn edited_with(&self, mut extra: Value) -> Value {
+    pub(super) fn edited_with(&self, mut extra: Value) -> Value {
         let base = json!({
             "ok": true,
             "revision": self.doc.revision,
@@ -717,7 +719,7 @@ impl Editor {
     }
 
     /// A clip as `ctl` shows it: times in seconds, its track counted from 1.
-    fn clip_json(&self, id: ClipId) -> Value {
+    pub(super) fn clip_json(&self, id: ClipId) -> Value {
         let project = &self.doc.project;
         let (Some(slot), Some(clip)) = (project.slot(id), project.clip(id)) else {
             return json!({ "id": id.0, "gone": true });
@@ -810,6 +812,9 @@ impl Editor {
                     "audio": m.has_audio,
                     "file": assets.and_then(|a| a.path.as_ref()),
                     "ready": assets.is_some_and(|a| a.path.is_some() && !a.loading),
+                    "made": m.recipe.as_ref().map(|r| r.kind()),
+                    "rendering": self.render_of(m.id).map(|r| r.progress()),
+                    "render_error": self.made.errors.get(&m.id),
                 })
             })
             .collect();
@@ -834,7 +839,7 @@ impl Editor {
     }
 
     /// A time field: seconds, or "end" for the end of the movie.
-    fn time(&self, request: &Value, key: &str) -> Result<Option<Time>, String> {
+    pub(super) fn time(&self, request: &Value, key: &str) -> Result<Option<Time>, String> {
         match request.get(key) {
             None | Some(Value::Null) => Ok(None),
             Some(Value::String(word)) if word == "end" => Ok(Some(self.doc.project.duration())),
@@ -850,7 +855,7 @@ impl Editor {
     }
 
     /// The track named in a request, as an index (requests count from 1).
-    fn track(&self, request: &Value) -> Option<usize> {
+    pub(super) fn track(&self, request: &Value) -> Option<usize> {
         request
             .get("track")
             .and_then(Value::as_u64)
@@ -872,7 +877,7 @@ impl Editor {
         }
     }
 
-    fn find_media(&self, spec: &Value) -> Result<MediaId, String> {
+    pub(super) fn find_media(&self, spec: &Value) -> Result<MediaId, String> {
         let media = &self.doc.project.media;
         let found = match spec {
             Value::Number(id) => media.iter().find(|m| Some(m.id.0) == id.as_u64()),

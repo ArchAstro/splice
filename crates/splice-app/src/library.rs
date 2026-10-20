@@ -43,6 +43,23 @@ impl Library {
         self.assets.entry(hash.to_string()).or_default()
     }
 
+    /// Lets a render not yet made borrow what the previous one shows and
+    /// plays, marked as loading until its own arrives.
+    pub fn borrow_render(&mut self, from: &str, to: &str) {
+        let Some(old) = self.assets.get(from) else { return };
+        let borrowed = Assets {
+            path: old.path.clone(),
+            thumb: old.thumb.clone(),
+            strip: old.strip.clone(),
+            still: old.still.clone(),
+            pcm: old.pcm.clone(),
+            peaks: old.peaks.clone(),
+            loading: true,
+            error: None,
+        };
+        self.assets.insert(to.to_string(), borrowed);
+    }
+
     pub fn clear(&mut self) {
         self.assets.clear();
     }

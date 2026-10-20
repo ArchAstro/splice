@@ -31,9 +31,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 mod agent;
 mod inspector;
+mod made;
 mod render;
 mod shelf;
 mod stage;
+mod workbench;
 
 const AUTOSAVE_EVERY: Duration = Duration::from_millis(1500);
 
@@ -110,6 +112,13 @@ enum Overlay {
         index: usize,
         list: Vec<String>,
     },
+    /// Choosing the instrument a score's part plays.
+    Instruments {
+        media: MediaId,
+        part: usize,
+        query: String,
+        index: usize,
+    },
 }
 
 #[derive(Default)]
@@ -176,8 +185,13 @@ pub struct Editor {
     card_width: f32,
     /// The timeline's layers were scrolled by hand, so they stay where put.
     scrolled_layers: bool,
+    /// Scores and scenes: their renders, errors, studios.
+    made: made::Made,
+    /// The score or scene editor, when one is open.
+    workbench: Option<workbench::Bench>,
     _ctl: Task<()>,
     _autosave: Task<()>,
+    _watch: Task<()>,
 }
 
 /// The left panel's tabs.
@@ -213,6 +227,16 @@ impl Editor {
             loop {
                 cx.background_executor().timer(AUTOSAVE_EVERY).await;
                 if this.update(cx, |editor, cx| editor.autosave(cx)).is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Saves to scenes' code made outside Splice come back in.
+        let watch = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(700)).await;
+                if this.update(cx, |editor, cx| editor.poll_scenes(cx)).is_err() {
                     break;
                 }
             }
@@ -278,8 +302,11 @@ impl Editor {
             shelf: Shelf::Media,
             card_width: render::CARD_MIN,
             scrolled_layers: false,
+            made: made::Made::default(),
+            workbench: None,
             _ctl: ctl,
             _autosave: autosave,
+            _watch: watch,
         };
         editor.prepare_media(cx);
         editor
@@ -304,6 +331,8 @@ impl Editor {
     /// Last write before quitting or closing.
     pub fn flush(&mut self) {
         self.doc.finish();
+        // Clapper studios stop with Splice.
+        self.made.studios.clear();
     }
 
     fn replace_document(&mut self, doc: Document, cx: &mut Context<Self>) {
@@ -327,6 +356,9 @@ impl Editor {
     fn prepare_media(&mut self, cx: &mut Context<Self>) {
         let cache = &dirs().cache;
         for media in self.doc.project.media.clone() {
+            if media.recipe.is_some() {
+                continue;
+            }
             if self
                 .library
                 .get(&media.hash)
@@ -348,6 +380,7 @@ impl Editor {
                 self.library.entry(&media.hash).error = Some("offline".into());
             }
         }
+        self.reconcile_made(cx);
     }
 
     fn unpack(&mut self, media: Media, dest: PathBuf, cx: &mut Context<Self>) {
@@ -505,6 +538,7 @@ impl Editor {
                             height: probe.height,
                             has_audio: probe.has_audio,
                             source: path.clone(),
+                            recipe: None,
                         });
                         let media = project.media(id).cloned().expect("just added");
                         if let Some((t, track)) = at
@@ -591,6 +625,7 @@ impl Editor {
     fn edit<R>(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Project) -> R) -> R {
         let result = self.doc.edit(f);
         self.after_edit();
+        self.reconcile_made(cx);
         cx.notify();
         result
     }
@@ -726,6 +761,20 @@ impl Editor {
             }
             Hit::Gutter(_, None) => {}
             Hit::Body(id) => {
+                let made = self
+                    .doc
+                    .project
+                    .clip(id)
+                    .filter(|c| c.generator.is_none())
+                    .and_then(|c| self.doc.project.media(c.media))
+                    .filter(|m| m.recipe.is_some())
+                    .map(|m| m.id);
+                if event.click_count >= 2
+                    && let Some(media) = made
+                {
+                    self.selection = vec![id];
+                    return self.open_workbench(media, window, cx);
+                }
                 if shift {
                     if let Some(i) = self.selection.iter().position(|s| *s == id) {
                         self.selection.remove(i);
@@ -923,6 +972,9 @@ impl Editor {
     }
 
     fn delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
+        if self.delete_notes(cx) {
+            return;
+        }
         if self.selection.is_empty() {
             self.say("Select a clip to delete");
             return cx.notify();
@@ -953,12 +1005,18 @@ impl Editor {
     }
 
     fn deselect(&mut self, _: &Deselect, _: &mut Window, cx: &mut Context<Self>) {
+        if self.bench_escape(cx) {
+            return;
+        }
         self.selection.clear();
         self.bin_selection = None;
         cx.notify();
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(bench) = &mut self.workbench {
+            bench.notes.clear();
+        }
         if self.doc.undo() {
             self.after_edit();
             self.prepare_media(cx);
@@ -967,6 +1025,9 @@ impl Editor {
     }
 
     fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(bench) = &mut self.workbench {
+            bench.notes.clear();
+        }
         if self.doc.redo() {
             self.after_edit();
             self.prepare_media(cx);
@@ -1150,6 +1211,9 @@ impl Editor {
         reveal: bool,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        if let Some(waiting) = self.unrendered_in_use() {
+            return Err(format!("Cannot export yet: {waiting}"));
+        }
         let plan = match export::plan(&self.doc.project, &self.resolver(), &output, quality) {
             Ok(plan) => plan,
             Err(e) => return Err(format!("Cannot export: {e}")),
@@ -1357,6 +1421,29 @@ impl Editor {
                     let clip = *clip;
                     match chosen {
                         Some(font) => return self.choose_font(clip, font, window, cx),
+                        None => return self.close_overlay(window, cx),
+                    }
+                }
+                _ if !command => {
+                    if let Some(c) = typed.filter(|c| !c.chars().any(char::is_control)) {
+                        query.push_str(&c);
+                        *index = 0;
+                    }
+                }
+                _ => {}
+            },
+            Overlay::Instruments { part, query, index, .. } => match key {
+                "escape" => return self.close_overlay(window, cx),
+                "up" => *index = index.saturating_sub(1),
+                "down" => *index += 1,
+                "backspace" => {
+                    query.pop();
+                    *index = 0;
+                }
+                "enter" => {
+                    let part = *part;
+                    match Self::instrument_matches(query).into_iter().nth(*index) {
+                        Some((choice, _)) => return self.choose_instrument(part, choice, window, cx),
                         None => return self.close_overlay(window, cx),
                     }
                 }

@@ -121,7 +121,8 @@ impl Document {
         }
     }
 
-    fn touch(&mut self) {
+    /// Marks the project changed without an undo step (a render finishing).
+    pub fn touch(&mut self) {
         self.revision += 1;
         self.dirty = true;
         self.edited = true;

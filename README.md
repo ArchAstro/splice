@@ -58,6 +58,35 @@ on export. Keys and masks are ffmpeg filters that the viewer's decoder runs
 too. Animation is one expression, evaluated for the viewer and printed into
 ffmpeg for export.
 
+## Scores and scenes
+
+Two kinds of media Splice makes rather than imports. Each opens in its own
+editor (double-click it in the media panel or on the timeline, or use the
+**New score** / **New scene** tiles), and each re-renders when it changes,
+with every clip of it following.
+
+- **Score**: music as notes. Instruments, tempo, meter and notes in beats,
+  shown as a piano roll with one lane per instrument. Click to add a note,
+  drag to move or lengthen it, ⌫ to delete. Each lane has mute, solo and an
+  instrument picker covering the 128 General MIDI instruments plus a drum kit.
+  It plays with the timeline, so you hear it against the picture. Splice
+  renders it with rustysynth and the GeneralUser GS SoundFont, which it
+  downloads once (32 MB) and checks. The format is
+  [Clapper](https://github.com/ArchAstro/clapper)'s score JSON, so the
+  assistant can compose it: **Ask** in the editor sends it what you have open.
+- **Scene**: an animation or diagram written as a React component and
+  rendered by Clapper, one frame at a time. The editor shows the code beside
+  the composited picture, with its length and a transparent background
+  (on by default, so it overlays what is under it). **Code** opens the file
+  in your editor; **Studio** opens Clapper's studio on it in the browser. A
+  save in either re-renders it in Splice within seconds. Splice uses
+  `clapper` from `$SPLICE_CLAPPER` or the PATH. If it finds neither, it
+  fetches Clapper's pinned v0.4.0 launcher, checking its checksum. On first
+  use the launcher downloads its runtime (Node, Chromium, ffmpeg).
+
+Renders are cached by what they are made from, and kept in the project file
+so it still opens anywhere.
+
 ## Projects
 
 A project is one `.splice` file: a SQLite database holding the imported
@@ -94,6 +123,9 @@ with `make install-skill`) teaches Claude Code to use it.
 | `splice ctl track`, `canvas`, `undo`, `redo` | layers, canvas shape, history |
 | `splice ctl text`, `color`, `style`, `fonts` | titles in system fonts, colour cards and tints |
 | `splice ctl look` | position, size, opacity, animation, green screen, mask |
+| `splice ctl score new / read / write / instruments` | compose music: a score in Clapper's JSON |
+| `splice ctl scene new / read / write / studio` | animations and diagrams from React code |
+| `splice ctl open --media M` | opens a score or scene in its editor |
 | `splice ctl seek`, `play`, `pause`, `select`, `command` | the playhead, selection and any menu command |
 | `splice ctl save`, `versions`, `export FILE [--wait]` | versions and export |
 | `splice ctl wait --name Claude` | connects an assistant and waits for your message |

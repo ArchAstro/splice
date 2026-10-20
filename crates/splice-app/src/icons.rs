@@ -79,6 +79,13 @@ fn icon(name: &str) -> Option<&'static str> {
         "align-left" => r#"<path d="M4 6h16M4 10h10M4 14h16M4 18h10"/>"#,
         "align-center" => r#"<path d="M4 6h16M7 10h10M4 14h16M7 18h10"/>"#,
         "align-right" => r#"<path d="M4 6h16M10 10h10M4 14h16M10 18h10"/>"#,
+        "score" => {
+            r#"<path d="M3.5 7h17M3.5 11h17M3.5 15h17"/><path d="M14.5 15.5V5l4-1"/><ellipse cx="12.4" cy="16" rx="2.4" ry="1.9" fill="black"/><path d="M6.5 19h4"/>"#
+        }
+        "scene" => r#"<path d="m8.5 7.5-5 4.5 5 4.5"/><path d="m15.5 7.5 5 4.5-5 4.5"/><path d="m13.5 5-3 14"/>"#,
+        "close" => r#"<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>"#,
+        "minus" => r#"<path d="M5 12h14"/>"#,
+        "chevron" => r#"<path d="m7 9.5 5 5 5-5"/>"#,
         "text" => r#"<path d="M5 6.5V5h14v1.5"/><path d="M12 5v14"/><path d="M9 19h6"/>"#,
         "swatch" => {
             r#"<circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17" /><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="black"/>"#
