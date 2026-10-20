@@ -211,10 +211,16 @@ impl Editor {
         let outline_from = placed.clone();
         let overlay = canvas(
             |_, _, _| {},
-            move |bounds, _, window, _| {
+            move |_, _, window, _| {
                 let stage = cell.get();
-                // A picture grown past the canvas keeps its outline inside the viewer.
-                window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+                // A picture grown past the canvas: its outline follows the edge of
+                // the margin the stage keeps, rather than running on over the panels
+                // beside the viewer or vanishing, and only corners in view get handles.
+                let margin = Bounds::new(
+                    stage.origin - point(px(12.0), px(12.0)),
+                    stage.size + size(px(24.0), px(24.0)),
+                );
+                window.with_content_mask(Some(gpui::ContentMask { bounds: margin }), |window| {
                     let accent: Hsla = Theme::accent().into();
                     if guides.0 {
                         let x = stage.center().x;
@@ -240,15 +246,19 @@ impl Editor {
                     }) else {
                         return;
                     };
+                    let shown = rect.intersect(&margin);
+                    if shown.size.width <= px(0.0) || shown.size.height <= px(0.0) {
+                        return;
+                    }
                     window.paint_quad(quad(
-                        rect,
+                        shown,
                         Corners::default(),
                         transparent_black(),
                         px(1.5),
                         accent,
                         Default::default(),
                     ));
-                    for corner in corners(rect) {
+                    for corner in corners(rect).into_iter().filter(|c| margin.contains(c)) {
                         let handle = Bounds::centered_at(corner, size(px(9.0), px(9.0)));
                         window.paint_quad(quad(
                             handle,

@@ -109,13 +109,20 @@ Talking with the person
                                  Splice (Cmd-Shift-A), prints it with what they had selected, and exits
   call                           send one JSON request read from stdin
 
+  With more than one Splice window open, name the project: --project NAME|PATH (anywhere in the
+  command) or SPLICE_PROJECT=NAME; with one, commands go to it.
   T is seconds (12.5), m:ss (1:02.5) or h:mm:ss. Tracks count from 1, the bottom layer;
   a track number one above the top makes a new layer. --clip takes ids separated by commas.
   A value of @FILE is read from FILE, and - from stdin."#;
 
-/// Where a running Splice listens.
+/// Where running Splice windows listen: one socket each, named by process.
+fn sockets() -> PathBuf {
+    dirs().data.join("ctl")
+}
+
+/// Where this Splice listens.
 pub fn socket_path() -> PathBuf {
-    dirs().data.join("splice.sock")
+    sockets().join(format!("{}.sock", std::process::id()))
 }
 
 /// What the window receives: a request and where its reply goes, or word
@@ -129,19 +136,18 @@ pub enum Incoming {
     Gone(u64),
 }
 
-/// Starts answering requests. `None` when another Splice already does.
+/// Starts answering requests on this window's own socket.
 pub fn listen() -> Option<UnboundedReceiver<Incoming>> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = sockets();
+    std::fs::create_dir_all(&dir).ok()?;
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    // Before per-window sockets, every Splice shared one.
+    let _ = std::fs::remove_file(dirs().data.join("splice.sock"));
     let socket = socket_path();
-    if UnixStream::connect(&socket).is_ok() {
-        return None;
-    }
-    // Whatever is there was left by a Splice that is gone.
     let _ = std::fs::remove_file(&socket);
     let listener = UnixListener::bind(&socket).ok()?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
-    }
+    let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
     let (tx, rx) = unbounded();
     std::thread::spawn(move || {
         for (n, stream) in listener.incoming().flatten().enumerate() {
@@ -188,11 +194,97 @@ pub fn stop_listening() {
     let _ = std::fs::remove_file(socket_path());
 }
 
-/// Sends one request to the running Splice; `None` if none is running.
-/// `patient` waits as long as it takes (a message, an import, an export).
-fn send(line: &str, patient: bool) -> Option<String> {
-    let mut stream = UnixStream::connect(socket_path()).ok()?;
-    let _ = stream.set_read_timeout((!patient).then(|| Duration::from_secs(15)));
+/// A running Splice window, and the project it has open.
+struct Window {
+    socket: PathBuf,
+    project: PathBuf,
+    name: String,
+}
+
+/// Every Splice window that answers. Sockets left by windows that are gone
+/// are cleared away.
+fn windows() -> Vec<Window> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(sockets()) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let socket = entry.path();
+        if socket.extension().is_none_or(|e| e != "sock") {
+            continue;
+        }
+        match ask(&socket, &json!({ "cmd": "who" }).to_string(), false) {
+            Some(reply) => {
+                let who: Value = serde_json::from_str(&reply).unwrap_or(Value::Null);
+                found.push(Window {
+                    socket,
+                    project: PathBuf::from(who["project"].as_str().unwrap_or("")),
+                    name: who["name"].as_str().unwrap_or("").to_string(),
+                });
+            }
+            None if UnixStream::connect(&socket).is_err() => {
+                let _ = std::fs::remove_file(&socket);
+            }
+            None => {}
+        }
+    }
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found
+}
+
+fn listing(windows: &[Window]) -> String {
+    windows
+        .iter()
+        .map(|w| format!("{} ({})", w.name, w.project.display()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The window to talk to: the only one, or the one whose project `wanted`
+/// names (a path, or a project's name).
+fn choose(wanted: Option<&str>) -> Result<PathBuf, String> {
+    let open = windows();
+    if open.is_empty() {
+        return Err("Splice is not running; open it with `splice` or `make run`".into());
+    }
+    let Some(wanted) = wanted.map(str::trim).filter(|w| !w.is_empty()) else {
+        return match &open[..] {
+            [only] => Ok(only.socket.clone()),
+            _ => Err(format!(
+                "{} Splice windows are open: {}. Say which with --project NAME (or set SPLICE_PROJECT)",
+                open.len(),
+                listing(&open)
+            )),
+        };
+    };
+    let path = std::fs::canonicalize(wanted).ok();
+    let name = wanted.trim_end_matches(".splice").to_lowercase();
+    let matches: Vec<&Window> = open
+        .iter()
+        .filter(|w| {
+            path.as_ref()
+                .is_some_and(|p| std::fs::canonicalize(&w.project).ok().as_ref() == Some(p))
+                || w.name.to_lowercase() == name
+        })
+        .collect();
+    match &matches[..] {
+        [one] => Ok(one.socket.clone()),
+        [] => Err(format!("no open Splice window has {wanted}; open: {}", listing(&open))),
+        _ => Err(format!(
+            "several windows match {wanted}; give its path: {}",
+            listing(&open)
+        )),
+    }
+}
+
+/// Sends one line to one window and reads its answer.
+fn ask(socket: &std::path::Path, line: &str, patient: bool) -> Option<String> {
+    let mut stream = UnixStream::connect(socket).ok()?;
+    let _ = stream.set_read_timeout(Some(if patient {
+        Duration::from_secs(60 * 60 * 24 * 365)
+    } else {
+        Duration::from_secs(15)
+    }));
     stream.write_all(line.replace('\n', " ").as_bytes()).ok()?;
     stream.write_all(b"\n").ok()?;
     let mut reply = String::new();
@@ -455,6 +547,22 @@ pub fn cli(args: &[String]) -> i32 {
         println!("{USAGE}");
         return 0;
     }
+    // Which window: --project anywhere in the arguments, else $SPLICE_PROJECT.
+    let mut project = std::env::var("SPLICE_PROJECT").ok();
+    let mut rest = Vec::new();
+    let mut given = args.iter();
+    while let Some(arg) = given.next() {
+        match arg.strip_prefix("--project") {
+            Some("") => project = given.next().cloned(),
+            Some(value) if value.starts_with('=') => project = Some(value[1..].to_string()),
+            _ => rest.push(arg.clone()),
+        }
+    }
+    let args = &rest[..];
+    if args.is_empty() {
+        println!("{USAGE}");
+        return 0;
+    }
     let request = match build(args) {
         Ok(request) => request,
         Err(err) => {
@@ -467,8 +575,15 @@ pub fn cli(args: &[String]) -> i32 {
     };
     let patient = matches!(request["cmd"].as_str(), Some("wait" | "import" | "frame"))
         || (matches!(request["cmd"].as_str(), Some("export" | "score" | "scene")) && request["wait"] == json!(true));
-    let Some(reply) = send(&request.to_string(), patient) else {
-        println!("{}", fail("Splice is not running; open it with `splice` or `make run`"));
+    let socket = match choose(project.as_deref()) {
+        Ok(socket) => socket,
+        Err(e) => {
+            println!("{:#}", fail(e));
+            return 1;
+        }
+    };
+    let Some(reply) = ask(&socket, &request.to_string(), patient) else {
+        println!("{:#}", fail("that Splice window did not answer; it may have closed"));
         return 1;
     };
     let parsed: Value = serde_json::from_str(&reply).unwrap_or_else(|_| fail("Splice sent a reply that is not JSON"));

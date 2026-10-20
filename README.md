@@ -136,9 +136,11 @@ with `make install-skill`) teaches Claude Code to use it.
 
 While an assistant waits, the title bar shows `● Claude`; press ⇧⌘A (or click
 it) to send a message. Your playhead and selected clips travel with it, so
-"tighten this clip" means the one you selected. The socket is
-`~/Library/Application Support/Splice/splice.sock`, and only your user can
-connect to it.
+"tighten this clip" means the one you selected. Each window
+listens on its own socket in `~/Library/Application Support/Splice/ctl/`, and
+only your user can connect. With one window open, commands go to it; with
+several, name the project: `splice ctl --project demo status`, or set
+`SPLICE_PROJECT` once for a session.
 
 ## Layout
 

@@ -22,6 +22,10 @@ splice ctl read      # everything: media and every track and clip, with ids and 
 
 - If the reply says Splice is not running, tell the user; do not start it
   yourself unless they ask.
+- If several Splice windows are open, commands are refused until you name
+  the project: add `--project NAME` (or its path) to every command, or run
+  with `SPLICE_PROJECT=NAME`. The error lists the open projects; ask the
+  user which one they mean if it is not clear.
 - Times are seconds. Tracks count from 1, the bottom layer; higher tracks
   draw over lower ones (that is how overlays work).
 - Clips have an `id`, a `media` id, `start`/`end` on the timeline,

@@ -155,6 +155,12 @@ impl Editor {
             "ui" | "click" | "hover" | "drag" | "scroll" | "key" | "type" => {
                 return self.ctl_input(cmd, request, reply, window, cx);
             }
+            "who" => json!({
+                "ok": true,
+                "project": self.doc.path(),
+                "name": self.doc.name(),
+                "pid": std::process::id(),
+            }),
             "status" => self.ctl_status(),
             "read" => self.ctl_read(),
             "versions" => {
