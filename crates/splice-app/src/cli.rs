@@ -1,8 +1,13 @@
 //! Headless commands, for scripts and for checking a project without the UI.
 //!
+//! ```text
 //! splice --new <project.splice> <media>...   make a project, media end to end
 //! splice --export <project.splice> <out.mp4> [--draft]
 //! splice --info <project.splice>             versions and media
+//! splice --still <scene.json> <out.png> [--size WxH] [--at T]
+//!                                             one frame of a scene, drawn here
+//! splice --version
+//! ```
 
 use crate::ffmpeg::{self, file_name};
 use crate::library;
@@ -27,9 +32,14 @@ pub fn run(args: &[String]) -> Option<i32> {
             export_project(Path::new(&args[1]), Path::new(&args[2]), quality)
         }
         Some("--info") if args.len() >= 2 => info(Path::new(&args[1])),
+        Some("--still") if args.len() >= 3 => still(Path::new(&args[1]), Path::new(&args[2]), &args[3..]),
+        Some("--version") | Some("-V") => {
+            println!("splice {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Some("--help") | Some("-h") => {
             println!(
-                "splice [project.splice]\nsplice --new <project.splice> <media>...\nsplice --export <project.splice> <out.mp4> [--draft]\nsplice --info <project.splice>"
+                "splice [project.splice]\nsplice --new <project.splice> <media>...\nsplice --export <project.splice> <out.mp4> [--draft]\nsplice --info <project.splice>\nsplice --still <scene.json> <out.png> [--size WxH] [--at SECONDS]\nsplice --version\nsplice ctl --help"
             );
             Ok(())
         }
@@ -42,6 +52,31 @@ pub fn run(args: &[String]) -> Option<i32> {
             1
         }
     })
+}
+
+/// Draws one frame of a scene file to a PNG: no window, no project.
+fn still(scene: &Path, out: &Path, rest: &[String]) -> anyhow::Result<()> {
+    let mut size = (1280u32, 720u32);
+    let mut at = 0.0f64;
+    let mut rest = rest.iter();
+    while let Some(flag) = rest.next() {
+        let value = rest.next().ok_or_else(|| anyhow::anyhow!("{flag} needs a value"))?;
+        match flag.as_str() {
+            "--size" => {
+                let (w, h) = value
+                    .split_once('x')
+                    .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+                    .ok_or_else(|| anyhow::anyhow!("--size is WIDTHxHEIGHT"))?;
+                size = (w, h);
+            }
+            "--at" => at = value.parse().map_err(|_| anyhow::anyhow!("--at is seconds"))?,
+            other => anyhow::bail!("unknown option {other}"),
+        }
+    }
+    let source = std::fs::read_to_string(scene)?;
+    crate::scenes::still_png(&source, size, at, out)?;
+    println!("{}", out.display());
+    Ok(())
 }
 
 fn new(path: &Path, media: &[String]) -> anyhow::Result<()> {

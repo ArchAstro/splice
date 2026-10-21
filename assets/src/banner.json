@@ -1,0 +1,110 @@
+{
+  "background": "#12151f",
+  "layers": [
+    {
+      "type": "rect",
+      "name": "glow",
+      "x": "50%",
+      "y": "50%",
+      "width": 2400,
+      "height": 800,
+      "fill": {
+        "stops": [
+          [
+            0,
+            "#1d2232"
+          ],
+          [
+            1,
+            "#12151f"
+          ]
+        ],
+        "angle": 90
+      }
+    },
+    {
+      "type": "text",
+      "name": "wordmark",
+      "x": 1540,
+      "y": 318,
+      "text": "splice",
+      "font": "Iowan Old Style",
+      "size": 250,
+      "fill": "#f3eee4",
+      "align": "right"
+    },
+    {
+      "type": "rect",
+      "name": "cursor",
+      "x": 1556,
+      "y": 330,
+      "width": 16,
+      "height": 236,
+      "radius": 4,
+      "fill": "#ef6a55"
+    },
+    {
+      "type": "text",
+      "name": "tagline",
+      "x": 1200,
+      "y": 520,
+      "text": "A small, quiet video editor you can talk to.",
+      "font": "Avenir Next",
+      "size": 50,
+      "fill": "#b8beca"
+    },
+    {
+      "type": "group",
+      "name": "timeline",
+      "x": 1255,
+      "y": 650,
+      "children": [
+        {
+          "type": "rect",
+          "x": -420,
+          "y": 0,
+          "width": 300,
+          "height": 40,
+          "radius": 8,
+          "fill": "#6c9ef8"
+        },
+        {
+          "type": "rect",
+          "x": -100,
+          "y": 0,
+          "width": 280,
+          "height": 40,
+          "radius": 8,
+          "fill": "#86cfc0"
+        },
+        {
+          "type": "rect",
+          "x": 170,
+          "y": 0,
+          "width": 200,
+          "height": 40,
+          "radius": 8,
+          "fill": "#c792ea"
+        },
+        {
+          "type": "rect",
+          "x": 380,
+          "y": 0,
+          "width": 160,
+          "height": 40,
+          "radius": 8,
+          "fill": "#f2c14e"
+        },
+        {
+          "type": "rect",
+          "x": 40,
+          "y": 0,
+          "width": 6,
+          "height": 80,
+          "radius": 3,
+          "fill": "#ef6a55"
+        }
+      ]
+    }
+  ]
+}

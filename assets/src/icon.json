@@ -1,0 +1,90 @@
+{
+  "layers": [
+    {
+      "type": "rect",
+      "name": "tile",
+      "x": 512,
+      "y": 506,
+      "width": 824,
+      "height": 824,
+      "radius": 186,
+      "fill": {
+        "stops": [
+          [
+            0,
+            "#262c3f"
+          ],
+          [
+            1,
+            "#11141c"
+          ]
+        ],
+        "angle": 90
+      },
+      "shadow": {
+        "blur": 36,
+        "y": 14,
+        "color": "#00000066"
+      }
+    },
+    {
+      "type": "rect",
+      "name": "rim",
+      "x": 512,
+      "y": 506,
+      "width": 822,
+      "height": 822,
+      "radius": 185,
+      "stroke": "#ffffff14",
+      "strokeWidth": 2
+    },
+    {
+      "type": "text",
+      "name": "s",
+      "x": 452,
+      "y": 478,
+      "text": "s",
+      "font": "Iowan Old Style",
+      "size": 760,
+      "fill": "#f3eee4"
+    },
+    {
+      "type": "rect",
+      "name": "playhead",
+      "x": 690,
+      "y": 522,
+      "width": 26,
+      "height": 476,
+      "radius": 8,
+      "fill": "#ef6a55"
+    },
+    {
+      "type": "path",
+      "name": "head",
+      "x": 690,
+      "y": 282,
+      "d": "M -46 -30 L 46 -30 L 46 8 L 0 46 L -46 8 Z",
+      "fill": "#ef6a55"
+    },
+    {
+      "type": "rect",
+      "name": "track",
+      "x": 512,
+      "y": 830,
+      "width": 560,
+      "height": 12,
+      "radius": 6,
+      "fill": "#3a4052"
+    },
+    {
+      "type": "rect",
+      "name": "progress",
+      "x": 445,
+      "y": 830,
+      "width": 426,
+      "height": 12,
+      "radius": 6,
+      "fill": "#ef6a55"
+    }
+  ]
+}

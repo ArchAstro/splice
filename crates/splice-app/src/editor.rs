@@ -650,6 +650,11 @@ impl Editor {
         cx.notify();
     }
 
+    /// Files from Finder: a project opens, media comes in.
+    pub fn open_files(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.import_paths(paths, None, None, cx);
+    }
+
     fn open_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if path == self.doc.path() {
             return;

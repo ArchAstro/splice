@@ -260,8 +260,11 @@ mod tests {
 
     #[test]
     fn lists_displays_and_windows() {
-        assert!(!displays().is_empty(), "a Mac has a display");
-        // Windows need a window server; just make sure listing does not crash.
+        // A machine without a screen (a CI runner) may list none; listing must
+        // still not fail.
+        for display in displays() {
+            assert!(display.number >= 1 && display.width > 0.0);
+        }
         let _ = windows();
     }
 }

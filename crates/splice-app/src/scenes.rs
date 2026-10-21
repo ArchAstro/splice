@@ -482,6 +482,14 @@ fn save(pixmap: &Pixmap, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The scene alone at `t` seconds as a PNG of `size`, see-through where
+/// nothing is drawn.
+pub fn still_png(source: &str, size: (u32, u32), t: f64, path: &Path) -> Result<()> {
+    let spec = Spec::parse(source)?;
+    let mut painter = Painter::new(spec, size.0.max(2), size.1.max(2));
+    save(&painter.frame(t), path)
+}
+
 /// The scene alone at `t` seconds, over a checkerboard where it is clear.
 pub fn still(settings: &Settings, source: &str, t: f64, path: &Path) -> Result<()> {
     let spec = Spec::parse(source)?;

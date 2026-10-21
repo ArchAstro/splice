@@ -1,16 +1,83 @@
-# Splice
+<p align="center">
+  <img src="assets/banner.jpg" alt="splice — a small, quiet video editor you can talk to" width="100%">
+</p>
 
-A small, quiet video editor. Rust, GPU-rendered with [GPUI](https://www.gpui.rs),
-CapCut as the inspiration and simplicity as the rule: bring in videos, images
-and sound, arrange and layer them on a timeline, cut, play, export.
+<p align="center">
+  <b>A small, quiet video editor you can talk to.</b><br>
+  Rust core · GPU-rendered · titles, looks, music and motion made in place · a story board · screen recording · an assistant that edits beside you
+</p>
 
-## Run
+<p align="center">
+  <a href="https://github.com/ArchAstro/splice/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/ArchAstro/splice?color=ef6a55&label=release"></a>
+  <a href="https://github.com/ArchAstro/splice/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/ArchAstro/splice/ci.yml?branch=main&label=ci"></a>
+  <img alt="macOS 13+" src="https://img.shields.io/badge/macOS-13%2B-12151f">
+  <img alt="Rust 1.90+" src="https://img.shields.io/badge/rust-1.90%2B-12151f">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-12151f"></a>
+</p>
 
-Needs Rust 1.90+ and ffmpeg (`brew install ffmpeg`).
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="#using-it">Using it</a> ·
+  <a href="#titles-and-looks">Looks</a> ·
+  <a href="#scores-and-scenes">Music and scenes</a> ·
+  <a href="#story-and-recording">Story</a> ·
+  <a href="#assistants">Assistants</a>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/hero.png" alt="Splice: media on the left, the picture in the middle, a title's settings on the right, and a timeline of layered clips under a coloured story lane" width="100%">
+</p>
+
+To *splice* film is to join two pieces of it: cut, line up, tape. Splice keeps
+editing that simple. CapCut is the inspiration and simplicity the rule: bring
+in videos, images and sound, layer them on a timeline, cut, play, export.
+
+## Why Splice
+
+1. **It stays out of the way.** Media on the left, the picture in the middle,
+   settings on the right, the timeline below. Everything is one click or one
+   key, and every change is one undo step.
+2. **It makes what you would otherwise fetch.** Titles in any installed font,
+   colour cards, green screen, masks and motion; music written as a score and
+   played with real instruments; animated diagrams drawn from a short
+   description. No plug-ins, no second app.
+3. **It plans as well as cuts.** A story board of beats, shots and reference
+   pictures sits on the same timeline as the footage, and the screen recorder
+   drops takes straight into the beat they are for.
+4. **Assistants work beside you.** `splice ctl` lets Claude, or any program,
+   read the project, edit it, compose its music, look at any frame and record
+   the screen, while you keep working. A project is one file, autosaved and
+   versioned.
+
+<p align="center">
+  <img src="docs/screenshots/story.png" alt="The story board: beat cards with frames, notes and reference shots" width="49%">
+  <img src="docs/screenshots/score.png" alt="The score editor: a piano roll per instrument" width="49%">
+</p>
+
+## Install
 
 ```sh
-make run                     # opens your last project, or a new one
-cargo run --release -p splice-app -- path/to/film.splice
+curl -fsSL https://raw.githubusercontent.com/ArchAstro/splice/main/install.sh | sh
+```
+
+This downloads the latest release for macOS 13+ (Apple Silicon or Intel),
+checks it against the published checksums, installs `Splice.app` into
+`/Applications` with the `splice` command in `~/.local/bin` (the same program),
+the Claude Code skill in `~/.claude/skills/splice`, and ffmpeg with Homebrew if
+it is missing. `SPLICE_VERSION=v0.1.0`, `SPLICE_INSTALL_DIR`, `SPLICE_APP=0`
+(the command only), `SPLICE_FFMPEG=0` and `SPLICE_SKILL=0` change that.
+
+You can also download `splice-macos.dmg` from the releases page and drag the
+app across. Until releases are signed with a Developer ID, an app downloaded in
+a browser needs a right-click → Open the first time; the installer does not.
+
+To build from source instead (needs Rust 1.90+ and `brew install ffmpeg`):
+
+```sh
+gh repo clone ArchAstro/splice && cd splice
+make install       # builds splice into ~/.cargo/bin and links the skill
+make run           # or run it straight from the checkout
+make install-app   # Splice.app in /Applications
 ```
 
 ## Using it
@@ -187,6 +254,11 @@ listens on its own socket in `~/Library/Application Support/Splice/ctl/`, and
 only your user can connect. With one window open, commands go to it; with
 several, name the project: `splice ctl --project demo status`, or set
 `SPLICE_PROJECT` once for a session.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports go through
+[SECURITY.md](SECURITY.md), not issues. Splice is MIT licensed.
 
 ## Layout
 
