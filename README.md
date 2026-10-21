@@ -74,7 +74,7 @@ a browser needs a right-click → Open the first time; the installer does not.
 To build from source instead (needs Rust 1.90+ and `brew install ffmpeg`):
 
 ```sh
-gh repo clone ArchAstro/splice && cd splice
+git clone https://github.com/ArchAstro/splice && cd splice
 make install       # builds splice into ~/.cargo/bin and links the skill
 make run           # or run it straight from the checkout
 make install-app   # Splice.app in /Applications
