@@ -152,16 +152,22 @@ pub(crate) fn generated_name(generator: &Generator) -> String {
 }
 
 /// Light and dark squares, for showing what is see-through.
-fn checkerboard() -> impl IntoElement {
+pub(super) fn checkerboard() -> impl IntoElement {
+    checker(gpui::rgb(0x9aa0ad), gpui::rgb(0x6b7180))
+}
+
+/// A quiet checkerboard, for pictures that are mostly see-through (symbols),
+/// so their light words still read.
+pub(super) fn dark_checkerboard() -> impl IntoElement {
+    checker(gpui::rgb(0x2a2e38), gpui::rgb(0x20232b))
+}
+
+fn checker(light: Rgba, dark: Rgba) -> impl IntoElement {
     const SQUARE: f32 = 8.0;
-    let rows = (0..12).map(|row| {
+    let rows = (0..12).map(move |row| {
         div().flex().children((0..24).map(move |col| {
-            let light = (row + col) % 2 == 0;
-            div().flex_none().size(px(SQUARE)).bg(if light {
-                gpui::rgb(0x9aa0ad)
-            } else {
-                gpui::rgb(0x6b7180)
-            })
+            let on = (row + col) % 2 == 0;
+            div().flex_none().size(px(SQUARE)).bg(if on { light } else { dark })
         }))
     });
     div()
@@ -178,13 +184,20 @@ fn checkerboard() -> impl IntoElement {
 const GENERATED_DURATION: Time = 3 * SECOND;
 
 impl Editor {
-    pub(super) fn shelf_tabs(&mut self, count: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let tab = |this: &Self, shelf: Shelf, label: &'static str, cx: &mut Context<Self>| {
+    /// The shelf tabs: words when there is room, icons when the panel is narrow.
+    pub(super) fn shelf_tabs(
+        &mut self,
+        count: usize,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let tab = |this: &Self, shelf: Shelf, label: &'static str, glyph: &'static str, cx: &mut Context<Self>| {
             let on = this.shelf == shelf;
+            let color = if on { Theme::text() } else { Theme::overlay() };
             div()
                 .id(label)
                 .h(px(24.0))
-                .px(px(8.0))
+                .px(px(if compact { 7.0 } else { 8.0 }))
                 .rounded(px(6.0))
                 .flex()
                 .items_center()
@@ -192,13 +205,19 @@ impl Editor {
                 .cursor_pointer()
                 .when(on, |d| d.bg(Theme::lane()))
                 .hover(|s| s.bg(Theme::lane()))
-                .child(
-                    div()
-                        .text_size(px(10.5))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(if on { Theme::text() } else { Theme::overlay() })
-                        .child(label.to_uppercase()),
-                )
+                .map(|d| {
+                    if compact {
+                        d.child(icon(glyph, color).size(px(13.0))).tooltip(tip(label, None))
+                    } else {
+                        d.child(
+                            div()
+                                .text_size(px(10.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(color)
+                                .child(label.to_uppercase()),
+                        )
+                    }
+                })
                 .when(shelf == Shelf::Media && count > 0, |d| {
                     d.child(
                         div()
@@ -209,6 +228,9 @@ impl Editor {
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.shelf = shelf;
+                    if shelf == Shelf::Symbols {
+                        this.poll_symbols(cx);
+                    }
                     cx.notify();
                 }))
         };
@@ -216,9 +238,10 @@ impl Editor {
             .flex()
             .items_center()
             .gap(px(2.0))
-            .child(tab(self, Shelf::Media, "Media", cx))
-            .child(tab(self, Shelf::Text, "Text", cx))
-            .child(tab(self, Shelf::Color, "Colour", cx))
+            .child(tab(self, Shelf::Media, "Media", "film", cx))
+            .child(tab(self, Shelf::Text, "Text", "text", cx))
+            .child(tab(self, Shelf::Color, "Colour", "swatch", cx))
+            .child(tab(self, Shelf::Symbols, "Symbols", "symbol", cx))
     }
 
     pub(super) fn render_shelf(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -271,6 +294,7 @@ impl Editor {
                             name: preset.name.into(),
                             duration: GENERATED_DURATION,
                             generator: Some(generator.clone()),
+                            symbol: None,
                         };
                         self.shelf_card(
                             preset.name,
@@ -298,6 +322,7 @@ impl Editor {
                             name: name.into(),
                             duration: GENERATED_DURATION,
                             generator: Some(generator.clone()),
+                            symbol: None,
                         };
                         // See-through colours sit on a checkerboard, so they read as see-through.
                         let see_through = color & 0xff < 0xff;
@@ -318,6 +343,25 @@ impl Editor {
                     })
                     .collect();
                 self.shelf_grid("Backgrounds and title cards. Tint darkens what is under it.", cards)
+            }
+            Shelf::Symbols => {
+                let cards: Vec<AnyElement> = self
+                    .symbols
+                    .list
+                    .clone()
+                    .into_iter()
+                    .map(|entry| self.symbol_card(entry, cx))
+                    .collect();
+                self.shelf_grid(
+                    if cards.is_empty() {
+                        "Pieces you reuse in any movie: intros, lower thirds, logos. Select clips and \
+                         choose Make Symbol (⌥⌘K or +); titles become placeholders you fill in each time."
+                    } else {
+                        "Click to add at the playhead, or drag onto the timeline; fill in each use in the \
+                         inspector. To add one, select clips and choose + (⌥⌘K)."
+                    },
+                    cards,
+                )
             }
         }
     }
@@ -399,7 +443,7 @@ impl Editor {
     }
 
     /// The layer just above everything under the playhead for `duration`.
-    fn layer_above(&self, start: Time, duration: Time) -> usize {
+    pub(super) fn layer_above(&self, start: Time, duration: Time) -> usize {
         self.doc
             .project
             .tracks
@@ -441,6 +485,22 @@ impl Editor {
     }
 
     pub(super) fn shelf_header_action(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.shelf == Shelf::Symbols {
+            let ready = !self.selection.is_empty();
+            return Some(
+                render::icon_button("make-symbol", "plus", ready)
+                    .tooltip(tip(
+                        if ready {
+                            "Make a symbol from the selection"
+                        } else {
+                            "Select clips to make a symbol"
+                        },
+                        Some("⌥⌘K"),
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.make_symbol_action(&MakeSymbol, window, cx)))
+                    .into_any_element(),
+            );
+        }
         (self.shelf == Shelf::Media).then(|| {
             render::icon_button("import", "plus", true)
                 .tooltip(tip("Import media", Some("⌘I")))

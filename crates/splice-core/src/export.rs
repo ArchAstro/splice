@@ -12,6 +12,11 @@ use crate::model::{Clip, Generator, Media, MediaKind, Project, Source};
 use crate::time::{Time, secs};
 use std::path::{Path, PathBuf};
 
+/// Overlapping loud clips are held under full scale instead of clipping: a
+/// look-ahead limiter at -0.25 dBFS that only acts on peaks. `level=0` keeps it
+/// from raising quiet mixes; `latency=1` keeps sound in step with picture.
+const LIMITER: &str = "alimiter=limit=0.97:attack=5:release=80:level=0:latency=1";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Quality {
     /// Small files, quick encode.
@@ -65,12 +70,38 @@ pub fn plan(project: &Project, resolve: &impl Resolve, output: &Path, quality: Q
     if project.duration() <= 0 {
         return Err("the timeline is empty".into());
     }
-    build(project, resolve, output, Some(quality), None)
+    build(project, resolve, output, Some(Out::Movie(quality)), None, false)
+}
+
+/// Builds the ffmpeg arguments that render `project` to `output` (a `.mov`)
+/// as a layer: ProRes 4444 that is see-through wherever nothing is drawn,
+/// with its sound as PCM. This is how a symbol's timeline becomes one clip.
+pub fn plan_layer(project: &Project, resolve: &impl Resolve, output: &Path) -> Result<Plan, String> {
+    if project.duration() <= 0 {
+        return Err("the timeline is empty".into());
+    }
+    build(project, resolve, output, Some(Out::Layer), None, true)
+}
+
+/// What a movie export writes.
+#[derive(Clone, Copy)]
+enum Out {
+    Movie(Quality),
+    Layer,
 }
 
 /// The picture at timeline time `t`, composited exactly as export would,
 /// written as a still image (the format follows `output`'s extension).
 pub fn plan_still(project: &Project, resolve: &impl Resolve, t: Time, output: &Path) -> Result<Plan, String> {
+    still(project, resolve, t, output, false)
+}
+
+/// Like `plan_still`, see-through wherever nothing is drawn (write a PNG).
+pub fn plan_still_layer(project: &Project, resolve: &impl Resolve, t: Time, output: &Path) -> Result<Plan, String> {
+    still(project, resolve, t, output, true)
+}
+
+fn still(project: &Project, resolve: &impl Resolve, t: Time, output: &Path, see_through: bool) -> Result<Plan, String> {
     if t < 0 || t >= project.duration().max(1) {
         return Err(format!(
             "{:.3}s is outside the movie (0 to {:.3}s)",
@@ -83,7 +114,7 @@ pub fn plan_still(project: &Project, resolve: &impl Resolve, t: Time, output: &P
         track.muted = true;
         track.clips.retain(|c| c.contains(t));
     }
-    let mut plan = build(&moment, resolve, output, None, Some(t))?;
+    let mut plan = build(&moment, resolve, output, None, Some(t), see_through)?;
     plan.duration = project.frame();
     Ok(plan)
 }
@@ -106,9 +137,11 @@ fn build(
     project: &Project,
     resolve: &impl Resolve,
     output: &Path,
-    quality: Option<Quality>,
+    out: Option<Out>,
     still_at: Option<Time>,
+    see_through: bool,
 ) -> Result<Plan, String> {
+    let layer = see_through;
     let frame = project.frame();
     let duration = if still_at.is_some() {
         frame
@@ -126,7 +159,11 @@ fn build(
         "-f",
         "lavfi",
         "-i",
-        &format!("color=c=black:s={w}x{h}:r={fps}:d={d}"),
+        &if layer {
+            format!("color=c=black@0.0:s={w}x{h}:r={fps}:d={d},format=rgba")
+        } else {
+            format!("color=c=black:s={w}x{h}:r={fps}:d={d}")
+        },
     ]));
     args.extend(strings(&["-f", "lavfi", "-t", &d, "-i", "anullsrc=r=48000:cl=stereo"]));
     let mut next_input = 2usize;
@@ -246,7 +283,13 @@ fn build(
                         if inward { "in" } else { "out" }
                     ));
                 }
-                chain.push(format!("format=yuva420p,setpts=PTS-STARTPTS+{start}/TB"));
+                // Over a see-through canvas the overlay negotiates its format
+                // from its inputs: a picture that changes size frame to frame
+                // only stays right as RGBA (as yuva420p it froze at its first size).
+                chain.push(format!(
+                    "format={},setpts=PTS-STARTPTS+{start}/TB",
+                    if layer { "rgba" } else { "yuva420p" }
+                ));
                 filters.push(format!("[{i}:v]{}[v{tag}]", chain.join(",")));
 
                 let end = fmt(placed_at + length);
@@ -265,9 +308,11 @@ fn build(
                 let x = format!("(W-w)/2+{}*W", pose.x.ffmpeg(&since));
                 let y = format!("(H-h)/2+{}*H", pose.y.ffmpeg(&since));
                 filters.push(format!(
-                    "[{picture}][v{tag}]overlay=x='{x}':y='{y}':{}eof_action=pass:\
+                    "[{picture}][v{tag}]overlay=x='{x}':y='{y}':{}{}eof_action=pass:\
                      enable='between(t,{start},{end})'[p{tag}]",
-                    if animated { "eval=frame:" } else { "" }
+                    if animated { "eval=frame:" } else { "" },
+                    // Over a see-through canvas, keep what is see-through.
+                    if layer { "format=auto:" } else { "" }
                 ));
                 picture = format!("p{tag}");
             }
@@ -282,18 +327,46 @@ fn build(
         }
     }
 
-    filters.push(format!("[{picture}]format=yuv420p[vout]"));
-    if quality.is_some() {
+    filters.push(format!(
+        "[{picture}]format={}[vout]",
+        if layer { "yuva444p10le" } else { "yuv420p" }
+    ));
+    if out.is_some() {
         filters.push(format!(
-            "[1:a]{}amix=inputs={}:normalize=0:duration=first[aout]",
+            "[1:a]{}amix=inputs={}:normalize=0:duration=first,{LIMITER}[aout]",
             sounds.join(""),
             sounds.len() + 1
         ));
     }
 
     args.extend(strings(&["-filter_complex", &filters.join(";")]));
-    let Some(quality) = quality else {
+    let Some(out) = out else {
         args.extend(strings(&["-map", "[vout]", "-frames:v", "1", "-update", "1"]));
+        args.push(output.to_string_lossy().to_string());
+        return Ok(Plan { args, duration });
+    };
+    let Out::Movie(quality) = out else {
+        args.extend(strings(&[
+            "-map",
+            "[vout]",
+            "-map",
+            "[aout]",
+            "-c:v",
+            "prores_ks",
+            "-profile:v",
+            "4444",
+            "-pix_fmt",
+            "yuva444p10le",
+            "-r",
+            &fps.to_string(),
+            "-c:a",
+            "pcm_s16le",
+            "-t",
+            &d,
+            "-progress",
+            "pipe:1",
+            "-nostats",
+        ]));
         args.push(output.to_string_lossy().to_string());
         return Ok(Plan { args, duration });
     };
@@ -381,6 +454,7 @@ mod tests {
             has_audio: true,
             source: PathBuf::new(),
             recipe: None,
+            content: None,
         })
     }
 
@@ -404,6 +478,7 @@ mod tests {
             has_audio: false,
             source: PathBuf::new(),
             recipe: None,
+            content: None,
         });
         p.append_clip(v);
         p.insert_clip(image, 0, SECOND);

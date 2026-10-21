@@ -155,6 +155,7 @@ impl Editor {
             "story" if request["sub"] == json!("shot") => return self.ctl_shot(request, reply, cx),
             "story" | "cue" | "view" => self.ctl_story(cmd, request, cx),
             "record" => return self.ctl_record(request, reply, cx),
+            "symbol" | "placeholder" | "hold" => return self.ctl_symbol(cmd, request, reply, cx),
             "ui" | "click" | "hover" | "drag" | "scroll" | "key" | "type" => {
                 return self.ctl_input(cmd, request, reply, window, cx);
             }
@@ -750,6 +751,9 @@ impl Editor {
             "end": s(clip.end()),
             "duration": s(clip.duration),
         });
+        if let Some(label) = &clip.placeholder {
+            value["placeholder"] = json!(label);
+        }
         match &clip.generator {
             None => {
                 value["media"] = json!(clip.media.0);
@@ -887,6 +891,14 @@ impl Editor {
             Some(missing) => Err(format!("there is no clip {}", missing.0)),
             None => Ok(ids),
         }
+    }
+
+    /// The clips a request names, or none when it names none.
+    pub(super) fn clips_of(&self, request: &Value) -> Result<Vec<ClipId>, String> {
+        if request.get("clips").is_none() {
+            return Ok(Vec::new());
+        }
+        self.clips(request)
     }
 
     pub(super) fn find_media(&self, spec: &Value) -> Result<MediaId, String> {

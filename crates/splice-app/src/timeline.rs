@@ -181,6 +181,8 @@ pub struct ClipArt {
     pub peaks: Option<Arc<Vec<u8>>>,
     pub size: (u32, u32),
     pub offline: bool,
+    /// A use of a symbol with a newer version published.
+    pub outdated: bool,
 }
 
 /// A media drag hovering over the timeline.
@@ -350,9 +352,15 @@ pub fn paint(b: Bounds<Pixels>, frame: Frame, window: &mut Window, cx: &mut App)
                     // Name on a quiet backdrop.
                     let label: String = if art.offline {
                         format!("{} (offline)", art.name)
+                    } else if art.outdated {
+                        format!("{} · update", art.name)
                     } else {
                         art.name.to_string()
                     };
+                    // An out-of-date use shows a dot in its corner.
+                    if art.outdated && x1 - x0 > 16.0 {
+                        rect(window, area(x1 - 11.0, y + 5.0, 6.0, 6.0), Theme::accent(), 3.0);
+                    }
                     let label_x = x0.max(GUTTER) + 6.0;
                     // Under the ruler, the name stays on the part still in view.
                     let y = y.max(top).min(y + ROW - 21.0);

@@ -383,7 +383,13 @@ impl Project {
     pub fn hashes(&self) -> Vec<String> {
         self.media
             .iter()
-            .map(|m| m.hash.clone())
+            .flat_map(|m| {
+                let inner = match &m.recipe {
+                    Some(crate::model::Recipe::Symbol(symbol)) => symbol.hashes(),
+                    _ => Vec::new(),
+                };
+                std::iter::once(m.hash.clone()).chain(inner)
+            })
             .chain(
                 self.story
                     .beats
@@ -491,6 +497,7 @@ mod tests {
             has_audio: false,
             source: PathBuf::new(),
             recipe: None,
+            content: None,
         });
         (p, m)
     }

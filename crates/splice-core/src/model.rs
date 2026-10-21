@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 /// Version of the project JSON. Bump it and add a step to `migrate` when the
 /// shape changes.
-pub const SCHEMA: u32 = 4;
+pub const SCHEMA: u32 = 5;
 
 /// How long a still image runs when it is first placed.
 pub const IMAGE_DURATION: Time = 5 * SECOND;
@@ -58,6 +58,10 @@ pub struct Media {
     /// described as layers that move. `hash` then names the render of this recipe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe: Option<Recipe>,
+    /// Where a see-through render draws anything, as fractions of its frame
+    /// (x, y, width, height), so it is picked and outlined by what it shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<[f32; 4]>,
 }
 
 /// What made media is made from.
@@ -68,6 +72,8 @@ pub enum Recipe {
     Score(crate::score::Score),
     /// Pictures that move: layers described as JSON (`motion::Spec`), painted frame by frame.
     Scene(Scene),
+    /// A piece of another timeline kept for reuse, with its placeholders filled in.
+    Symbol(crate::symbol::Symbol),
 }
 
 impl Recipe {
@@ -75,6 +81,7 @@ impl Recipe {
         match self {
             Recipe::Score(_) => "score",
             Recipe::Scene(_) => "scene",
+            Recipe::Symbol(_) => "symbol",
         }
     }
 
@@ -96,6 +103,13 @@ impl Recipe {
                 hasher.update(shape.as_bytes());
                 hasher.update(scene.source.as_bytes());
             }
+            Recipe::Symbol(symbol) => {
+                // Everything it draws is in its filled timeline, media by hash,
+                // at the canvas it renders at in this movie.
+                let at = symbol.render_settings(*settings);
+                hasher.update(format!("{}x{}@{}|", at.width, at.height, at.fps).as_bytes());
+                hasher.update(symbol.rendered(*settings).to_json().as_bytes());
+            }
         }
         hasher.finalize().to_hex().to_string()
     }
@@ -105,6 +119,10 @@ impl Recipe {
         match self {
             Recipe::Score(score) => Ok(crate::time::from_secs(score.compile()?.seconds)),
             Recipe::Scene(scene) => Ok(scene.duration),
+            Recipe::Symbol(symbol) => match symbol.project.duration() {
+                0 => anyhow::bail!("the symbol {} is empty", symbol.name),
+                _ => Ok(symbol.length()),
+            },
         }
     }
 }
@@ -154,6 +172,11 @@ pub struct Clip {
     /// is then unused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generator: Option<Generator>,
+    /// In a symbol, marks what each use of it can change: the words of a
+    /// title, a colour, or the media shown. Clips with the same label change
+    /// together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<crate::symbol::Tag>,
 }
 
 fn is_default(look: &Look) -> bool {
@@ -331,6 +354,11 @@ pub struct Project {
     /// The plan: story beats along the timeline, and cues.
     #[serde(default, skip_serializing_if = "crate::story::Story::is_empty")]
     pub story: crate::story::Story,
+    /// In a symbol: the stretch of it (start, end) that a longer or shorter
+    /// use stretches, so what comes before and after (an entrance, an exit)
+    /// keeps its timing. None stretches all of it evenly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<(Time, Time)>,
     next_id: u64,
 }
 
@@ -347,6 +375,7 @@ impl Default for Project {
                 hidden: false,
             }],
             story: crate::story::Story::default(),
+            hold: None,
             next_id: 2,
         }
     }
@@ -562,6 +591,12 @@ impl Project {
     /// Places media on the timeline. The first clip in an empty project sets
     /// the canvas to the media's shape.
     pub fn insert_clip(&mut self, media: MediaId, track: usize, start: Time) -> Option<ClipId> {
+        // Another clip of a use of a symbol is another use, with its own fills.
+        let media = if self.is_used_symbol(media) {
+            self.fork_media(media)?
+        } else {
+            media
+        };
         let m = self.media(media)?.clone();
         if self.is_empty() && m.is_visual() && m.width > 0 && m.height > 0 {
             let (w, h) = fit_canvas(m.width, m.height);
@@ -582,6 +617,7 @@ impl Project {
             volume: 1.0,
             look: Look::default(),
             generator: None,
+            placeholder: None,
         };
         self.place(clip, track);
         Some(id)
@@ -599,6 +635,7 @@ impl Project {
             volume: 1.0,
             look: Look::default(),
             generator: Some(generator),
+            placeholder: None,
         };
         self.place(clip, track);
         id
@@ -686,6 +723,26 @@ impl Project {
         let track = &self.tracks[slot.track];
         let clip = &track.clips[slot.index];
         let next_start = track.clips.get(slot.index + 1).map_or(Time::MAX, |c| c.start);
+        // A whole use of a symbol stretches (or shrinks) its hold rather than
+        // being cut, so its exit still plays at the end.
+        if let Some(media) = self.media(clip.media)
+            && let Some(Recipe::Symbol(symbol)) = &media.recipe
+            && clip.generator.is_none()
+            && clip.source_in == 0
+            && (clip.duration - media.duration).abs() <= min_len
+        {
+            let mut symbol = symbol.clone();
+            let (start, media_id) = (clip.start, clip.media);
+            let want = (t.min(next_start) - start).max(min_len);
+            symbol.set_length(want);
+            let length = symbol.length();
+            if let Some(m) = self.media.iter_mut().find(|m| m.id == media_id) {
+                m.recipe = Some(Recipe::Symbol(symbol));
+                m.duration = length;
+            }
+            self.tracks[slot.track].clips[slot.index].duration = length;
+            return;
+        }
         let mut upper = next_start;
         if let Some(media) = self.media(clip.media).filter(|m| m.is_timed()) {
             upper = upper.min(clip.start + media.duration - clip.source_in);
@@ -716,6 +773,7 @@ impl Project {
             volume: clip.volume,
             look: clip.look.clone(),
             generator: clip.generator.clone(),
+            placeholder: clip.placeholder.clone(),
         };
         // The animation in stays with the left half, the one out with the right.
         right.look.enter.kind = MotionKind::None;
@@ -778,6 +836,12 @@ impl Project {
             let mut clip = self.tracks[slot.track].clips[slot.index].clone();
             clip.id = ClipId(self.alloc());
             clip.start = clip.end();
+            if clip.generator.is_none()
+                && self.is_used_symbol(clip.media)
+                && let Some(own) = self.fork_media(clip.media)
+            {
+                clip.media = own;
+            }
             copies.push(clip.id);
             self.place(clip, slot.track);
         }
@@ -842,8 +906,8 @@ fn migrate(value: &mut serde_json::Value) -> anyhow::Result<()> {
         anyhow::bail!("this project was saved by a newer Splice (schema {schema}); this build reads up to {SCHEMA}");
     }
     // Schema 2 added `look` and `generator` to clips, schema 3 `recipe` to
-    // media, schema 4 `story` to the project; all default, so older projects
-    // need nothing.
+    // media, schema 4 `story` to the project, schema 5 symbols (a recipe) and
+    // `placeholder` on clips; all default, so older projects need nothing.
     value["schema"] = SCHEMA.into();
     Ok(())
 }
@@ -865,6 +929,7 @@ mod tests {
             has_audio: kind != MediaKind::Image,
             source: PathBuf::new(),
             recipe: None,
+            content: None,
         }
     }
 

@@ -157,6 +157,52 @@ with every clip of it following.
 Renders are cached by what they are made from, and kept in the project file
 so it still opens anywhere.
 
+## Symbols
+
+A **symbol** is a piece of a movie kept for reuse in every project: an intro,
+a lower third, a logo sting, an end card. Select the clips and choose **Make
+Symbol** (⌥⌘K, in the Edit menu, or **+** on the Symbols shelf). Name it,
+and tick the titles each use can change.
+It goes into your symbols, and the clips become one clip on the timeline: a
+*use* of the symbol. Their layering, looks and motion stay as they were.
+
+- **Placeholders** are what each use can change. When you make a symbol, its
+  titles become placeholders ("Title", "Title 2"). In the symbol's own window,
+  switch on **Each use can change this** in the inspector to make a colour, a
+  picture or video, or a sound a placeholder too. Give two clips the same
+  placeholder name and they change together. Renaming a placeholder keeps what
+  uses filled in.
+- **Using one**: the **Symbols** shelf shows each symbol with a poster and its
+  length. Click it to add it at the playhead, or drag it onto the timeline.
+  Select the use and fill in its placeholders, which the inspector shows first:
+  type words (the picture follows as you type), pick a swatch or type a hex
+  colour, or pick, import or drop media. Every use has its own fills, including
+  one you duplicate. A use is named by its words, such as "Lower third · Grace
+  Hopper".
+- **Changing one**: **Edit** opens the symbol in its own window, an ordinary
+  Splice project with a banner and a see-through stage. Changes reach other
+  movies when you **publish** them with ⌘S. The status bar then says a newer
+  version is there, and out-of-date uses are marked on the timeline. A use
+  offers **Update** (or **Update all**), keeps what you
+  filled in, and says beforehand if anything would be dropped. Undo brings it
+  back.
+- **Other shapes**: a 16:9 symbol in a 9:16 movie keeps its shape by default,
+  rendered sharp at the movie's size. **Fit this movie** lays it out for the
+  movie's own shape instead.
+- **Longer or shorter**: drag the end of a use to make it run longer or
+  shorter. Its **hold** stretches, so the entrance and exit keep their timing.
+  Set the hold in the symbol's own window (Canvas inspector: Starts here, Ends
+  here); without one, the whole symbol stretches evenly.
+- **Break apart** (⌥⌘B) turns a use back into its clips, to edit them freely.
+- **Managing them**: the **⋯** on a symbol's card has Edit, Rename, Duplicate,
+  Show in Finder and Move to Trash. Symbols live in
+  `~/Library/Application Support/Splice/Symbols`, one `.splice` file each.
+  Each symbol keeps its own identity, so renaming it in Finder doesn't
+  disconnect its uses.
+- A project keeps its own copy of every symbol it uses, with the media, so it
+  still opens on a Mac without them. **Keep in my symbols** puts that copy back
+  in your symbols. Renders of uses stay in the cache, not the project file.
+
 ## Story and recording
 
 **Story** (⌘3, or Edit / Story in the title bar) plans the movie before and

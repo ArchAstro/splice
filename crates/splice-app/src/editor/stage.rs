@@ -137,7 +137,19 @@ impl Editor {
                 image,
                 natural: export::natural_size(source, rendered, canvas.0, canvas.1),
                 pose,
-                visible: visible_part(clip.look.mask.as_ref()),
+                visible: {
+                    // A see-through render is picked and outlined by what it draws.
+                    let mut v = visible_part(clip.look.mask.as_ref());
+                    if let Source::Media(m) = source
+                        && let Some([x, y, w, h]) = m.content
+                    {
+                        v = [v[0].max(x), v[1].max(y), v[2].min(x + w), v[3].min(y + h)];
+                        if v[2] <= v[0] || v[3] <= v[1] {
+                            v = [x, y, x + w, y + h];
+                        }
+                    }
+                    v
+                },
             });
         }
         layers
@@ -155,6 +167,7 @@ impl Editor {
         let placed = self.stage_layers.clone();
         placed.borrow_mut().clear();
 
+        let see_through = self.editing_a_symbol();
         let ground = canvas(
             move |bounds, _, _| {
                 // The largest rectangle with the canvas's shape, with room to breathe.
@@ -182,6 +195,35 @@ impl Editor {
                     transparent_black(),
                     Default::default(),
                 ));
+                // A symbol is drawn over whatever uses it: show where it is clear.
+                if see_through {
+                    let square = 10.0;
+                    let (x0, y0) = (f32::from(stage.left()), f32::from(stage.top()));
+                    let (w, h) = (f32::from(stage.size.width), f32::from(stage.size.height));
+                    let (cols, rows) = ((w / square).ceil() as i32, (h / square).ceil() as i32);
+                    for row in 0..rows {
+                        for col in 0..cols {
+                            let light = (row + col) % 2 == 0;
+                            let (x, y) = (x0 + col as f32 * square, y0 + row as f32 * square);
+                            let cell = Bounds::new(
+                                point(px(x), px(y)),
+                                size(px(square.min(x0 + w - x)), px(square.min(y0 + h - y))),
+                            );
+                            window.paint_quad(quad(
+                                cell,
+                                Corners::default(),
+                                if light {
+                                    gpui::rgb(0x2a2e38)
+                                } else {
+                                    gpui::rgb(0x20232b)
+                                },
+                                px(0.0),
+                                transparent_black(),
+                                Default::default(),
+                            ));
+                        }
+                    }
+                }
             },
         )
         .absolute()

@@ -214,6 +214,17 @@ fn rgb(color: u32) -> Hsla {
 impl Editor {
     pub(super) fn open_workbench(&mut self, media: MediaId, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus);
+        // A symbol is a timeline of its own: it opens in its own window.
+        if let Some(Recipe::Symbol(symbol)) = self.doc.project.media(media).and_then(|m| m.recipe.as_ref()) {
+            match self.library_name(symbol) {
+                Some(name) => self.edit_symbol(&name),
+                None => self.say(format!(
+                    "{} is not in your symbols on this Mac; keep it from the inspector to edit it",
+                    symbol.name
+                )),
+            }
+            return;
+        }
         if self.workbench.as_ref().is_some_and(|b| b.media == media) {
             return;
         }
@@ -295,7 +306,7 @@ impl Editor {
         let body = match media.recipe.clone() {
             Some(Recipe::Score(score)) => self.score_body(id, &score, cx).into_any_element(),
             Some(Recipe::Scene(scene)) => self.scene_body(id, &scene, window, cx).into_any_element(),
-            None => div().into_any_element(),
+            Some(Recipe::Symbol(_)) | None => div().into_any_element(),
         };
         panel()
             .id("workbench")
@@ -512,6 +523,8 @@ impl Editor {
             })
             .collect();
 
+        // Mute and solo can leave nothing audible; say so where it is seen.
+        let silence = score.silence();
         // What the selected note is, in words.
         let readout = selected.first().and_then(|&(p, ph, n)| {
             let part = score.parts.get(p)?;
@@ -656,10 +669,14 @@ impl Editor {
                             .text_size(px(11.5))
                             .text_color(if readout.is_some() {
                                 Theme::text()
+                            } else if silence.is_some() {
+                                rgb(0xf2c14e).into()
                             } else {
                                 Theme::overlay()
                             })
-                            .child(readout.unwrap_or_else(|| "Click a note to see what it is".into())),
+                            .child(
+                                readout.unwrap_or_else(|| silence.unwrap_or("Click a note to see what it is").into()),
+                            ),
                     )
                     .child(
                         div()
@@ -974,14 +991,14 @@ impl Editor {
                                 toggle(format!("mute-{index}"), "M", muted, Theme::overlay().into())
                                     .tooltip(tip("Mute", None))
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.change_score(cx, |s| s.parts[index].mute = !s.parts[index].mute);
+                                        this.change_score(cx, |s| s.toggle_mute(index));
                                     })),
                             )
                             .child(
                                 toggle(format!("solo-{index}"), "S", solo, rgb(0xf2c14e))
                                     .tooltip(tip("Solo", None))
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.change_score(cx, |s| s.parts[index].solo = !s.parts[index].solo);
+                                        this.change_score(cx, |s| s.toggle_solo(index));
                                     })),
                             ),
                     )

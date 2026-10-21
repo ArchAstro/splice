@@ -169,6 +169,10 @@ impl Document {
         self.dirty = false;
         self.edited = false;
         self.last_write = Some(Instant::now());
+        // Bytes no kept version uses (old renders, replaced media) go.
+        if let Err(e) = self.store.collect_garbage() {
+            eprintln!("splice: could not tidy {}: {e}", self.path().display());
+        }
         Ok(())
     }
 
