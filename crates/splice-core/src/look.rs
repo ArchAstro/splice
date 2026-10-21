@@ -24,6 +24,10 @@ pub struct Look {
     pub key: Option<Key>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mask: Option<Mask>,
+    /// Edges cut away. The picture keeps its scale, and what remains stays
+    /// where it was on the canvas.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crop: Option<Crop>,
     pub enter: Motion,
     pub exit: Motion,
     pub drift: Drift,
@@ -38,6 +42,7 @@ impl Default for Look {
             opacity: 1.0,
             key: None,
             mask: None,
+            crop: None,
             enter: Motion::default(),
             exit: Motion::default(),
             drift: Drift::None,
@@ -75,6 +80,83 @@ impl Default for Key {
 pub enum Shape {
     Rect,
     Ellipse,
+}
+
+/// Edges cut from a picture, each a fraction of its frame (0 keeps the edge).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Crop {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+}
+
+impl Crop {
+    /// At least a twentieth of the picture always remains.
+    const KEEP: f32 = 0.05;
+
+    /// The same crop, each edge in range and never crossing the other.
+    pub fn clamped(self) -> Crop {
+        let edge = |v: f32| {
+            if v.is_finite() {
+                v.clamp(0.0, 1.0 - Self::KEEP)
+            } else {
+                0.0
+            }
+        };
+        let (mut l, mut r, mut t, mut b) = (edge(self.left), edge(self.right), edge(self.top), edge(self.bottom));
+        let over = (l + r) - (1.0 - Self::KEEP);
+        if over > 0.0 {
+            let k = (1.0 - Self::KEEP) / (l + r);
+            l *= k;
+            r *= k;
+        }
+        let over = (t + b) - (1.0 - Self::KEEP);
+        if over > 0.0 {
+            let k = (1.0 - Self::KEEP) / (t + b);
+            t *= k;
+            b *= k;
+        }
+        Crop {
+            left: l,
+            top: t,
+            right: r,
+            bottom: b,
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        self.left <= 0.0 && self.top <= 0.0 && self.right <= 0.0 && self.bottom <= 0.0
+    }
+
+    /// The size of what remains of a picture of `natural` size.
+    pub fn size(&self, natural: (f64, f64)) -> (f64, f64) {
+        (
+            natural.0 * (1.0 - self.left - self.right) as f64,
+            natural.1 * (1.0 - self.top - self.bottom) as f64,
+        )
+    }
+
+    /// How far the centre of what remains sits from the picture's centre,
+    /// in the picture's pixels at scale 1: where to draw it so it stays put.
+    pub fn offset(&self, natural: (f64, f64)) -> (f64, f64) {
+        (
+            natural.0 * (self.left - self.right) as f64 / 2.0,
+            natural.1 * (self.top - self.bottom) as f64 / 2.0,
+        )
+    }
+
+    /// The ffmpeg filter that cuts it.
+    pub fn ffmpeg(&self) -> String {
+        format!(
+            "crop=w='trunc(iw*{:.5}/2)*2':h='trunc(ih*{:.5}/2)*2':x='iw*{:.5}':y='ih*{:.5}'",
+            1.0 - self.left - self.right,
+            1.0 - self.top - self.bottom,
+            self.left,
+            self.top
+        )
+    }
 }
 
 /// Shows only part of the clip. Measured in fractions of the clip's own frame.
@@ -371,6 +453,10 @@ impl Look {
     /// the viewer's decoder and export. They leave an RGBA frame.
     pub fn pixel_filters(&self) -> Option<String> {
         let mut filters = Vec::new();
+        // Cut first, so a key and a mask work on what remains.
+        if let Some(crop) = self.crop.filter(|c| !c.is_none()) {
+            filters.push(crop.ffmpeg());
+        }
         if let Some(key) = self.key {
             filters.push(format!(
                 "chromakey=0x{:06x}:{:.4}:{:.4}",
@@ -398,6 +484,17 @@ impl Look {
             filters.push("format=rgba".into());
             filters.join(",")
         })
+    }
+}
+
+impl Look {
+    /// A picture's size at scale 1 once cropped, and where to shift it so
+    /// what remains stays in place (canvas pixels).
+    pub fn cropped(&self, natural: (f64, f64)) -> ((f64, f64), (f64, f64)) {
+        match self.crop.filter(|c| !c.is_none()) {
+            Some(c) => (c.size(natural), c.offset(natural)),
+            None => (natural, (0.0, 0.0)),
+        }
     }
 }
 
@@ -430,6 +527,32 @@ impl Mask {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crops_keep_what_remains_in_place() {
+        let crop = Crop {
+            left: 0.25,
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.5,
+        };
+        assert_eq!(crop.size((400.0, 200.0)), (300.0, 100.0));
+        // A quarter off the left: what remains sits 50 px right of centre.
+        assert_eq!(crop.offset((400.0, 200.0)), (50.0, -50.0));
+        let wild = Crop {
+            left: 0.8,
+            right: 0.8,
+            top: f32::NAN,
+            bottom: -1.0,
+        }
+        .clamped();
+        assert!(wild.left + wild.right <= 0.95 + 1e-6 && wild.top == 0.0 && wild.bottom == 0.0);
+        let look = Look {
+            crop: Some(crop),
+            ..Look::default()
+        };
+        assert!(look.pixel_filters().unwrap().starts_with("crop="));
+    }
 
     #[test]
     fn still_clips_do_not_move() {

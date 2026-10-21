@@ -26,6 +26,9 @@ pub enum Target {
     Capture(BeatId),
     Cue(CueId),
     Shot(splice_core::story::ShotId),
+    /// A bible entry's name, and its continuity words.
+    EntryName(splice_core::bible::EntryId),
+    EntryWords(splice_core::bible::EntryId),
 }
 
 /// Typing into a beat or cue, and the project before the typing began.
@@ -117,6 +120,32 @@ impl Editor {
         }
     }
 
+    /// The chosen beat's brief: its outline to the clipboard, and its
+    /// references written to a folder shown in Finder, ready to attach.
+    pub(super) fn copy_brief(&mut self, cx: &mut Context<Self>) {
+        let Some(beat) = self.beat.filter(|b| self.doc.project.story.index(*b).is_some()) else {
+            self.say("Choose a beat to brief");
+            return cx.notify();
+        };
+        let dir = Self::brief_dir(beat);
+        self.write_brief(beat, dir, cx, |editor, result, cx| match result {
+            Ok(brief) => {
+                let outline = brief["outline"].as_str().unwrap_or_default().to_string();
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(outline));
+                if let Some(dir) = brief["dir"].as_str() {
+                    cx.reveal_path(Path::new(dir));
+                }
+                let n = brief["images"].as_array().map_or(0, Vec::len);
+                editor.say(format!(
+                    "Brief for “{}”: the prompt is copied; its {n} reference{} are in the folder, numbered as @Image",
+                    brief["title"].as_str().unwrap_or(""),
+                    if n == 1 { "" } else { "s" }
+                ));
+            }
+            Err(e) => editor.say_error(format!("Could not brief it: {e}")),
+        });
+    }
+
     pub(super) fn copy_shot_list(&mut self, cx: &mut Context<Self>) {
         let list = self.doc.project.shot_list();
         if list.trim().is_empty() {
@@ -145,6 +174,8 @@ impl Editor {
                 .find(|s| s.id == id)?
                 .note
                 .clone(),
+            Target::EntryName(id) => self.doc.project.bible.entry(id)?.name.clone(),
+            Target::EntryWords(id) => self.doc.project.bible.entry(id)?.words.clone(),
         })
     }
 
@@ -156,6 +187,8 @@ impl Editor {
             Target::Capture(id) => p.set_beat(id, |b| b.capture = text),
             Target::Cue(id) => p.set_cue(id, |c| c.label = text),
             Target::Shot(id) => p.set_shot(id, |s| s.note = text),
+            Target::EntryName(id) => p.set_entry(id, |e| e.name = text),
+            Target::EntryWords(id) => p.set_entry(id, |e| e.words = text),
         }
     }
 
@@ -226,7 +259,10 @@ impl Editor {
             let trimmed = text[..at].trim_end();
             trimmed.rfind(char::is_whitespace).map_or(0, |i| i + 1)
         };
-        let one_line = matches!(target, Target::Title(_) | Target::Cue(_) | Target::Shot(_));
+        let one_line = matches!(
+            target,
+            Target::Title(_) | Target::Cue(_) | Target::Shot(_) | Target::EntryName(_)
+        );
         match k.key.as_str() {
             "escape" => {
                 self.end_typing(cx);
@@ -237,6 +273,7 @@ impl Editor {
                 self.end_typing(cx);
                 match target {
                     Target::Title(id) => self.begin_typing(Target::Story(id), false, window, cx),
+                    Target::EntryName(id) => self.begin_typing(Target::EntryWords(id), false, window, cx),
                     _ => window.focus(&self.focus),
                 }
             }
@@ -245,6 +282,7 @@ impl Editor {
                 let next = match target {
                     Target::Title(id) => Some(Target::Story(id)),
                     Target::Story(id) => Some(Target::Capture(id)),
+                    Target::EntryName(id) => Some(Target::EntryWords(id)),
                     _ => None,
                 };
                 match next {
@@ -303,7 +341,7 @@ impl Editor {
     }
 
     /// Words that can be typed into: shown with a caret while typing.
-    fn field(
+    pub(super) fn field(
         &mut self,
         target: Target,
         placeholder: &'static str,
@@ -367,6 +405,9 @@ impl Editor {
     // The board.
 
     pub(super) fn render_board(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if self.page == super::plan::Page::Bible {
+            return self.render_bible(cx);
+        }
         let story = self.doc.project.story.clone();
         let total = story.end();
         let cards: Vec<AnyElement> = story
@@ -483,34 +524,31 @@ impl Editor {
                     .gap(px(10.0))
                     .border_b_1()
                     .border_color(Theme::edge())
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_size(px(13.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(Theme::text())
-                                    .child("Story"),
+                    .child(self.page_switch(cx))
+                    .child(div().flex_1().min_w_0().flex().flex_col().child(
+                        div().text_size(px(10.5)).text_color(Theme::overlay()).child(if empty {
+                            "Plan the movie: beats in order, what happens, what to capture".to_string()
+                        } else {
+                            format!(
+                                "{} beat{} · {}",
+                                story.beats.len(),
+                                if story.beats.len() == 1 { "" } else { "s" },
+                                seconds(total)
                             )
-                            .child(div().text_size(px(10.5)).text_color(Theme::overlay()).child(if empty {
-                                "Plan the movie: beats in order, what happens, what to capture".to_string()
-                            } else {
-                                format!(
-                                    "{} beat{} · {}",
-                                    story.beats.len(),
-                                    if story.beats.len() == 1 { "" } else { "s" },
-                                    seconds(total)
-                                )
-                            })),
-                    )
+                        }),
+                    ))
                     .child(
                         header_button("story-cue", "flag", "Cue")
                             .tooltip(tip("Mark a cue at the playhead", Some("C")))
                             .on_click(cx.listener(|this, _, window, cx| this.new_cue(window, cx))),
+                    )
+                    .child(
+                        header_button("story-brief", "text", "Brief")
+                            .tooltip(tip(
+                                "The chosen beat's brief: copies a prompt to start from, and shows its references in Finder",
+                                None,
+                            ))
+                            .on_click(cx.listener(|this, _, _, cx| this.copy_brief(cx))),
                     )
                     .child(
                         header_button("story-copy", "copy", "Shot list")
@@ -762,7 +800,9 @@ impl Editor {
                             .child(self.field(Target::Title(id), "Name this beat", 13.0, cx)),
                     ),
             )
+            .child(self.cast_row(beat, cx))
             .child(picture)
+            .when_some(self.takes_strip(beat, cx), |d, takes| d.child(takes))
             .child(self.shot_strip(beat, shown.as_ref().map(|s| s.id), cx))
             .when_some(shown.as_ref().filter(|_| showing_reference), |d, shot| {
                 d.child(
@@ -1027,6 +1067,11 @@ impl Editor {
             },
             "clips": project.beat_clips(beat.id).iter().map(|c| c.0).collect::<Vec<_>>(),
             "shots": beat.shots.iter().map(|s| self.shot_json(s)).collect::<Vec<_>>(),
+            "cast": beat.cast.iter().filter_map(|e| project.bible.entry(*e))
+                .map(|e| serde_json::json!({ "entry": e.id.0, "name": e.name, "kind": e.kind }))
+                .collect::<Vec<_>>(),
+            "takes": beat.takes.iter().map(|t| self.take_json(t)).collect::<Vec<_>>(),
+            "chosen_take": project.chosen_take(beat.id).map(|t| t.0),
         })
     }
 

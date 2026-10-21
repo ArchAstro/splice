@@ -2,6 +2,8 @@
 //! single-file project format, and export plans. The app crate owns windows,
 //! decoding and sound.
 
+pub mod bible;
+pub mod brief;
 pub mod export;
 pub mod history;
 pub mod look;

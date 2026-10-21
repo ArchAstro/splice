@@ -64,6 +64,71 @@ pub struct Beat {
     /// Reference shots, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shots: Vec<Shot>,
+    /// Who and what from the bible is in it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cast: Vec<crate::bible::EntryId>,
+    /// Footage tried for it (generated, or shot again), one of them laid in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub takes: Vec<Take>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TakeId(pub u64);
+
+/// A take for a beat: media tried for it, and where it came from. A take
+/// whose media has not arrived yet (a generation under way) is pending.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Take {
+    pub id: TakeId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<crate::model::MediaId>,
+    #[serde(default)]
+    pub origin: Origin,
+    /// Frames to skip at its start when laid in (a generated extension's
+    /// first frames repeat what it extends).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub skip: Time,
+    /// The clip it laid into the beat, when it is the one chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip: Option<ClipId>,
+    /// When it was asked for (seconds since 1970), to tell a slow generation
+    /// from a lost one.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub started: u64,
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
+fn is_zero(t: &Time) -> bool {
+    *t == 0
+}
+
+/// Where a take came from: enough to make it again, or a variation of it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Origin {
+    /// Who made it: "higgsfield", "camera", "recording".
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub tool: String,
+    /// The model: "seedance_2_5".
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// How: "t2v", "omni_reference", "video_edit", "video_extension".
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub mode: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub prompt: String,
+    /// What it was given, each with its role: "@Image1 Ada (face)".
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<String>,
+    /// The job, to look it up again.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub job: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub note: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -147,6 +212,8 @@ impl Project {
             duration: duration.max(self.frame()),
             color,
             shots: Vec::new(),
+            cast: Vec::new(),
+            takes: Vec::new(),
         };
         // Beats after it make room, and their footage moves with them.
         let shift = beat.duration;
@@ -326,6 +393,139 @@ impl Project {
         Some(clip)
     }
 
+    /// Adds a take to a beat: media, or none yet (pending, made at
+    /// `started`, seconds since 1970). Returns its id.
+    pub fn add_take(
+        &mut self,
+        beat: BeatId,
+        media: Option<crate::model::MediaId>,
+        origin: Origin,
+        started: u64,
+    ) -> Option<TakeId> {
+        self.story.index(beat)?;
+        let id = TakeId(self.alloc());
+        self.set_beat(beat, |b| {
+            b.takes.push(Take {
+                id,
+                media,
+                origin,
+                skip: 0,
+                clip: None,
+                started,
+            })
+        });
+        Some(id)
+    }
+
+    /// The beat a take belongs to.
+    pub fn take_beat(&self, take: TakeId) -> Option<BeatId> {
+        self.story
+            .beats
+            .iter()
+            .find(|b| b.takes.iter().any(|t| t.id == take))
+            .map(|b| b.id)
+    }
+
+    pub fn take(&self, take: TakeId) -> Option<&Take> {
+        self.story.beats.iter().flat_map(|b| &b.takes).find(|t| t.id == take)
+    }
+
+    pub fn set_take(&mut self, take: TakeId, f: impl FnOnce(&mut Take)) {
+        if let Some(t) = self
+            .story
+            .beats
+            .iter_mut()
+            .flat_map(|b| &mut b.takes)
+            .find(|t| t.id == take)
+        {
+            f(t);
+        }
+    }
+
+    /// The take laid into a beat: the one whose own clip is on the timeline.
+    pub fn chosen_take(&self, beat: BeatId) -> Option<TakeId> {
+        let b = self.story.beats.iter().find(|b| b.id == beat)?;
+        b.takes
+            .iter()
+            .rev()
+            .find(|t| t.clip.is_some_and(|c| self.slot(c).is_some()))
+            .map(|t| t.id)
+    }
+
+    /// Lays a take into its beat in place of the beat's other takes: at the
+    /// beat's start, as long as the beat, skipping its first `skip`. Only
+    /// clips a take of this beat laid in are replaced, so footage placed by
+    /// hand (even of the same media) is never touched.
+    pub fn choose_take(&mut self, take: TakeId) -> Option<ClipId> {
+        let beat = self.take_beat(take)?;
+        let chosen = self.take(take)?.clone();
+        let media = chosen.media?;
+        // Already laid in: nothing to do.
+        if let Some(clip) = chosen.clip.filter(|c| self.slot(*c).is_some()) {
+            return Some(clip);
+        }
+        let theirs: Vec<ClipId> = self
+            .story
+            .beats
+            .iter()
+            .find(|b| b.id == beat)?
+            .takes
+            .iter()
+            .filter_map(|t| t.clip)
+            .collect();
+        let (start, end) = self.story.span(beat)?;
+        // Out with the takes laid in before, keeping their track.
+        let mut track = None;
+        for (i, t) in self.tracks.iter_mut().enumerate() {
+            let before = t.clips.len();
+            t.clips.retain(|c| !theirs.contains(&c.id));
+            if t.clips.len() != before && track.is_none() {
+                track = Some(i);
+            }
+        }
+        // Placed straight, not through `insert_clip`, so a take's media is
+        // never forked or bumped onto another clip of the same media.
+        let timed = self.media(media).is_some_and(|m| m.is_timed());
+        let length = self.media(media).map_or(0, |m| m.duration);
+        let frame = self.frame();
+        let room = end - start;
+        let (source_in, duration) = if timed {
+            let skip = chosen.skip.min((length - frame).max(0));
+            (skip, (length - skip).min(room).max(frame))
+        } else {
+            (0, room)
+        };
+        let id = ClipId(self.alloc());
+        let clip = Clip {
+            id,
+            media,
+            start,
+            source_in,
+            duration,
+            volume: 1.0,
+            look: crate::look::Look::default(),
+            generator: None,
+            placeholder: None,
+        };
+        self.place(clip, track.unwrap_or(0));
+        self.set_take(take, |t| t.clip = Some(id));
+        self.prune_tracks();
+        Some(id)
+    }
+
+    /// Takes a take out of its beat, and the clip it laid in (if any).
+    pub fn remove_take(&mut self, take: TakeId) {
+        if let Some(clip) = self.take(take).and_then(|t| t.clip) {
+            for t in &mut self.tracks {
+                t.clips.retain(|c| c.id != clip);
+            }
+            self.prune_tracks();
+        }
+        for b in &mut self.story.beats {
+            b.takes.retain(|t| t.id != take);
+        }
+    }
+
     /// Adds a reference shot to a beat. Returns its id.
     pub fn add_shot(&mut self, beat: BeatId, note: &str, image: Option<Still>) -> Option<ShotId> {
         self.story.index(beat)?;
@@ -381,6 +581,16 @@ impl Project {
     /// Every content hash the project needs kept: its media and the story's
     /// reference pictures.
     pub fn hashes(&self) -> Vec<String> {
+        let pictures = self
+            .bible
+            .entries
+            .iter()
+            .flat_map(|e| &e.pictures)
+            .map(|s| s.hash.clone());
+        self.media_hashes().into_iter().chain(pictures).collect()
+    }
+
+    fn media_hashes(&self) -> Vec<String> {
         self.media
             .iter()
             .flat_map(|m| {
@@ -586,6 +796,27 @@ mod tests {
         p.remove_shot(one);
         assert_eq!(p.story.beats[0].shots.len(), 1);
         assert!(p.add_shot(BeatId(999), "x", None).is_none());
+    }
+
+    #[test]
+    fn takes_replace_only_their_own_clips() {
+        let (mut p, media) = project();
+        let open = p.add_beat(None, "Open", 4 * SECOND);
+        let next = p.add_beat(Some(open), "Next", 4 * SECOND);
+        // The same media laid by hand into the first beat.
+        let by_hand = p.fill_beat(open, media).unwrap();
+        let a = p.add_take(next, Some(media), Origin::default(), 0).unwrap();
+        let b = p.add_take(next, Some(media), Origin::default(), 0).unwrap();
+        let first = p.choose_take(a).unwrap();
+        assert_eq!(p.chosen_take(next), Some(a));
+        let second = p.choose_take(b).unwrap();
+        assert!(p.slot(by_hand).is_some(), "footage placed by hand stays");
+        assert!(p.slot(first).is_none(), "the beat's other take goes");
+        assert_eq!(p.chosen_take(next), Some(b));
+        assert_eq!(p.clip(second).unwrap().start, 4 * SECOND);
+        p.remove_take(b);
+        assert!(p.slot(second).is_none());
+        assert!(p.slot(by_hand).is_some());
     }
 
     #[test]

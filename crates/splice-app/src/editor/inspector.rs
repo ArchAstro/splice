@@ -27,6 +27,10 @@ pub enum Field {
     MaskWidth,
     MaskHeight,
     MaskFeather,
+    CropLeft,
+    CropRight,
+    CropTop,
+    CropBottom,
     EnterDuration,
     ExitDuration,
 }
@@ -44,6 +48,7 @@ impl Field {
             Field::MaskX | Field::MaskY => (0.0, 1.0),
             Field::MaskWidth | Field::MaskHeight => (0.05, 1.5),
             Field::MaskFeather => (0.001, 1.0),
+            Field::CropLeft | Field::CropRight | Field::CropTop | Field::CropBottom => (0.0, 0.95),
             Field::EnterDuration | Field::ExitDuration => (0.1, 3.0),
         }
     }
@@ -59,6 +64,7 @@ impl Field {
             Field::MaskX | Field::MaskY => 0.5,
             Field::MaskWidth | Field::MaskHeight => 0.8,
             Field::MaskFeather => Mask::default().feather,
+            Field::CropLeft | Field::CropRight | Field::CropTop | Field::CropBottom => 0.0,
             Field::EnterDuration | Field::ExitDuration => 0.5,
         }
     }
@@ -78,6 +84,10 @@ impl Field {
             Field::MaskWidth => "Width",
             Field::MaskHeight => "Height",
             Field::MaskFeather => "Feather",
+            Field::CropLeft => "Left",
+            Field::CropRight => "Right",
+            Field::CropTop => "Top",
+            Field::CropBottom => "Bottom",
             Field::EnterDuration | Field::ExitDuration => "Length",
         }
     }
@@ -124,6 +134,10 @@ impl Field {
             Field::MaskWidth => mask.width,
             Field::MaskHeight => mask.height,
             Field::MaskFeather => mask.feather,
+            Field::CropLeft => look.crop.map_or(0.0, |c| c.left),
+            Field::CropRight => look.crop.map_or(0.0, |c| c.right),
+            Field::CropTop => look.crop.map_or(0.0, |c| c.top),
+            Field::CropBottom => look.crop.map_or(0.0, |c| c.bottom),
             Field::EnterDuration => secs(look.enter.duration) as f32,
             Field::ExitDuration => secs(look.exit.duration) as f32,
         }
@@ -162,6 +176,17 @@ impl Field {
                         _ => m.feather = v,
                     }
                 }
+            }
+            Field::CropLeft | Field::CropRight | Field::CropTop | Field::CropBottom => {
+                let mut c = look.crop.unwrap_or_default();
+                match self {
+                    Field::CropLeft => c.left = v,
+                    Field::CropRight => c.right = v,
+                    Field::CropTop => c.top = v,
+                    _ => c.bottom = v,
+                }
+                let c = c.clamped();
+                look.crop = (!c.is_none()).then_some(c);
             }
             Field::EnterDuration => look.enter.duration = splice_core::time::from_secs(v as f64),
             Field::ExitDuration => look.exit.duration = splice_core::time::from_secs(v as f64),
@@ -765,6 +790,7 @@ impl Editor {
             sections.push(self.place_section(id, &clip, cx).into_any_element());
             sections.push(self.motion_section(id, &clip, cx).into_any_element());
             if media_clip {
+                sections.push(self.crop_section(id, &clip, cx).into_any_element());
                 sections.push(self.key_section(id, &clip, cx).into_any_element());
             }
             sections.push(self.mask_section(id, &clip, cx).into_any_element());
@@ -1258,6 +1284,41 @@ impl Editor {
                         },
                     ))
             })
+    }
+
+    /// Cutting edges off a picture: four sliders, and a way back.
+    fn crop_section(&mut self, id: ClipId, clip: &Clip, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let crop = clip.look.crop.filter(|c| !c.is_none());
+        let summary = match crop {
+            None => "Off".to_string(),
+            Some(c) => {
+                let (w, h) = (1.0 - c.left - c.right, 1.0 - c.top - c.bottom);
+                format!("{:.0}% × {:.0}% left", w * 100.0, h * 100.0)
+            }
+        };
+        let (section, open) = self.fold(id, "Crop", crop.is_some(), summary, cx);
+        section.when(open, |d| {
+            d.child(self.slider(id, clip, Field::CropLeft, cx))
+                .child(self.slider(id, clip, Field::CropRight, cx))
+                .child(self.slider(id, clip, Field::CropTop, cx))
+                .child(self.slider(id, clip, Field::CropBottom, cx))
+                .child(
+                    div()
+                        .text_size(px(10.5))
+                        .line_height(px(15.0))
+                        .text_color(Theme::overlay())
+                        .child("The picture keeps its size; what remains stays where it was."),
+                )
+                .when(crop.is_some(), |d| {
+                    d.child(
+                        div()
+                            .flex()
+                            .child(self.chip("crop-reset", "Reset crop", false, cx, move |this, cx| {
+                                this.change(id, cx, |c| c.look.crop = None);
+                            })),
+                    )
+                })
+        })
     }
 
     fn mask_section(&mut self, id: ClipId, clip: &Clip, cx: &mut Context<Self>) -> impl IntoElement + use<> {

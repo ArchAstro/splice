@@ -132,10 +132,22 @@ impl Editor {
                     (image, Some(size))
                 }
             };
+            let natural = export::natural_size(source, rendered, canvas.0, canvas.1);
+            // A cropped picture is smaller, and what remains stays in place.
+            let (natural, pose) = match source {
+                Source::Media(_) => {
+                    let (size, (dx, dy)) = clip.look.cropped(natural);
+                    let mut pose = pose;
+                    pose.x += dx * pose.scale / canvas.0.max(1) as f64;
+                    pose.y += dy * pose.scale / canvas.1.max(1) as f64;
+                    (size, pose)
+                }
+                Source::Generated(_) => (natural, pose),
+            };
             layers.push(Layer {
                 clip: clip.id,
                 image,
-                natural: export::natural_size(source, rendered, canvas.0, canvas.1),
+                natural,
                 pose,
                 visible: {
                     // A see-through render is picked and outlined by what it draws.
