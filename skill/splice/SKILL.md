@@ -36,18 +36,13 @@ This downloads the latest release, verifies its checksum, installs
 `Splice.app` in `/Applications` with the `splice` command in `~/.local/bin`
 (the same program), this skill in `~/.claude/skills/splice` (other agents:
 copy `SKILL.md` to wherever your skills live), and ffmpeg with Homebrew if it
-is missing. If the download is refused because the repository is private, and
-`gh` is signed in:
-
-```sh
-gh api repos/ArchAstro/splice/contents/install.sh -H "Accept: application/vnd.github.raw" | sh
-```
+is missing.
 
 To build from source instead (needs Rust; if `cargo` is missing, point the
 user to https://rustup.rs rather than installing a toolchain yourself):
 
 ```sh
-gh repo clone ArchAstro/splice && sh splice/scripts/install.sh
+git clone https://github.com/ArchAstro/splice && sh splice/scripts/install.sh
 ```
 
 Check it worked with `splice --version`, then have the user open Splice.

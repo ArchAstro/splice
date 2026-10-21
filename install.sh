@@ -40,8 +40,8 @@ else
     base="https://github.com/$repo/releases/download/$version"
 fi
 
-# Anonymous download first. While the repository is private that fails, and
-# a signed-in GitHub CLI is used instead.
+# Anonymous download first; if that fails (rate limits, a proxy), a signed-in
+# GitHub CLI is tried instead.
 fetch() {
     if command -v curl >/dev/null 2>&1 && curl -fsSL --retry 3 -o "$work/$1" "$base/$1" 2>/dev/null; then
         return 0
@@ -85,7 +85,7 @@ if [ "${SPLICE_APP:-1}" != "0" ] && verified splice-macos-app.zip; then
 else
     asset="splice-darwin-$arch.tar.gz"
     say "Downloading $asset ($version)..."
-    verified "$asset" || fail "could not download $asset from $base (if the repository is private, sign in with: gh auth login)"
+    verified "$asset" || fail "could not download $asset from $base"
     mkdir "$work/unpacked"
     tar -xzf "$work/$asset" -C "$work/unpacked"
     # Replace by rename, so a splice that is running keeps its own copy.

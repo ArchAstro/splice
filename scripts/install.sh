@@ -2,7 +2,7 @@
 # Builds and installs Splice from a checkout, and links its Claude Code skill.
 #
 #   sh scripts/install.sh            from a checkout
-#   gh repo clone ArchAstro/splice && sh splice/scripts/install.sh
+#   git clone https://github.com/ArchAstro/splice && sh splice/scripts/install.sh
 #
 # Puts the `splice` binary in ~/.cargo/bin and links the skill into
 # ~/.claude/skills/splice, so it follows the checkout.
