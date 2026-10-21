@@ -1,6 +1,6 @@
 ---
 name: splice
-description: Work with the user inside their Splice video editor - see the project they have open, place, move, trim, split and delete clips on the timeline, import media, compose music as a score, make animated scenes and diagrams, look at any frame, export, and take requests they send from the editor. Use when the user asks for help editing a video they have open in Splice, says "my edit/timeline/movie", or asks you to listen for requests from Splice.
+description: Work with the user inside their Splice video editor - see the project they have open, place, move, trim, split and delete clips on the timeline, import media, plan the story as beats and cues, record the screen, compose music as a score, make animated scenes and diagrams, look at any frame, export, and take requests they send from the editor. Use when the user asks for help editing a video they have open in Splice, says "my edit/timeline/movie", or asks you to listen for requests from Splice.
 ---
 
 # Working in the user's Splice editor
@@ -197,6 +197,55 @@ splice ctl scene write --media 23 --file scene.json --wait    # replace it all; 
   `splice ctl frame` once it is placed.
 - While the person has a scene open they may edit the same file (its
   `file` in `read`); `read` before you write so you do not undo their change.
+
+## 6b. Story: plan the movie, then fill it
+
+The story is the plan: beats laid end to end from the start of the
+timeline. Each beat has a title, `story` (what happens) and `capture` (what
+to film or record). Footage belongs to the beat it starts in, so restructuring
+the story carries the footage along.
+
+```sh
+splice ctl story read                                  # beats with ids, times, coverage, clips; cues
+splice ctl story add --title "Hook" --duration 4 --story "Why care" --capture "Close on the app"
+splice ctl story set --beat 27 --duration 6 --capture "Screen: open the inspector"
+splice ctl story move --beat 29 --index 0              # its footage, and everyone's, follows
+splice ctl story fill --beat 27 --media intro.mov      # lay media in at the beat's start, trimmed to fit
+splice ctl story remove --beat 28                      # footage stays where it is
+splice ctl story list                                  # the plan as a shot list (text)
+splice ctl story shot add --beat 27 --image ref.png --note "Wide on the desk, morning light"
+splice ctl story shot add --beat 27 --note "Close on the hands"     # a shot without a picture
+splice ctl story shot set --shot 41 --note "Wider"     # also: shot move --index I, shot remove
+splice ctl cue add --at 9 --label "music lifts"
+splice ctl view story                                  # show the person the board
+```
+
+- Draft the story with the person before cutting: a few beats, each with what
+  happens and what to capture. Fit durations to the music or voice-over.
+- Give each beat reference shots: a picture (any image, or a frame of a
+  video) and a note per shot. `story read` lists them with the path of each
+  picture, so you can look at them.
+- Then fill the beats with footage (`story fill`, or record). `coverage`
+  says which beats still need it.
+
+### Recording the screen
+
+```sh
+splice ctl record sources                              # displays and windows (ids, apps, titles)
+splice ctl record start --window Safari --beat 27      # or --display 1, or --region X,Y,W,H
+splice ctl record start --display 1 --for 20 --mic --clicks --at 30
+splice ctl record status
+splice ctl record stop --wait                          # answers once the take is in the project
+```
+
+- The take goes into the beat, onto the timeline at `--at`, or (by default)
+  just into the media panel.
+- Ask before recording, and record only what the person wants: a window is
+  usually better than the whole screen. `--hide` makes Splice step out of the
+  shot when recording a whole display.
+- The first recording needs Screen Recording permission. If a take comes out
+  empty, say so and ask the person to grant it in System Settings → Privacy &
+  Security.
 
 ## 7. Playback, the window, versions, export
 

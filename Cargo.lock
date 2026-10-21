@@ -5370,6 +5370,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "core-foundation 0.10.0",
  "cosmic-text 0.19.0",
  "cpal",
  "directories",

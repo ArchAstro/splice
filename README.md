@@ -88,6 +88,50 @@ with every clip of it following.
 Renders are cached by what they are made from, and kept in the project file
 so it still opens anywhere.
 
+## Story and recording
+
+**Story** (⌘3, or Edit / Story in the title bar) plans the movie before and
+while you cut it.
+
+- **Beats** run end to end from the start of the timeline. Each one has a
+  title, what happens, what to capture, and a length.
+- The **Story board** shows the beats as cards, each with a frame of its
+  footage or a "to capture" panel and a covered / partly / empty badge.
+  - Double-click any text to type in it; Tab moves to the next field.
+  - Drag cards to reorder them.
+  - Drop media on a card to lay it into that beat.
+- The timeline gets a **story lane** under the ruler. Each beat shows in its
+  own colour, hatched where it still needs footage. Drag a beat's end to
+  lengthen it.
+- **Footage belongs to the beat it starts in.** Reordering, resizing or
+  removing beats carries the footage along. Removing a beat never deletes
+  footage.
+- **Reference shots:** each beat can hold any number, each a picture of what
+  a shot should look like, with a note.
+  - Ways to add them:
+    - drop image or video files from Finder on a card
+    - paste a screenshot with ⌘V (⌃⇧⌘4 copies one)
+    - grab the viewer's current frame
+    - pick files with +
+  - They show as a strip on the card; click one to see it large.
+  - Until a beat has footage, its first reference stands in for the picture.
+  - They are kept in the project file, out of the media panel.
+- **Cues** (C) mark moments on the ruler, such as "VO starts" or "music
+  lifts".
+- **Shot list** copies the plan as text.
+- Keys: B adds a beat, C marks a cue.
+
+**Record** (⇧⌘R, or the record button) captures the screen with macOS's own
+recorder, so there is no OBS and no extra install.
+
+- You can record the entire screen or any one window, with the cursor and
+  optional clicks and microphone.
+- Recording the whole screen hides Splice. Click it in the Dock to stop.
+- The take comes into the media panel. In Story view it goes into the chosen
+  beat instead.
+- The first recording asks for Screen Recording permission. It is granted to
+  whatever launched Splice: the app, or your terminal.
+
 ## Projects
 
 A project is one `.splice` file: a SQLite database holding the imported
@@ -131,6 +175,8 @@ with `make install-skill`) teaches Claude Code to use it.
 | `splice ctl seek`, `play`, `pause`, `select`, `command` | the playhead, selection and any menu command |
 | `splice ctl save`, `versions`, `export FILE [--wait]` | versions and export |
 | `splice ctl ui`, `click`, `hover`, `drag`, `scroll`, `key`, `type` | operate the window as a person would, for checking the interface |
+| `splice ctl story read / add / set / move / remove / fill / list / shot`, `cue add / set / remove`, `view edit|story` | plan the movie: beats and cues |
+| `splice ctl record sources / start / stop / status` | record a screen, a window or a region, into a beat or the timeline |
 | `splice ctl wait --name Claude` | connects an assistant and waits for your message |
 | `splice ctl say --text T` | shows a line in the status bar |
 

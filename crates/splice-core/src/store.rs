@@ -264,7 +264,7 @@ impl Store {
         let mut stmt = self.conn.prepare("SELECT project FROM versions")?;
         for json in stmt.query_map([], |r| r.get::<_, String>(0))? {
             if let Ok(project) = Project::from_json(&json?) {
-                referenced.extend(project.media.into_iter().map(|m| m.hash));
+                referenced.extend(project.hashes());
             }
         }
         let hashes: Vec<String> = self

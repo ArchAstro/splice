@@ -33,9 +33,12 @@ mod agent;
 mod input;
 mod inspector;
 mod made;
+mod record;
 mod render;
 mod shelf;
+mod shots;
 mod stage;
+mod story;
 mod syntax;
 mod workbench;
 
@@ -93,6 +96,11 @@ enum Drag {
         left: bool,
         before: Project,
     },
+    /// The end of a story beat, making it longer or shorter.
+    BeatEnd {
+        id: splice_core::story::BeatId,
+        before: Project,
+    },
 }
 
 enum Overlay {
@@ -115,6 +123,13 @@ enum Overlay {
         query: String,
         index: usize,
         list: Vec<String>,
+    },
+    /// What to record: a screen or a window.
+    Record {
+        choices: Vec<record::Choice>,
+        index: usize,
+        microphone: bool,
+        clicks: bool,
     },
     /// Choosing the instrument a score's part plays.
     Instruments {
@@ -195,6 +210,19 @@ pub struct Editor {
     scrolled_layers: bool,
     /// Scores and scenes: their renders, errors, studios.
     made: made::Made,
+    /// Edit view or Story view.
+    mode: story::Mode,
+    /// The story beat chosen on the board or the lane.
+    beat: Option<splice_core::story::BeatId>,
+    /// Words being typed into a beat or a cue.
+    typing: Option<story::Typing>,
+    story_focus: FocusHandle,
+    /// A screen recording under way.
+    recording: Option<record::Active>,
+    /// The reference shot each beat's card shows, when one was clicked.
+    shown_shots: HashMap<splice_core::story::BeatId, splice_core::story::ShotId>,
+    /// Takes to lay into a beat once they are imported.
+    fill_after_import: HashMap<PathBuf, splice_core::story::BeatId>,
     /// The score or scene editor, when one is open.
     workbench: Option<workbench::Bench>,
     _ctl: Task<()>,
@@ -314,11 +342,23 @@ impl Editor {
             scrolled_layers: false,
             made: made::Made::default(),
             workbench: None,
+            mode: story::Mode::Edit,
+            beat: None,
+            typing: None,
+            story_focus: cx.focus_handle(),
+            recording: None,
+            fill_after_import: HashMap::new(),
+            shown_shots: HashMap::new(),
             _ctl: ctl,
             _autosave: autosave,
             _watch: watch,
         };
         editor.prepare_media(cx);
+        // Coming back to Splice while it hides for a recording stops it.
+        cx.observe_window_activation(window, |this, window, cx| {
+            this.window_activated(window.is_window_active(), cx);
+        })
+        .detach();
         editor
     }
 
@@ -549,7 +589,11 @@ impl Editor {
                             recipe: None,
                         });
                         let media = project.media(id).cloned().expect("just added");
-                        if let Some((t, track)) = at
+                        if let Some(beat) = self.fill_after_import.remove(&path) {
+                            if let Some(clip) = project.fill_beat(beat, id) {
+                                placed.push(clip);
+                            }
+                        } else if let Some((t, track)) = at
                             && let Some(clip) = project.insert_clip(id, track, t)
                         {
                             placed.push(clip);
@@ -729,7 +773,8 @@ impl Editor {
 
     fn zoom_fit(&mut self) {
         self.auto_fit = true;
-        let duration = secs(self.doc.project.duration()).max(10.0) as f32;
+        let project = &self.doc.project;
+        let duration = secs(project.duration().max(project.story.end())).max(10.0) as f32;
         self.view.pps = ((self.timeline_width() - timeline::GUTTER - 48.0) / duration).clamp(2.0, 2400.0);
         self.view.scroll_x = 0.0;
     }
@@ -768,6 +813,25 @@ impl Editor {
                 });
             }
             Hit::Gutter(_, None) => {}
+            Hit::Beat(id) => {
+                self.select_beat(Some(id), cx);
+                if event.click_count >= 2 {
+                    self.set_mode(story::Mode::Story, cx);
+                }
+            }
+            Hit::BeatEnd(id) => {
+                self.beat = Some(id);
+                self.drag = Drag::BeatEnd {
+                    id,
+                    before: self.doc.project.clone(),
+                };
+            }
+            Hit::StoryEmpty => {
+                self.beat = None;
+                if event.click_count >= 2 {
+                    self.new_beat(window, cx);
+                }
+            }
             Hit::Body(id) => {
                 let made = self
                     .doc
@@ -877,6 +941,25 @@ impl Editor {
                 project.move_clips(ids, dt, dtrack);
                 self.doc.project = project;
             }
+            Drag::BeatEnd { id, before } => {
+                let Some((start, _)) = before.story.span(*id) else {
+                    return;
+                };
+                let mut t = view.t(p.x);
+                let mut points: Vec<Time> = before.snap_points(&[]);
+                points.push(position);
+                points.extend(before.story.cues.iter().map(|c| c.at));
+                self.snap_line = None;
+                if !event.modifiers.alt
+                    && let Some((shift, at)) = timeline::snap(&view, &points, &[t])
+                {
+                    t += shift;
+                    self.snap_line = Some(at);
+                }
+                let mut project = before.clone();
+                project.set_beat_duration(*id, t - start);
+                self.doc.project = project;
+            }
             Drag::Trim { id, left, before } => {
                 let mut t = view.t(p.x);
                 let mut points = before.snap_points(&[*id]);
@@ -905,7 +988,8 @@ impl Editor {
             Drag::Move {
                 before, moved: true, ..
             }
-            | Drag::Trim { before, .. } => {
+            | Drag::Trim { before, .. }
+            | Drag::BeatEnd { before, .. } => {
                 self.doc.commit(before);
                 self.after_edit();
             }
@@ -945,7 +1029,7 @@ impl Editor {
             return None;
         }
         let local = self.local(p);
-        if local.x < timeline::GUTTER || local.y < timeline::RULER {
+        if local.x < timeline::GUTTER || local.y < self.view.top() {
             return None;
         }
         let track = self.view.track_at(local.y, self.doc.project.tracks.len());
@@ -1471,6 +1555,13 @@ impl Editor {
                         *index = 0;
                     }
                 }
+                _ => {}
+            },
+            Overlay::Record { choices, index, .. } => match key {
+                "escape" => return self.close_overlay(window, cx),
+                "up" => *index = index.saturating_sub(1),
+                "down" => *index = (*index + 1).min(choices.len().saturating_sub(1)),
+                "enter" => return self.start_from_overlay(window, cx),
                 _ => {}
             },
             Overlay::Instruments { part, query, index, .. } => match key {

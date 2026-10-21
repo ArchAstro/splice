@@ -11,6 +11,7 @@ mod library;
 mod music;
 mod player;
 mod pointer;
+mod recorder;
 mod scenes;
 mod session;
 mod theme;

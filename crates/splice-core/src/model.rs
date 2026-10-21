@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 /// Version of the project JSON. Bump it and add a step to `migrate` when the
 /// shape changes.
-pub const SCHEMA: u32 = 3;
+pub const SCHEMA: u32 = 4;
 
 /// How long a still image runs when it is first placed.
 pub const IMAGE_DURATION: Time = 5 * SECOND;
@@ -328,6 +328,9 @@ pub struct Project {
     pub media: Vec<Media>,
     /// Bottom layer first.
     pub tracks: Vec<Track>,
+    /// The plan: story beats along the timeline, and cues.
+    #[serde(default, skip_serializing_if = "crate::story::Story::is_empty")]
+    pub story: crate::story::Story,
     next_id: u64,
 }
 
@@ -343,6 +346,7 @@ impl Default for Project {
                 muted: false,
                 hidden: false,
             }],
+            story: crate::story::Story::default(),
             next_id: 2,
         }
     }
@@ -368,7 +372,7 @@ impl Project {
         serde_json::to_string(self).expect("project serializes")
     }
 
-    fn alloc(&mut self) -> u64 {
+    pub(crate) fn alloc(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         id
@@ -531,7 +535,7 @@ impl Project {
 
     /// Puts `clip` on `track` or the first track above it with room, adding a
     /// track on top when none has. Returns the track it landed on.
-    fn place(&mut self, clip: Clip, track: usize) -> usize {
+    pub(crate) fn place(&mut self, clip: Clip, track: usize) -> usize {
         let start = track.min(self.tracks.len());
         let found = (start..self.tracks.len()).find(|&i| self.tracks[i].is_free(clip.start, clip.end(), &[]));
         let index = match found {
@@ -838,7 +842,8 @@ fn migrate(value: &mut serde_json::Value) -> anyhow::Result<()> {
         anyhow::bail!("this project was saved by a newer Splice (schema {schema}); this build reads up to {SCHEMA}");
     }
     // Schema 2 added `look` and `generator` to clips, schema 3 `recipe` to
-    // media; all default, so older projects need nothing.
+    // media, schema 4 `story` to the project; all default, so older projects
+    // need nothing.
     value["schema"] = SCHEMA.into();
     Ok(())
 }

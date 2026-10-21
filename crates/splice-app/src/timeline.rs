@@ -11,6 +11,7 @@ use gpui::{
     point, px, quad, size, transparent_black,
 };
 use splice_core::model::{ClipId, Generator, MediaId, MediaKind, Project};
+use splice_core::story::{BeatId, Coverage};
 use splice_core::time::{SECOND, Time, from_secs, ruler_label, secs};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,6 +21,8 @@ pub const RULER: f32 = 26.0;
 pub const ROW: f32 = 54.0;
 pub const GAP: f32 = 6.0;
 pub const TOP_PAD: f32 = 6.0;
+/// The story lane under the ruler, when there is a story.
+pub const STORY: f32 = 24.0;
 /// Grab width of a clip's trim handles.
 pub const EDGE: f32 = 7.0;
 /// Snap distance.
@@ -31,6 +34,8 @@ pub struct View {
     pub pps: f32,
     pub scroll_x: f32,
     pub scroll_y: f32,
+    /// Height of the story lane: `STORY` when there is a story, else 0.
+    pub story: f32,
 }
 
 impl Default for View {
@@ -39,6 +44,7 @@ impl Default for View {
             pps: 60.0,
             scroll_x: 0.0,
             scroll_y: 0.0,
+            story: 0.0,
         }
     }
 }
@@ -56,8 +62,13 @@ impl View {
         from_secs((dx / self.pps) as f64)
     }
 
+    /// Where the layers begin: under the ruler and the story lane.
+    pub fn top(&self) -> f32 {
+        RULER + self.story
+    }
+
     fn row_y(&self, row: usize) -> f32 {
-        RULER + TOP_PAD + row as f32 * (ROW + GAP) - self.scroll_y
+        self.top() + TOP_PAD + row as f32 * (ROW + GAP) - self.scroll_y
     }
 
     pub fn track_y(&self, track: usize, tracks: usize) -> f32 {
@@ -66,12 +77,14 @@ impl View {
 
     /// The track under `y`; `tracks` itself means the new-layer row.
     pub fn track_at(&self, y: f32, tracks: usize) -> usize {
-        let row = ((y - RULER - TOP_PAD + self.scroll_y) / (ROW + GAP)).floor().max(0.0) as usize;
+        let row = ((y - self.top() - TOP_PAD + self.scroll_y) / (ROW + GAP))
+            .floor()
+            .max(0.0) as usize;
         tracks - row.min(tracks)
     }
 
     pub fn content_height(&self, tracks: usize) -> f32 {
-        RULER + TOP_PAD + (tracks + 1) as f32 * (ROW + GAP)
+        self.top() + TOP_PAD + (tracks + 1) as f32 * (ROW + GAP)
     }
 }
 
@@ -84,6 +97,11 @@ pub enum GutterButton {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Hit {
     Ruler,
+    /// The story lane: a beat, or the edge at the end of one.
+    Beat(BeatId),
+    BeatEnd(BeatId),
+    /// The lane past the last beat.
+    StoryEmpty,
     Gutter(usize, Option<GutterButton>),
     Body(ClipId),
     Start(ClipId),
@@ -95,6 +113,19 @@ pub enum Hit {
 pub fn hit(project: &Project, view: &View, p: Point<f32>) -> Hit {
     if p.y < RULER {
         return Hit::Ruler;
+    }
+    if p.y < view.top() {
+        let story = &project.story;
+        for (beat, start) in story.beats.iter().zip(story.starts()) {
+            let (x0, x1) = (view.x(start), view.x(start + beat.duration));
+            if p.x >= x1 - EDGE && p.x <= x1 + EDGE / 2.0 {
+                return Hit::BeatEnd(beat.id);
+            }
+            if p.x >= x0 && p.x < x1 {
+                return Hit::Beat(beat.id);
+            }
+        }
+        return Hit::StoryEmpty;
     }
     let n = project.tracks.len();
     let track = view.track_at(p.y, n);
@@ -168,6 +199,8 @@ pub struct Frame {
     pub art: HashMap<MediaId, ClipArt>,
     pub ghost: Option<Ghost>,
     pub snap: Option<Time>,
+    /// The beat chosen in the story.
+    pub beat: Option<BeatId>,
 }
 
 fn hsla(c: Rgba) -> Hsla {
@@ -252,11 +285,12 @@ pub fn paint(b: Bounds<Pixels>, frame: Frame, window: &mut Window, cx: &mut App)
     rect(window, b, Theme::panel(), 0.0);
 
     // Rows and clips, clipped to the right of the gutter and below the ruler.
-    let body = area(GUTTER, RULER, (w - GUTTER).max(0.0), (h - RULER).max(0.0));
+    let top = view.top();
+    let body = area(GUTTER, top, (w - GUTTER).max(0.0), (h - top).max(0.0));
     window.with_content_mask(Some(gpui::ContentMask { bounds: body }), |window| {
         for track in 0..=n {
             let y = view.track_y(track, n);
-            if y + ROW < RULER || y > h {
+            if y + ROW < top || y > h {
                 continue;
             }
             if track < n {
@@ -274,7 +308,7 @@ pub fn paint(b: Bounds<Pixels>, frame: Frame, window: &mut Window, cx: &mut App)
         }
         for (track_index, track) in project.tracks.iter().enumerate() {
             let y = view.track_y(track_index, n);
-            if y + ROW < RULER || y > h {
+            if y + ROW < top || y > h {
                 continue;
             }
             for clip in &track.clips {
@@ -321,7 +355,7 @@ pub fn paint(b: Bounds<Pixels>, frame: Frame, window: &mut Window, cx: &mut App)
                     };
                     let label_x = x0.max(GUTTER) + 6.0;
                     // Under the ruler, the name stays on the part still in view.
-                    let y = y.max(RULER).min(y + ROW - 21.0);
+                    let y = y.max(top).min(y + ROW - 21.0);
                     if x1 - label_x > 24.0 {
                         let chars = (((x1 - label_x - 8.0) / 6.2) as usize).max(1);
                         let shown: String = if label.chars().count() > chars {
@@ -384,17 +418,17 @@ pub fn paint(b: Bounds<Pixels>, frame: Frame, window: &mut Window, cx: &mut App)
         }
         if let Some(t) = frame.snap {
             let x = view.x(t);
-            rect(window, area(x - 0.5, RULER, 1.0, h - RULER), Theme::subtext(), 0.0);
+            rect(window, area(x - 0.5, top, 1.0, h - top), Theme::subtext(), 0.0);
         }
         // More layers than fit: a thumb on the right edge says so, and where you are.
         let content = view.content_height(n);
         if content > h + 1.0 {
-            let track = h - RULER - 8.0;
-            let thumb = (track * (h - RULER) / (content - RULER)).max(24.0);
+            let track = h - top - 8.0;
+            let thumb = (track * (h - top) / (content - top)).max(24.0);
             let along = (view.scroll_y / (content - h)).clamp(0.0, 1.0);
             rect(
                 window,
-                area(w - 6.0, RULER + 4.0 + along * (track - thumb), 3.0, thumb),
+                area(w - 6.0, top + 4.0 + along * (track - thumb), 3.0, thumb),
                 Theme::surface2(),
                 1.5,
             );
@@ -430,8 +464,30 @@ pub fn paint(b: Bounds<Pixels>, frame: Frame, window: &mut Window, cx: &mut App)
         }
     });
 
+    if view.story > 0.0 {
+        paint_story(window, cx, &frame, w, &at, &area, &ui);
+    }
+    // Cues: a flag on the ruler, named when there is room.
+    let ruler_band = area(GUTTER, 0.0, (w - GUTTER).max(0.0), RULER);
+    window.with_content_mask(Some(gpui::ContentMask { bounds: ruler_band }), |window| {
+        for (i, cue) in project.story.cues.iter().enumerate() {
+            let x = view.x(cue.at);
+            let next = project.story.cues.get(i + 1).map_or(w, |c| view.x(c.at));
+            rect(window, area(x - 0.5, 2.0, 1.5, RULER - 3.0), Theme::subtext(), 0.0);
+            let room = next - x - 10.0;
+            let label: String = cue.label.chars().take(((room / 6.0).max(0.0)) as usize).collect();
+            let tw = label.chars().count() as f32 * 6.0 + 8.0;
+            if !label.is_empty() {
+                rect(window, area(x + 1.0, 3.0, tw, 14.0), Theme::surface1(), 2.0);
+                text(window, cx, &label, at(x + 4.0, 3.5), 9.5, Theme::text(), ui.clone());
+            } else {
+                rect(window, area(x + 1.0, 3.0, 6.0, 6.0), Theme::subtext(), 1.0);
+            }
+        }
+    });
+
     // Gutter; its controls are elements laid over it.
-    rect(window, area(0.0, RULER, GUTTER, h - RULER), Theme::panel(), 0.0);
+    rect(window, area(0.0, top, GUTTER, h - top), Theme::panel(), 0.0);
     rect(window, area(GUTTER - 1.0, 0.0, 1.0, h), Theme::rule(), 0.0);
 
     // Playhead.
@@ -440,6 +496,98 @@ pub fn paint(b: Bounds<Pixels>, frame: Frame, window: &mut Window, cx: &mut App)
         rect(window, area(x - 0.75, 0.0, 1.5, h), Theme::accent(), 0.0);
         rect(window, area(x - 5.0, 0.0, 10.0, 10.0), Theme::accent(), 2.0);
     }
+}
+
+/// The story lane: each beat a block in its colour, named, hatched where it
+/// has no pictures yet; the chosen one outlined.
+#[allow(clippy::too_many_arguments)]
+fn paint_story(
+    window: &mut Window,
+    cx: &mut App,
+    frame: &Frame,
+    w: f32,
+    at: &dyn Fn(f32, f32) -> Point<Pixels>,
+    area: &dyn Fn(f32, f32, f32, f32) -> Bounds<Pixels>,
+    ui: &Font,
+) {
+    let view = frame.view;
+    let project = &frame.project;
+    let (y, h) = (RULER, STORY);
+    rect(window, area(0.0, y, w, h), Theme::crust(), 0.0);
+    rect(window, area(0.0, y + h - 1.0, w, 1.0), Theme::rule(), 0.0);
+    text(
+        window,
+        cx,
+        "Story",
+        at(12.0, y + 5.0),
+        10.0,
+        Theme::overlay(),
+        ui.clone(),
+    );
+    let lane = area(GUTTER, y, (w - GUTTER).max(0.0), h);
+    window.with_content_mask(Some(gpui::ContentMask { bounds: lane }), |window| {
+        for (n, (beat, start)) in project.story.beats.iter().zip(project.story.starts()).enumerate() {
+            let (x0, x1) = (view.x(start), view.x(start + beat.duration));
+            if x1 < GUTTER || x0 > w {
+                continue;
+            }
+            let b = area(x0 + 1.0, y + 3.0, (x1 - x0 - 2.0).max(1.0), h - 6.0);
+            let color = gpui::rgb(beat.color);
+            let covered = project.coverage(beat.id);
+            let mut fill: Hsla = color.into();
+            fill.a = match covered {
+                Coverage::Full => 0.85,
+                _ => 0.35,
+            };
+            rect(window, b, fill, 4.0);
+            if covered != Coverage::Full {
+                // Hatching: footage still to find.
+                window.with_content_mask(Some(gpui::ContentMask { bounds: b }), |window| {
+                    let mut hx = x0 - h;
+                    while hx < x1 {
+                        for i in 0..(h as i32) {
+                            let px_ = hx + i as f32;
+                            if px_ >= x0 && px_ < x1 {
+                                rect(window, area(px_, y + h - 3.0 - i as f32, 1.0, 1.0), Theme::scrim(), 0.0);
+                            }
+                        }
+                        hx += 7.0;
+                    }
+                });
+            }
+            if frame.beat == Some(beat.id) {
+                outline(window, b, Theme::text(), 1.5, 4.0);
+            }
+            let label = format!(
+                "{}  {}",
+                n + 1,
+                if beat.title.is_empty() { "Untitled" } else { &beat.title }
+            );
+            let room = x1 - x0 - 12.0;
+            if room > 14.0 {
+                let chars = (room / 6.0) as usize;
+                let shown: String = if label.chars().count() > chars {
+                    label.chars().take(chars.saturating_sub(1)).chain(['…']).collect()
+                } else {
+                    label
+                };
+                let ink = if covered == Coverage::Full {
+                    Theme::ground()
+                } else {
+                    Theme::text()
+                };
+                text(
+                    window,
+                    cx,
+                    &shown,
+                    at(x0.max(GUTTER) + 6.0, y + 5.0),
+                    10.0,
+                    ink,
+                    ui.clone(),
+                );
+            }
+        }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]

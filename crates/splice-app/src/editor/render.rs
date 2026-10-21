@@ -68,12 +68,13 @@ impl Render for Tip {
 }
 
 pub(super) fn tip(
-    text: &'static str,
+    text: impl Into<SharedString>,
     keys: Option<&'static str>,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let text: SharedString = text.into();
     move |_, cx| {
         cx.new(|_| Tip {
-            text: text.into(),
+            text: text.clone(),
             keys: keys.map(Into::into),
         })
         .into()
@@ -98,11 +99,12 @@ pub fn icon(name: &str, color: impl Into<Hsla>) -> Svg {
 }
 
 /// A square icon control that brightens on hover.
-pub(super) fn icon_button(id: &'static str, name: &str, enabled: bool) -> Stateful<gpui::Div> {
+pub(super) fn icon_button(id: impl Into<SharedString>, name: &str, enabled: bool) -> Stateful<gpui::Div> {
+    let id: SharedString = id.into();
     let group: SharedString = format!("{id}-group").into();
     let color: Rgba = if enabled { Theme::subtext() } else { Theme::surface2() };
     div()
-        .id(id)
+        .id(gpui::ElementId::Name(id))
         .group(group.clone())
         .size(px(28.0))
         .flex_none()
@@ -155,6 +157,12 @@ impl Render for Editor {
         if self.player.is_playing() {
             self.follow_playhead();
         }
+        // The story lane shows when there is a story, or a story being planned.
+        self.view.story = if !self.doc.project.story.beats.is_empty() || self.mode == story::Mode::Story {
+            timeline::STORY
+        } else {
+            0.0
+        };
         let timeline_size = self.timeline_bounds.get().size;
         if self.auto_fit && f32::from(timeline_size.width) > 0.0 && !self.player.is_playing() {
             let before = (self.view.pps, self.view.scroll_x);
@@ -170,8 +178,9 @@ impl Render for Editor {
         let room = f32::from(timeline_size.height);
         if room > 0.0 && content < room {
             let row = timeline::ROW + timeline::GAP;
-            let natural_top = timeline::RULER + timeline::TOP_PAD + row;
-            let centered_top = timeline::RULER + ((room - timeline::RULER - n * row) / 2.0).floor();
+            let top = self.view.top();
+            let natural_top = top + timeline::TOP_PAD + row;
+            let centered_top = top + ((room - top - n * row) / 2.0).floor();
             self.view.scroll_y = (natural_top - centered_top).min(0.0);
         } else if !self.scrolled_layers {
             // More layers than fit: show the bottom ones, where the main
@@ -283,6 +292,19 @@ impl Render for Editor {
                 cx.notify();
             }))
             .on_action(cx.listener(Self::add_text))
+            .on_action(cx.listener(|this, _: &ToggleStory, _, cx| {
+                let mode = if this.mode == story::Mode::Story {
+                    story::Mode::Edit
+                } else {
+                    story::Mode::Story
+                };
+                this.set_mode(mode, cx);
+            }))
+            .on_action(cx.listener(|this, _: &AddBeat, window, cx| this.new_beat(window, cx)))
+            .on_action(cx.listener(|this, _: &AddCue, window, cx| this.new_cue(window, cx)))
+            .on_action(cx.listener(|this, _: &CopyShotList, _, cx| this.copy_shot_list(cx)))
+            .on_action(cx.listener(|this, _: &RecordScreen, window, cx| this.open_record(window, cx)))
+            .on_action(cx.listener(|this, _: &PasteReference, _, cx| this.paste_reference(cx)))
             .on_action(cx.listener(|this, _: &ChooseFont, window, cx| {
                 if matches!(this.overlay, Overlay::Fonts { .. }) {
                     return this.close_overlay(window, cx);
@@ -310,6 +332,7 @@ impl Render for Editor {
                 let place = this.ghost.take().map(|g| (g.start, g.track));
                 this.import_paths(paths.paths().to_vec(), place, None, cx);
             }))
+            .child(self.story_keys(cx))
             .child(self.render_titlebar(cx))
             .child(
                 div()
@@ -331,6 +354,8 @@ impl Render for Editor {
                             .map(|d| {
                                 if self.workbench.is_some() {
                                     d.child(self.render_workbench(window, cx))
+                                } else if self.mode == story::Mode::Story {
+                                    d.child(self.render_board(cx))
                                 } else {
                                     d.child(self.render_viewer(cx)).when(inspector_open, |d| {
                                         d.child(div().w(px(GAP)).flex_none())
@@ -508,6 +533,39 @@ impl Editor {
         }
     }
 
+    /// Edit or Story: the two ways to look at the movie.
+    fn mode_switch(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tab = |this: &Self, mode: story::Mode, label: &'static str, cx: &mut Context<Self>| {
+            let on = this.mode == mode;
+            div()
+                .id(label)
+                .h(px(22.0))
+                .px(px(10.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .text_size(px(11.5))
+                .text_color(if on { Theme::text() } else { Theme::overlay() })
+                .when(on, |d| d.bg(Theme::surface0()))
+                .hover(|s| s.text_color(Theme::text()))
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| this.set_mode(mode, cx)))
+        };
+        div()
+            .id("mode-switch")
+            .occlude()
+            .ml(px(10.0))
+            .p(px(2.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(Theme::edge())
+            .flex()
+            .gap(px(2.0))
+            .child(tab(self, story::Mode::Edit, "Edit", cx).tooltip(tip("Edit the movie", Some("⌘3"))))
+            .child(tab(self, story::Mode::Story, "Story", cx).tooltip(tip("Plan it: beats, cues, shots", Some("⌘3"))))
+    }
+
     fn render_titlebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let state = if self.doc.edited { "autosaved" } else { "saved" };
         let export = self.export.as_ref().map(|job| job.lock().unwrap().progress);
@@ -646,7 +704,8 @@ impl Editor {
                             ))
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_media(cx))),
                         ),
-                    ),
+                    )
+                    .child(self.mode_switch(cx)),
             )
             .child(
                 div()
@@ -658,6 +717,7 @@ impl Editor {
                     .items_center()
                     .gap_1()
                     .child(self.render_presence(cx))
+                    .child(self.record_button(cx))
                     .child(
                         icon_button("versions", "history", true)
                             .tooltip(tip("Versions", Some("⇧⌘H")))
@@ -1237,6 +1297,7 @@ impl Editor {
             })
             .collect();
         let frame = timeline::Frame {
+            beat: self.beat,
             project: self.doc.project.clone(),
             view: self.view,
             selection: self.selection.clone(),
@@ -1289,7 +1350,7 @@ impl Editor {
         let view = self.view;
         let project = &self.doc.project;
         let controls = project.tracks.iter().enumerate().map(|(i, track)| {
-            let y = view.track_y(i, n) - timeline::RULER;
+            let y = view.track_y(i, n) - view.top();
             // Only the toggles this layer's clips can use; both while it is empty.
             let (mut picture, mut sound) = (track.clips.is_empty(), track.clips.is_empty());
             for clip in &track.clips {
@@ -1412,7 +1473,7 @@ impl Editor {
                     .id("gutter")
                     .occlude()
                     .absolute()
-                    .top(px(timeline::RULER))
+                    .top(px(self.view.top()))
                     .left_0()
                     .w(px(timeline::GUTTER - 1.0))
                     .bottom_0()
@@ -1580,6 +1641,7 @@ impl Editor {
 
         let content = match &self.overlay {
             Overlay::None => return None,
+            Overlay::Record { .. } => panel().child(self.record_overlay(cx)),
             Overlay::Palette { query, index } => {
                 let matches = Self::palette_matches(query);
                 let index = (*index).min(matches.len().saturating_sub(1));

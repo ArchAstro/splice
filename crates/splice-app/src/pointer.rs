@@ -134,9 +134,10 @@ impl Target {
                     self.mouse(kind, flip(x, y), keys, number, count)
                 }
                 Event::Scroll { x, y, dx, dy } => {
-                    // Scroll events come from Core Graphics, placed on screen.
+                    // Scroll events can only be made through Core Graphics. Made
+                    // without a window, AppKit reads their position as if it were
+                    // in the window, so place it there, and hand it to the view.
                     let in_window = flip(x, y);
-                    let on_screen: NSPoint = msg_send![self.window, convertPointToScreen: in_window];
                     let screen: *mut Object = msg_send![class!(NSScreen), mainScreen];
                     let screen_frame: NSRect = msg_send![screen, frame];
                     let cg =
@@ -147,13 +148,16 @@ impl Target {
                     CGEventSetLocation(
                         cg,
                         NSPoint {
-                            x: on_screen.x,
-                            y: screen_frame.size.height - on_screen.y,
+                            x: in_window.x,
+                            y: screen_frame.size.height - in_window.y,
                         },
                     );
                     let event: *mut Object = msg_send![class!(NSEvent), eventWithCGEvent: cg];
                     CFRelease(cg);
-                    event
+                    if !event.is_null() {
+                        let () = msg_send![self.view, scrollWheel: event];
+                    }
+                    return;
                 }
             };
             if !made.is_null() {

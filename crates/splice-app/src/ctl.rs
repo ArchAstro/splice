@@ -86,6 +86,29 @@ Scenes (animation and diagrams: layers of shapes, lines, paths and words that mo
                                  validate without changing anything: errors, warnings, an outline
   open --media M                 open a score or scene in Splice's own editor
 
+Story (planning: beats end to end along the timeline, and cues)
+  story read                     beats (id, start, length, title, story, capture, coverage) and cues
+  story list                     the plan as a shot list (plain text, in `text`)
+  story add --title T [--duration D] [--after BEAT] [--story TEXT] [--capture TEXT]
+  story set --beat B [--title T] [--story TEXT] [--capture TEXT] [--duration D] [--color C]
+                                 a new length moves the beats after it, footage and all
+  story move --beat B --index I  put a beat at position I (from 0); every beat's footage follows
+  story remove --beat B          take a beat out (its footage stays; later beats close up)
+  story fill --beat B --media M  lay media into a beat: at its start, as long as the beat
+  story shot add --beat B [--image FILE] [--note TEXT]
+                                 a reference shot: what it should look like (a picture, a frame of a video)
+  story shot set --shot S --note TEXT  |  story shot move --shot S --index I  |  story shot remove --shot S
+  cue add [--at T] --label TEXT  |  cue set --cue C [--at T] [--label TEXT]  |  cue remove --cue C
+  view edit|story                switch the window between Edit view and the Story board
+
+Recording the screen
+  record sources                 the displays and windows that can be recorded
+  record start [--display N | --window ID|APP | --region X,Y,W,H] [--mic] [--clicks] [--for S]
+               [--beat B | --at T [--track N]] [--hide]
+                                 start; the take goes into beat B, onto the timeline at T, or the media
+  record stop [--wait]           stop; with --wait, answer once the take is in the project
+  record status                  whether it is recording, and for how long
+
 Operating the window (as a person would: for checking the interface)
   ui                             window size and scale, mouse, stage, timeline and picture bounds
   click X Y [--double] [--right] [--shift|--cmd|--alt|--ctrl]
@@ -369,9 +392,24 @@ fn build(args: &[String]) -> Result<Value, String> {
                 let raw = next(arg)?;
                 request.insert(arg[2..].into(), time_value(arg, raw)?);
             }
-            "--track" | "--fps" | "--version" => {
+            "--track" | "--fps" | "--version" | "--beat" | "--cue" | "--index" | "--display" | "--after" | "--shot" => {
                 let n: u64 = next(arg)?.parse().map_err(|_| format!("{arg} expects a number"))?;
                 request.insert(arg[2..].into(), json!(n));
+            }
+            "--image" => {
+                let file = next(arg)?;
+                request.insert("image".into(), json!(absolute(file)));
+            }
+            "--window" => {
+                let w = next(arg)?;
+                request.insert("window".into(), w.parse::<u64>().map_or(json!(w), |id| json!(id)));
+            }
+            "--for" => {
+                let v: f64 = next(arg)?.parse().map_err(|_| "--for expects seconds".to_string())?;
+                request.insert("for".into(), json!(v));
+            }
+            "--mic" | "--clicks" => {
+                request.insert(arg[2..].into(), json!(true));
             }
             "--every" => {
                 let v: f64 = next(arg)?.parse().map_err(|_| "--every expects seconds".to_string())?;
@@ -390,7 +428,8 @@ fn build(args: &[String]) -> Result<Value, String> {
                 let m = next(arg)?;
                 request.insert("media".into(), m.parse::<u64>().map_or(json!(m), |id| json!(id)));
             }
-            "--text" | "--label" | "--name" | "--aspect" | "--layer" | "--into" | "--remove" | "--json" | "--add" => {
+            "--text" | "--label" | "--name" | "--aspect" | "--layer" | "--into" | "--remove" | "--json" | "--add"
+            | "--title" | "--story" | "--capture" | "--region" | "--note" => {
                 request.insert(arg[2..].into(), json!(value(next(arg)?)?));
             }
             "--file" => {
@@ -500,6 +539,25 @@ fn build(args: &[String]) -> Result<Value, String> {
         }
         "open" => "open",
         "ui" => "ui",
+        "story" | "cue" | "record" => {
+            let sub = words.first().map_or(
+                match command.as_str() {
+                    "record" => "status",
+                    _ => "read",
+                },
+                |w| w.as_str(),
+            );
+            request.insert("sub".into(), json!(sub));
+            if let Some(action) = words.get(1).filter(|_| sub == "shot") {
+                request.insert("action".into(), json!(action));
+            }
+            command.as_str()
+        }
+        "view" => {
+            let which = words.first().ok_or("view expects edit or story")?;
+            request.insert("view".into(), json!(which));
+            "view"
+        }
         "click" | "hover" | "drag" | "scroll" => {
             let numbers: Vec<f64> = words
                 .iter()
@@ -574,7 +632,8 @@ pub fn cli(args: &[String]) -> i32 {
         }
     };
     let patient = matches!(request["cmd"].as_str(), Some("wait" | "import" | "frame"))
-        || (matches!(request["cmd"].as_str(), Some("export" | "score" | "scene")) && request["wait"] == json!(true));
+        || (matches!(request["cmd"].as_str(), Some("export" | "score" | "scene" | "record"))
+            && request["wait"] == json!(true));
     let socket = match choose(project.as_deref()) {
         Ok(socket) => socket,
         Err(e) => {

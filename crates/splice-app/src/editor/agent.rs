@@ -152,6 +152,9 @@ impl Editor {
         let cmd = text("cmd").unwrap_or("");
         let answer = match cmd {
             "score" | "scene" | "open" => return self.ctl_made(cmd, request, reply, window, cx),
+            "story" if request["sub"] == json!("shot") => return self.ctl_shot(request, reply, cx),
+            "story" | "cue" | "view" => self.ctl_story(cmd, request, cx),
+            "record" => return self.ctl_record(request, reply, cx),
             "ui" | "click" | "hover" | "drag" | "scroll" | "key" | "type" => {
                 return self.ctl_input(cmd, request, reply, window, cx);
             }

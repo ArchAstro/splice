@@ -9,4 +9,5 @@ pub mod model;
 pub mod motion;
 pub mod score;
 pub mod store;
+pub mod story;
 pub mod time;
