@@ -354,6 +354,9 @@ pub struct Project {
     /// The plan: story beats along the timeline, and cues.
     #[serde(default, skip_serializing_if = "crate::story::Story::is_empty")]
     pub story: crate::story::Story,
+    /// Who and what the movie keeps coming back to, and its look.
+    #[serde(default, skip_serializing_if = "crate::bible::Bible::is_empty")]
+    pub bible: crate::bible::Bible,
     /// In a symbol: the stretch of it (start, end) that a longer or shorter
     /// use stretches, so what comes before and after (an entrance, an exit)
     /// keeps its timing. None stretches all of it evenly.
@@ -375,6 +378,7 @@ impl Default for Project {
                 hidden: false,
             }],
             story: crate::story::Story::default(),
+            bible: crate::bible::Bible::default(),
             hold: None,
             next_id: 2,
         }
@@ -848,6 +852,18 @@ impl Project {
         copies
     }
 
+    /// The timeline with only what plays between `from` and `to`: clips
+    /// wholly outside it go, the rest stay as they are (so they move as they
+    /// do in the whole movie). Exporting a stretch cuts it from this.
+    pub fn window(&self, from: Time, to: Time) -> Project {
+        let mut out = self.clone();
+        out.story = crate::story::Story::default();
+        for track in &mut out.tracks {
+            track.clips.retain(|c| c.start < to && c.end() > from);
+        }
+        out
+    }
+
     pub fn set_volume(&mut self, ids: &[ClipId], volume: f32) {
         for &id in ids {
             if let Some(clip) = self.clip_mut(id) {
@@ -1065,6 +1081,17 @@ mod tests {
         assert_eq!(back, p);
         let newer = p.to_json().replace(&format!("\"schema\":{SCHEMA}"), "\"schema\":99");
         assert!(Project::from_json(&newer).is_err());
+    }
+
+    #[test]
+    fn a_window_keeps_what_plays_in_it_unchanged() {
+        let (mut p, m) = project_with(4 * SECOND);
+        p.append_clip(m);
+        p.append_clip(m);
+        let part = p.window(SECOND, 3 * SECOND);
+        assert_eq!(part.clips().count(), 1);
+        let c = &part.tracks[0].clips[0];
+        assert_eq!((c.start, c.source_in, c.duration), (0, 0, 4 * SECOND));
     }
 
     #[test]

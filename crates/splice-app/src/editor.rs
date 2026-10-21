@@ -33,6 +33,7 @@ mod agent;
 mod input;
 mod inspector;
 mod made;
+mod plan;
 mod record;
 mod render;
 mod reuse;
@@ -134,6 +135,11 @@ enum Overlay {
         index: usize,
         microphone: bool,
         clicks: bool,
+    },
+    /// Who and what from the bible is in a beat.
+    Cast {
+        beat: splice_core::story::BeatId,
+        index: usize,
     },
     /// Naming a symbol: a new one, a renamed or copied one, or a use's copy.
     SymbolName {
@@ -245,6 +251,12 @@ pub struct Editor {
     shown_shots: HashMap<splice_core::story::BeatId, splice_core::story::ShotId>,
     /// Takes to lay into a beat once they are imported.
     fill_after_import: HashMap<PathBuf, splice_core::story::BeatId>,
+    /// Footage being imported for a take: what it becomes when it lands.
+    take_after_import: HashMap<PathBuf, plan::Landing>,
+    /// Which page of the Story view shows.
+    page: plan::Page,
+    /// The picture on show on each bible card.
+    shown_pictures: HashMap<splice_core::bible::EntryId, usize>,
     /// The score or scene editor, when one is open.
     workbench: Option<workbench::Bench>,
     _ctl: Task<()>,
@@ -380,6 +392,9 @@ impl Editor {
             story_focus: cx.focus_handle(),
             recording: None,
             fill_after_import: HashMap::new(),
+            take_after_import: HashMap::new(),
+            page: plan::Page::default(),
+            shown_pictures: HashMap::new(),
             shown_shots: HashMap::new(),
             _ctl: ctl,
             _autosave: autosave,
@@ -599,6 +614,7 @@ impl Editor {
         let mut errors = Vec::new();
         let mut added: Vec<(Media, PathBuf)> = Vec::new();
         let mut placed = Vec::new();
+        let mut takes: Vec<serde_json::Value> = Vec::new();
         self.doc.edit(|project| {
             let mut at = place;
             for result in probed {
@@ -622,7 +638,16 @@ impl Editor {
                             content: None,
                         });
                         let media = project.media(id).cloned().expect("just added");
-                        if let Some(beat) = self.fill_after_import.remove(&path) {
+                        if let Some(landing) = self.take_after_import.remove(&path) {
+                            // The take is made (or lands) in the same step as
+                            // its import: one undo, and nothing if it fails.
+                            if let Some(report) = landing.land(project, id) {
+                                if let Some(clip) = report["clip"].as_u64() {
+                                    placed.push(ClipId(clip));
+                                }
+                                takes.push(report);
+                            }
+                        } else if let Some(beat) = self.fill_after_import.remove(&path) {
                             if let Some(clip) = project.fill_beat(beat, id) {
                                 placed.push(clip);
                             }
@@ -653,13 +678,16 @@ impl Editor {
                 .map(|(m, _)| serde_json::json!({ "id": m.id.0, "name": m.name }))
                 .collect();
             let clips: Vec<_> = placed.iter().map(|c| c.0).collect();
-            let answer = serde_json::json!({
+            let mut answer = serde_json::json!({
                 "ok": errors.is_empty(),
                 "media": media,
                 "clips": clips,
                 "errors": errors,
                 "revision": self.doc.revision,
             });
+            if let Some(take) = takes.first() {
+                answer["take"] = take.clone();
+            }
             let _ = reply.send(answer.to_string());
         }
         if !placed.is_empty() {
@@ -1340,7 +1368,7 @@ impl Editor {
                     path.set_extension("mp4");
                 }
                 this.update(cx, |editor, cx| {
-                    if let Err(e) = editor.start_export(path, quality, true, cx) {
+                    if let Err(e) = editor.start_export(path, quality, true, None, cx) {
                         editor.say_error(e);
                         cx.notify();
                     }
@@ -1357,12 +1385,18 @@ impl Editor {
         output: PathBuf,
         quality: Quality,
         reveal: bool,
+        range: Option<(Time, Time)>,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         if let Some(waiting) = self.unrendered_in_use() {
             return Err(format!("Cannot export yet: {waiting}"));
         }
-        let plan = match export::plan(&self.doc.project, &self.resolver(), &output, quality) {
+        // Just a stretch: cut from the movie as drawn, so it matches.
+        let planned = match range {
+            Some((a, b)) => export::plan_range(&self.doc.project, &self.resolver(), &output, quality, a, b),
+            None => export::plan(&self.doc.project, &self.resolver(), &output, quality),
+        };
+        let plan = match planned {
             Ok(plan) => plan,
             Err(e) => return Err(format!("Cannot export: {e}")),
         };
@@ -1512,6 +1546,9 @@ impl Editor {
         let key = event.keystroke.key.as_str();
         let typed = event.keystroke.key_char.clone();
         let command = event.keystroke.modifiers.platform || event.keystroke.modifiers.control;
+        // The cast sheet's rows, counted before the overlay is borrowed.
+        // Its entries, then a new character, place and thing.
+        let castable = self.castable().len() + 2;
         match &mut self.overlay {
             Overlay::None => return,
             Overlay::Palette { query, index } => match key {
@@ -1658,6 +1695,16 @@ impl Editor {
                         text.push_str(&c);
                         *all = false;
                     }
+                }
+                _ => {}
+            },
+            Overlay::Cast { beat, index } => match key {
+                "escape" => return self.close_overlay(window, cx),
+                "up" => *index = index.saturating_sub(1),
+                "down" => *index = (*index + 1).min(castable),
+                "enter" | "space" => {
+                    let (beat, index) = (*beat, *index);
+                    return self.cast_pick(beat, index, window, cx);
                 }
                 _ => {}
             },

@@ -70,7 +70,36 @@ pub fn plan(project: &Project, resolve: &impl Resolve, output: &Path, quality: Q
     if project.duration() <= 0 {
         return Err("the timeline is empty".into());
     }
-    build(project, resolve, output, Some(Out::Movie(quality)), None, false)
+    build(project, resolve, output, Some(Out::Movie(quality, None)), None, false)
+}
+
+/// Builds the ffmpeg arguments that render just `from` to `to` of `project`
+/// to `output`. The movie is drawn up to `to` and the stretch cut from it,
+/// so every clip moves exactly as it does there (an entrance under way, a
+/// slow zoom), and clips outside it are left out.
+pub fn plan_range(
+    project: &Project,
+    resolve: &impl Resolve,
+    output: &Path,
+    quality: Quality,
+    from: Time,
+    to: Time,
+) -> Result<Plan, String> {
+    if to <= from {
+        return Err("the stretch ends before it starts".into());
+    }
+    let part = project.window(from, to);
+    if part.is_empty() {
+        return Err("nothing is on the timeline there".into());
+    }
+    build(
+        &part,
+        resolve,
+        output,
+        Some(Out::Movie(quality, Some((from, to)))),
+        None,
+        false,
+    )
 }
 
 /// Builds the ffmpeg arguments that render `project` to `output` (a `.mov`)
@@ -86,7 +115,8 @@ pub fn plan_layer(project: &Project, resolve: &impl Resolve, output: &Path) -> R
 /// What a movie export writes.
 #[derive(Clone, Copy)]
 enum Out {
-    Movie(Quality),
+    /// A movie; with a window, just that stretch of it.
+    Movie(Quality, Option<(Time, Time)>),
     Layer,
 }
 
@@ -143,8 +173,14 @@ fn build(
 ) -> Result<Plan, String> {
     let layer = see_through;
     let frame = project.frame();
+    let window = match out {
+        Some(Out::Movie(_, w)) => w,
+        _ => None,
+    };
     let duration = if still_at.is_some() {
         frame
+    } else if let Some((_, to)) = window {
+        to.max(frame)
     } else {
         project.duration().max(frame)
     };
@@ -240,7 +276,12 @@ fn build(
 
             if shows {
                 let look = &clip.look;
-                let (nw, nh) = natural_size(source, rendered, w, h);
+                let natural = natural_size(source, rendered, w, h);
+                // Only media is cropped; titles and colours are drawn to size.
+                let ((nw, nh), (cx, cy)) = match source {
+                    Source::Media(_) => look.cropped(natural),
+                    Source::Generated(_) => (natural, (0.0, 0.0)),
+                };
                 let pose = look.pose_expr(clip.duration);
                 // Local time inside the clip, in each filter's own clock.
                 let local = if offset > 0 {
@@ -305,8 +346,16 @@ fn build(
                 };
                 let animated =
                     pose.x.constant().is_none() || pose.y.constant().is_none() || pose.scale.constant().is_none();
-                let x = format!("(W-w)/2+{}*W", pose.x.ffmpeg(&since));
-                let y = format!("(H-h)/2+{}*H", pose.y.ffmpeg(&since));
+                // A cropped picture's remains stay where they were, scaled with it.
+                let shift = |by: f64| {
+                    if by.abs() < 1e-6 {
+                        String::new()
+                    } else {
+                        format!("+{by:.3}*{}", pose.scale.ffmpeg(&since))
+                    }
+                };
+                let x = format!("(W-w)/2+{}*W{}", pose.x.ffmpeg(&since), shift(cx));
+                let y = format!("(H-h)/2+{}*H{}", pose.y.ffmpeg(&since), shift(cy));
                 filters.push(format!(
                     "[{picture}][v{tag}]overlay=x='{x}':y='{y}':{}{}eof_action=pass:\
                      enable='between(t,{start},{end})'[p{tag}]",
@@ -327,17 +376,29 @@ fn build(
         }
     }
 
+    // Just a stretch: cut from the movie as drawn, then start it at zero.
+    let (cut, cut_sound) = match window {
+        Some((a, b)) => (
+            format!("trim=start={}:end={},setpts=PTS-STARTPTS,", fmt(a), fmt(b)),
+            format!(",atrim=start={}:end={},asetpts=PTS-STARTPTS", fmt(a), fmt(b)),
+        ),
+        None => (String::new(), String::new()),
+    };
     filters.push(format!(
-        "[{picture}]format={}[vout]",
+        "[{picture}]{cut}format={}[vout]",
         if layer { "yuva444p10le" } else { "yuv420p" }
     ));
     if out.is_some() {
         filters.push(format!(
-            "[1:a]{}amix=inputs={}:normalize=0:duration=first,{LIMITER}[aout]",
+            "[1:a]{}amix=inputs={}:normalize=0:duration=first,{LIMITER}{cut_sound}[aout]",
             sounds.join(""),
             sounds.len() + 1
         ));
     }
+    let (duration, d) = match window {
+        Some((a, b)) => (b - a, fmt(b - a)),
+        None => (duration, d),
+    };
 
     args.extend(strings(&["-filter_complex", &filters.join(";")]));
     let Some(out) = out else {
@@ -345,7 +406,7 @@ fn build(
         args.push(output.to_string_lossy().to_string());
         return Ok(Plan { args, duration });
     };
-    let Out::Movie(quality) = out else {
+    let Out::Movie(quality, _) = out else {
         args.extend(strings(&[
             "-map",
             "[vout]",
@@ -546,6 +607,27 @@ mod tests {
         );
         assert!(plan.args.ends_with(&["/o.png".to_string()]));
         assert!(plan_still(&p, &Fake, 9 * SECOND, Path::new("/o.png")).is_err());
+    }
+
+    #[test]
+    fn a_stretch_is_cut_from_the_movie_as_drawn() {
+        let mut p = Project::default();
+        let v = video(&mut p, "a", 4);
+        p.append_clip(v);
+        let plan = plan_range(
+            &p,
+            &Fake,
+            Path::new("/tmp/part.mp4"),
+            Quality::Draft,
+            SECOND,
+            3 * SECOND,
+        )
+        .unwrap();
+        let graph = graph(&plan);
+        assert!(graph.contains("trim=start=1.000000:end=3.000000,setpts=PTS-STARTPTS"));
+        assert!(graph.contains("atrim=start=1.000000:end=3.000000"));
+        assert_eq!(plan.duration, 2 * SECOND);
+        assert!(plan_range(&p, &Fake, Path::new("/tmp/x.mp4"), Quality::Draft, 3 * SECOND, SECOND).is_err());
     }
 
     #[test]

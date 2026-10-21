@@ -97,6 +97,7 @@ fn icon(name: &str) -> Option<&'static str> {
         }
         "flag" => r#"<path d="M5.5 21V4"/><path d="M5.5 4.5h11l-2.5 4 2.5 4h-11"/>"#,
         "record" => r#"<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5" fill="black"/>"#,
+        "check" => r#"<path d="m5.5 12.5 4 4 9-9.5"/>"#,
         "close" => r#"<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>"#,
         "minus" => r#"<path d="M5 12h14"/>"#,
         "chevron" => r#"<path d="m7 9.5 5 5 5-5"/>"#,

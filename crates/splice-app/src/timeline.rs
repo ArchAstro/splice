@@ -567,9 +567,15 @@ fn paint_story(
                 outline(window, b, Theme::text(), 1.5, 4.0);
             }
             let label = format!(
-                "{}  {}",
+                "{}  {}{}",
                 n + 1,
-                if beat.title.is_empty() { "Untitled" } else { &beat.title }
+                if beat.title.is_empty() { "Untitled" } else { &beat.title },
+                // A take still being made shows here as well as on its card.
+                if beat.takes.iter().any(|t| t.media.is_none()) {
+                    " · generating"
+                } else {
+                    ""
+                }
             );
             let room = x1 - x0 - 12.0;
             if room > 14.0 {

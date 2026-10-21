@@ -20,7 +20,7 @@ pub fn still_path(still: &Still) -> PathBuf {
 
 /// Turns an image (or a frame of a video) into a reference PNG kept in the
 /// cache by its hash. Blocking.
-fn make_still(source: &Path) -> anyhow::Result<Still> {
+pub(super) fn make_still(source: &Path) -> anyhow::Result<Still> {
     let probe = ffmpeg::probe(source)?;
     let dir = dirs().cache.join("media");
     std::fs::create_dir_all(&dir)?;
@@ -132,7 +132,7 @@ impl Editor {
     }
 
     /// Keeps a reference picture in the project file.
-    fn embed_still(&mut self, still: &Still, path: PathBuf) {
+    pub(super) fn embed_still(&mut self, still: &Still, path: PathBuf) {
         let store_path = self.doc.path().to_path_buf();
         let (hash, ext) = (still.hash.clone(), still.ext.clone());
         std::thread::spawn(move || {

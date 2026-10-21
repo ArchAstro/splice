@@ -116,6 +116,8 @@ make install-app   # Splice.app in /Applications
     length you choose. A slow zoom can run across the whole clip.
   - **Green screen:** key out green or blue, with strength, softness and fringe
     clean-up.
+  - **Crop:** cut any edge away. The picture keeps its scale, and what
+    remains stays where it was.
   - **Mask:** circle or box, with size, position, feather and invert.
   - **Sound:** volume.
 
@@ -233,6 +235,20 @@ while you cut it.
   - They are kept in the project file, out of the media panel.
 - **Cues** (C) mark moments on the ruler, such as "VO starts" or "music
   lifts".
+- **Bible** (the second page of Story view): the characters, places and
+  things the movie keeps coming back to, and its look. Each has pictures
+  (drop them on the card; the first is its face) and the words that must
+  stay the same in every shot.
+- **Cast**: each beat card shows who and what is in it as faces. Click **+
+  Cast** to choose from the bible.
+- **Takes**: footage tried for a beat, generated or shot. Each remembers how
+  it was made (model, prompt, references). Click a take on the beat card to
+  lay it in. A take still being generated pulses, and the story lane says so.
+- **Brief** copies the chosen beat's brief, a prompt to start from. It
+  carries the beat's story, framing, cast, look, length and shape.
+  `splice ctl story brief` also writes out the references and the frames
+  around the beat, for an assistant generating footage. Seedance through
+  Higgsfield works well; see the skill.
 - **Shot list** copies the plan as text.
 - Keys: B adds a beat, C marks a cue.
 

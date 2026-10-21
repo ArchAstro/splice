@@ -104,6 +104,7 @@ fn look_json(look: &splice_core::look::Look) -> Value {
             "despill": k.despill,
         })),
         "mask": look.mask,
+        "crop": look.crop,
     })
 }
 
@@ -153,6 +154,10 @@ impl Editor {
         let answer = match cmd {
             "score" | "scene" | "open" => return self.ctl_made(cmd, request, reply, window, cx),
             "story" if request["sub"] == json!("shot") => return self.ctl_shot(request, reply, cx),
+            "story" if matches!(request["sub"].as_str(), Some("cast" | "brief" | "take")) => {
+                return self.ctl_plan(request, reply, cx);
+            }
+            "bible" => return self.ctl_bible(request, reply, cx),
             "story" | "cue" | "view" => self.ctl_story(cmd, request, cx),
             "record" => return self.ctl_record(request, reply, cx),
             "symbol" | "placeholder" | "hold" => return self.ctl_symbol(cmd, request, reply, cx),
@@ -593,7 +598,28 @@ impl Editor {
                     Some("high") => Quality::High,
                     _ => Quality::Standard,
                 };
-                if let Err(e) = self.start_export(path.clone(), quality, false, cx) {
+                // Just a stretch: --from/--to, a clip's span, or a beat.
+                let range = if let Ok(Some(clips)) = self.clips_of(request).map(|c| c.first().copied()) {
+                    self.doc.project.clip(clips).map(|c| (c.start, c.end()))
+                } else if let Some(beat) = request.get("beat").and_then(Value::as_u64) {
+                    match self.doc.project.story.span(splice_core::story::BeatId(beat)) {
+                        Some(span) => Some(span),
+                        None => return Some(fail(format!("no beat {beat}"))),
+                    }
+                } else {
+                    match (self.time(request, "from"), self.time(request, "to")) {
+                        (Ok(None), Ok(None)) => None,
+                        (Ok(a), Ok(b)) => {
+                            let (a, b) = (a.unwrap_or(0), b.unwrap_or(self.doc.project.duration()));
+                            if b <= a {
+                                return Some(fail("--to must be after --from"));
+                            }
+                            Some((a, b))
+                        }
+                        (Err(e), _) | (_, Err(e)) => return Some(fail(e)),
+                    }
+                };
+                if let Err(e) = self.start_export(path.clone(), quality, false, range, cx) {
                     return Some(fail(e));
                 }
                 if flag("wait") == Some(true) {
@@ -988,6 +1014,19 @@ fn apply_look(look: &mut splice_core::look::Look, request: &Value) -> Result<(),
         mask.height = number("mask_height").map_or(mask.height, |v| v.max(0.01));
         mask.feather = number("feather").map_or(mask.feather, |v| v.clamp(0.001, 1.0));
         mask.invert = flag("invert").unwrap_or(mask.invert);
+    }
+    if text("crop") == Some("none") {
+        look.crop = None;
+    }
+    let edges = ["crop_left", "crop_top", "crop_right", "crop_bottom"];
+    if edges.iter().any(|k| number(k).is_some()) {
+        let mut c = look.crop.unwrap_or_default();
+        c.left = number("crop_left").unwrap_or(c.left);
+        c.top = number("crop_top").unwrap_or(c.top);
+        c.right = number("crop_right").unwrap_or(c.right);
+        c.bottom = number("crop_bottom").unwrap_or(c.bottom);
+        let c = c.clamped();
+        look.crop = (!c.is_none()).then_some(c);
     }
     Ok(())
 }

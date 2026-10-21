@@ -116,7 +116,8 @@ splice ctl style --clip 12 --text "Day two" --color gold --italic
 splice ctl color --color black --at 0 --duration 2                 # a title card or background
 splice ctl color --color "#00000080" --at 10 --duration 4          # a tint over what is under it
 splice ctl look --clip 7 --scale 0.4 --x 0.28 --y -0.25            # picture in picture, top right
-splice ctl look --clip 7 --mask ellipse --feather 0.15             # a soft round crop
+splice ctl look --clip 7 --mask ellipse --feather 0.15             # a soft round vignette
+splice ctl look --clip 7 --crop-left 0.2 --crop-bottom 0.1         # cut edges away (--crop none)
 splice ctl look --clip 9 --key green --similarity 0.18             # green screen (blue, #rrggbb too)
 splice ctl look --clip 3 --drift zoom-in --enter fade --enter-for 1
 ```
@@ -332,6 +333,76 @@ splice ctl view story                                  # show the person the boa
   picture, so you can look at them.
 - Then fill the beats with footage (`story fill`, or record). `coverage`
   says which beats still need it.
+
+### The bible and cast
+
+The bible holds who and what the movie keeps coming back to: characters,
+places and things, each with pictures (the first is its face) and the words
+that must read the same in every shot, plus one **look** for the whole
+movie. Beats name their cast from it.
+
+```sh
+splice ctl bible add --kind character --name Ada --words "short silver hair, red wool coat" --image ada.png
+splice ctl bible add --kind place --name Bridge --words "iron footbridge, wet cobbles" --image bridge.jpg
+splice ctl bible add --kind look --name Look --words "warm dusk light, 35mm, soft grain"
+splice ctl bible picture --entry Ada --image ada-profile.png      # more pictures; --remove I
+splice ctl story cast --beat 27 --add Ada --add Bridge
+splice ctl bible read
+```
+
+### Generating footage (Seedance through Higgsfield)
+
+Splice does not call video models itself. You do, with the Higgsfield tools,
+and Splice keeps the plan, the references and the takes. For each beat:
+
+1. `splice ctl story brief --beat B` writes the beat's references to a folder
+   and returns everything about it:
+   - what happens and what to capture;
+   - its length, plus `generate_seconds`: the length to ask for, rounded into
+     the 4–30 s models make. Trim the take back to the beat's length;
+   - its aspect ratio, its cast's words, the look and its cues;
+   - the frames just before, at the start, at the end and just after it.
+
+   `images` holds at most five references, each with one job and its `file`,
+   numbered @Image1… in the order the `outline` uses them: the look, faces,
+   places, things, then shots. Pictures that did not make the five are in
+   `more_pictures`.
+2. Write the prompt from `outline`, following what works for Seedance:
+   - give each reference one job ("@Image1 is Ada: face and wardrobe only"),
+     and use four or five references at most;
+   - put the style once at the top, from the look;
+   - anchor the cast in words, even when a picture shows them;
+   - one action and one camera move per shot, with timed shots ("0–4s …");
+   - say what must not change;
+   - don't describe what a reference already shows.
+3. Choose the mode:
+   - text or references to video for a new shot;
+   - first and last frames (`frames.before` / `frames.after`) to bridge
+     neighbouring shots;
+   - `video_edit` to change footage already in the beat. Export it first
+     with `splice ctl export clip.mp4 --beat B`; it must be 4–30 s;
+   - `video_extension` to run a shot on.
+   Ask before spending credits, and use the beat's length and the movie's
+   aspect ratio.
+4. Record the generation as soon as it starts: `splice ctl story take
+   pending --beat B --tool higgsfield --model M --mode X --prompt P --job J`.
+   The beat then shows it as generating, with how long it has run.
+5. When the job finishes, download it and run `splice ctl story take land
+   --take T --video FILE`:
+   - add `--seam` for an extension, so its first three frames, which repeat
+     the clip it extends, are skipped;
+   - the take is laid into the beat unless you pass `--keep`;
+   - the reply's `take` says whether it was chosen and whether it is
+     `short_by` or `trimmed_by` against the beat.
+
+   If a generation fails, run `story take fail --take T`. Choosing a take
+   replaces only the clips other takes of that beat laid in; footage placed
+   by hand is never touched.
+6. Make two or three takes when the person wants a choice. They pick one on
+   the beat card, or you run `story take choose --take T`. `story read`
+   lists the takes, each with its prompt, so you can vary the best one.
+
+Check each landed take with `splice ctl frame` before calling it done.
 
 ### Recording the screen
 

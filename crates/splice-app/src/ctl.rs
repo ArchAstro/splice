@@ -54,6 +54,8 @@ Titles, colours and looks
           --key green|blue|#rrggbb|none [--similarity F] [--blend F] [--despill/--no-despill]
           --mask ellipse|rect|none [--mask-x F --mask-y F --mask-width F --mask-height F]
                 [--feather F] [--invert/--no-invert]   (mask numbers are fractions of the clip's frame)
+          --crop-left F --crop-right F --crop-top F --crop-bottom F | --crop none
+                (cut edges away, fractions of the picture; it keeps its size and what remains stays put)
   C is #rrggbb, #rrggbbaa or a name: white, black, paper, ink, vermilion, gold, green, blue, clear.
 
 Music (a score: instruments and notes, played by General MIDI sounds)
@@ -129,8 +131,31 @@ Story (planning: beats end to end along the timeline, and cues)
   story shot add --beat B [--image FILE] [--note TEXT]
                                  a reference shot: what it should look like (a picture, a frame of a video)
   story shot set --shot S --note TEXT  |  story shot move --shot S --index I  |  story shot remove --shot S
+  story cast --beat B [--add ENTRY] [--remove ENTRY]
+                                 who and what from the bible is in a beat
+  story brief --beat B [--dir DIR]
+                                 everything to make a beat's footage: what happens, what to capture, its
+                                 cast's words and pictures, the look, length and shape, the frames just
+                                 before and after (written to DIR), and an `outline` prompt to start from
+  story take pending --beat B [--tool T] [--model M] [--mode X] [--prompt P] [--refs a,b] [--job J]
+                                 a take being made (generated): shows on the beat while it runs
+  story take land --take T --video FILE [--seam] [--keep]
+  story take add --beat B --video FILE [origin as above] [--seam] [--keep]
+                                 footage for a take; it is laid into the beat unless --keep (and a beat
+                                 with nothing laid in takes it anyway). --seam skips an extension's
+                                 first three frames, which repeat what it extends. The reply's `take`
+                                 says if it was chosen, and if it is short of or longer than the beat
+  story take fail --take T       a generation that failed: its pending take goes
+  story take choose --take T | story take remove --take T
   cue add [--at T] --label TEXT  |  cue set --cue C [--at T] [--label TEXT]  |  cue remove --cue C
   view edit|story                switch the window between Edit view and the Story board
+
+The bible (who and what the movie keeps coming back to, and its look)
+  bible read                     entries: kind, name, words, pictures, the beats each is in
+  bible add --kind character|place|thing|look --name N [--words W] [--image FILE]
+  bible set --entry E [--name N] [--words W]
+  bible picture --entry E --image FILE | --remove I     (the first picture is the face briefs lead with)
+  bible remove --entry E         E is an entry's id or name
 
 Recording the screen
   record sources                 the displays and windows that can be recorded
@@ -155,7 +180,8 @@ Playing and the window
   select [--clip C]                        select clips (none: deselect)
   command <words>                          run a command from the command menu (zoom fit, versions)
   save [--label TEXT]                      keep a version
-  export <file.mp4> [--draft|--high] [--wait]
+  export <file.mp4> [--draft|--high] [--from T --to T | --clip C | --beat B] [--wait]
+                                 the movie, or just a stretch of it (a clip's span, a beat)
   say --text TEXT                          show one line in Splice's status bar
 
 Talking with the person
@@ -399,11 +425,12 @@ fn build(args: &[String]) -> Result<Value, String> {
         let mut next = |name: &str| rest.next().ok_or(format!("{name} needs a value"));
         match arg.as_str() {
             "--font" | "--color" | "--box" | "--align" | "--enter" | "--exit" | "--drift" | "--key" | "--mask"
-            | "--query" => {
+            | "--query" | "--crop" => {
                 request.insert(arg[2..].into(), json!(value(next(arg)?)?));
             }
             "--size" | "--x" | "--y" | "--scale" | "--opacity" | "--similarity" | "--blend" | "--feather"
-            | "--mask-x" | "--mask-y" | "--mask-width" | "--mask-height" | "--enter-for" | "--exit-for" => {
+            | "--mask-x" | "--mask-y" | "--mask-width" | "--mask-height" | "--enter-for" | "--exit-for"
+            | "--crop-left" | "--crop-top" | "--crop-right" | "--crop-bottom" => {
                 let raw = next(arg)?;
                 let v = match raw.parse::<f64>() {
                     Ok(v) => json!(v),
@@ -419,17 +446,22 @@ fn build(args: &[String]) -> Result<Value, String> {
             "--no-bold" | "--no-italic" | "--no-shadow" | "--no-invert" | "--no-despill" => {
                 request.insert(arg[5..].into(), json!(false));
             }
-            "--at" | "--to" | "--start" | "--end" | "--duration" => {
+            "--at" | "--to" | "--from" | "--start" | "--end" | "--duration" => {
                 let raw = next(arg)?;
                 request.insert(arg[2..].into(), time_value(arg, raw)?);
             }
-            "--track" | "--fps" | "--version" | "--beat" | "--cue" | "--index" | "--display" | "--after" | "--shot" => {
+            "--track" | "--fps" | "--version" | "--beat" | "--cue" | "--index" | "--display" | "--after" | "--shot"
+            | "--take" => {
                 let n: u64 = next(arg)?.parse().map_err(|_| format!("{arg} expects a number"))?;
                 request.insert(arg[2..].into(), json!(n));
             }
-            "--image" => {
+            "--image" | "--video" | "--dir" => {
                 let file = next(arg)?;
-                request.insert("image".into(), json!(absolute(file)));
+                request.insert(arg[2..].into(), json!(absolute(file)));
+            }
+            "--entry" => {
+                let e = next(arg)?;
+                request.insert("entry".into(), e.parse::<u64>().map_or(json!(e), |id| json!(id)));
             }
             "--window" => {
                 let w = next(arg)?;
@@ -459,8 +491,9 @@ fn build(args: &[String]) -> Result<Value, String> {
                 let m = next(arg)?;
                 request.insert(arg[2..].into(), m.parse::<u64>().map_or(json!(m), |id| json!(id)));
             }
-            "--text" | "--label" | "--name" | "--new" | "--as" | "--aspect" | "--layer" | "--into" | "--remove"
-            | "--json" | "--add" | "--title" | "--story" | "--capture" | "--region" | "--note" => {
+            "--text" | "--label" | "--name" | "--new" | "--as" | "--kind" | "--words" | "--prompt" | "--model"
+            | "--mode" | "--tool" | "--refs" | "--job" | "--aspect" | "--layer" | "--into" | "--remove" | "--json"
+            | "--add" | "--title" | "--story" | "--capture" | "--region" | "--note" => {
                 request.insert(arg[2..].into(), json!(value(next(arg)?)?));
             }
             "--file" => {
@@ -484,7 +517,7 @@ fn build(args: &[String]) -> Result<Value, String> {
                 let v: f64 = next(arg)?.parse().map_err(|_| format!("{arg} expects points"))?;
                 request.insert(arg[2..].into(), json!(v));
             }
-            "--ripple" | "--wait" | "--keep" | "--none" | "--all" | "--reset" | "--clear" => {
+            "--ripple" | "--wait" | "--keep" | "--none" | "--all" | "--reset" | "--clear" | "--seam" => {
                 request.insert(arg[2..].into(), json!(true));
             }
             "--draft" | "--high" => {
@@ -574,6 +607,10 @@ fn build(args: &[String]) -> Result<Value, String> {
             "symbol"
         }
         "placeholder" => "placeholder",
+        "bible" => {
+            request.insert("sub".into(), json!(words.first().map_or("read", |w| w.as_str())));
+            "bible"
+        }
         "hold" => "hold",
         "ui" => "ui",
         "story" | "cue" | "record" => {
@@ -585,7 +622,7 @@ fn build(args: &[String]) -> Result<Value, String> {
                 |w| w.as_str(),
             );
             request.insert("sub".into(), json!(sub));
-            if let Some(action) = words.get(1).filter(|_| sub == "shot") {
+            if let Some(action) = words.get(1).filter(|_| sub == "shot" || sub == "take") {
                 request.insert("action".into(), json!(action));
             }
             command.as_str()
@@ -756,6 +793,20 @@ mod tests {
         );
         let r = build(&args("symbol fit --clip 4 --as canvas")).unwrap();
         assert_eq!(r, json!({"cmd": "symbol", "sub": "fit", "clips": [4], "as": "canvas"}));
+        let r = build(&args("bible add --kind character --name Ada --words silver")).unwrap();
+        assert_eq!(
+            r,
+            json!({"cmd": "bible", "sub": "add", "kind": "character", "name": "Ada", "words": "silver"})
+        );
+        let r = build(&args("story take pending --beat 3 --model seedance_2_5 --job j1")).unwrap();
+        assert_eq!(
+            r,
+            json!({"cmd": "story", "sub": "take", "action": "pending", "beat": 3, "model": "seedance_2_5", "job": "j1"})
+        );
+        let r = build(&args("export out.mp4 --from 2 --to 5")).unwrap();
+        assert_eq!((r["from"].clone(), r["to"].clone()), (json!(2.0), json!(5.0)));
+        let r = build(&args("look --clip 2 --crop-left 0.25")).unwrap();
+        assert_eq!(r["crop_left"], json!(0.25));
         let r = build(&args("symbol update --all")).unwrap();
         assert_eq!(r, json!({"cmd": "symbol", "sub": "update", "all": true}));
     }

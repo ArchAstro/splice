@@ -1658,6 +1658,10 @@ impl Editor {
         let content = match &self.overlay {
             Overlay::None => return None,
             Overlay::Record { .. } => panel().child(self.record_overlay(cx)),
+            Overlay::Cast { beat, index } => {
+                let (beat, index) = (*beat, *index);
+                panel().w(px(380.0)).child(self.cast_overlay(beat, index, cx))
+            }
             Overlay::SymbolMenu { .. } | Overlay::SymbolName { .. } => {
                 panel().child(self.symbol_overlay(cx).unwrap_or_else(|| div().into_any_element()))
             }
