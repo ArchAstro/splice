@@ -1,6 +1,6 @@
 ---
 name: splice
-description: Work with the user inside their Splice video editor - see the project they have open, place, move, trim, split and delete clips on the timeline, import media, plan the story as beats and cues, record the screen, compose music as a score, make animated scenes and diagrams, look at any frame, export, and take requests they send from the editor. Also covers installing Splice and this skill. Use when the user asks for help editing a video they have open in Splice, says "my edit/timeline/movie/story/score", asks you to listen for requests from Splice, or asks to install or set up Splice.
+description: Work with the user inside their Splice video editor - see the project they have open, place, move, trim, split and delete clips on the timeline, import media, plan the story as beats and cues, record the screen, compose music as a score, make animated scenes and diagrams, make and fill reusable symbols (intros, lower thirds with placeholders), look at any frame, export, and take requests they send from the editor. Also covers installing Splice and this skill. Use when the user asks for help editing a video they have open in Splice, says "my edit/timeline/movie/story/score", asks you to listen for requests from Splice, or asks to install or set up Splice.
 ---
 
 # Working in the user's Splice editor
@@ -182,8 +182,14 @@ splice ctl score write --media 20 --file score.json --wait
   is normalized, so only the balance matters. The person can also mix by
   ear in the score editor's Level and Pan faders; `score read` shows what
   they set, so read before you write.
+- `mute` and `solo` on a track are the person's listening switches; leave
+  them as you found them. If `score read` or `score write` replies with a
+  `warning` (for example "Silent: the soloed parts are muted"), the score
+  renders as silence: tell the person rather than changing their switches.
 - For the movie's overall mix, each clip has a `volume` (`splice ctl volume
   --clip C --value 0.4`): music under voice usually sits around 0.3–0.5.
+  Playback and export hold peaks just under full scale, so overlapping
+  loud clips are squashed rather than distorted; still, balance them.
 - You cannot hear it. Check what you can (`score read` ranges and lengths,
   `frame` for picture sync) and say so; ask the person to listen.
 
@@ -243,6 +249,59 @@ splice ctl scene write --media 23 --file scene.json --wait    # replace it all; 
   `splice ctl frame` once it is placed.
 - While the person has a scene open they may edit the same file (its
   `file` in `read`); `read` before you write so you do not undo their change.
+
+## 6a. Symbols: pieces reused across projects
+
+A symbol is a small timeline kept in the person's library (intro, lower
+third, logo sting, end card) and used in any project as one clip that renders
+like a scene. Each use fills the symbol's **placeholders**: clips in the
+symbol marked with a tag (an id plus a label). A title takes `text`, a colour
+`color`, a picture or video `picture`, and a sound `sound`.
+
+```sh
+splice ctl symbol list                                   # your symbols, with placeholders
+splice ctl symbol read --name "Lower third"              # one, without using it
+splice ctl symbol make --clip 12,13 --name "Lower third" --wait   # the clips become one use of it
+splice ctl symbol make --media logo.png --name Logo       # or keep one piece of media
+splice ctl symbol add --name "Lower third" --at 8 --wait  # use it (default: over the playhead)
+splice ctl symbol read --clip 40                         # a use: placeholders, fills, library state
+splice ctl symbol fill --clip 40 --label Title --text "Grace Hopper" --wait
+splice ctl symbol fill --clip 40 --label Picture --use acme.png --wait   # import the media first
+splice ctl symbol fill --clip 40 --label Title --reset    # back to what the symbol has
+splice ctl symbol fit --clip 40 --as canvas --wait        # in a movie of another shape: lay it out anew
+splice ctl symbol update --clip 40                        # or: symbol update --all
+splice ctl symbol length --clip 40 --duration 8 --wait   # run longer: its hold stretches
+splice ctl symbol break --clip 40                         # back into ordinary clips
+```
+
+- A use runs longer or shorter by stretching its symbol's **hold**: the
+  part between the entrance and the exit. Set it in the symbol's window with
+  `splice ctl --project N hold --start T --end T` (`--clear` stretches the
+  whole symbol evenly), then save. Trimming the end of a whole use on the
+  timeline does the same thing.
+
+- Making a symbol tags its titles "Title", "Title 2", and so on. To change
+  what is tagged, open the symbol with `symbol edit --name N`, then in that
+  window (`--project N`) run `splice ctl placeholder --clip C [--label L]`.
+  Without a label, the placeholder is named by what it is; `--none` unmarks
+  it. Reusing a label links clips. Relabelling keeps uses' fills. Then
+  `splice ctl --project N save` publishes. Autosaves do not reach other movies.
+- `symbol read --clip` gives `library.state`:
+  - `current`;
+  - `newer`, with `would_drop` listing any fills an update would lose;
+  - `different`;
+  - `missing`, meaning not on this Mac. `symbol keep --clip C` puts the use's
+    copy back in the library.
+- `symbol update` keeps fills that still fit and returns `dropped` for any it
+  could not keep. Tell the person what was dropped; `undo` restores it.
+- Each use has its own fills. Duplicating a use makes another use, and fills
+  are per use. Splitting keeps one use.
+- Library management: `symbol rename --name N --new M`, `symbol duplicate
+  --name N --new M`, `symbol delete --name N` (moves the file to the Trash).
+  Names must be free. Never delete or rename the person's symbols unless they
+  ask.
+- A use is media whose `made` is `symbol`. Check it with `splice ctl frame`
+  once its render is ready (`--wait`).
 
 ## 6b. Story: plan the movie, then fill it
 

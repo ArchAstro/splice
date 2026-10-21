@@ -85,6 +85,16 @@ fn icon(name: &str) -> Option<&'static str> {
         "scene" => {
             r#"<circle cx="7.5" cy="8" r="3.5"/><rect x="13" y="4.5" width="7" height="7" rx="1.5"/><path d="M8 13.5 12 20H4z"/><path d="M14 17.5h6"/>"#
         }
+        // Four diamonds: a piece kept for reuse, as in design tools.
+        "symbol" => {
+            r#"<path d="M12 3.5 15 6.5 12 9.5 9 6.5z"/><path d="M12 14.5 15 17.5 12 20.5 9 17.5z"/><path d="M6.5 9 9.5 12 6.5 15 3.5 12z"/><path d="M17.5 9 20.5 12 17.5 15 14.5 12z"/>"#
+        }
+        "more" => {
+            r#"<circle cx="6" cy="12" r="1.3" fill="black"/><circle cx="12" cy="12" r="1.3" fill="black"/><circle cx="18" cy="12" r="1.3" fill="black"/>"#
+        }
+        "folder" => {
+            r#"<path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2.2h7a2 2 0 0 1 2 2v7.8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>"#
+        }
         "flag" => r#"<path d="M5.5 21V4"/><path d="M5.5 4.5h11l-2.5 4 2.5 4h-11"/>"#,
         "record" => r#"<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5" fill="black"/>"#,
         "close" => r#"<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>"#,

@@ -23,6 +23,48 @@ struct Mix {
     /// Timeline frame being played.
     position: u64,
     voices: Vec<Voice>,
+    limiter: Limiter,
+}
+
+/// Holds the mix under full scale when clips overlap, instead of clipping:
+/// the gain drops at once to meet a peak and recovers over a few tens of
+/// milliseconds. Export does the same with ffmpeg's `alimiter`.
+struct Limiter {
+    gain: f32,
+    /// How much of the way back to unity the gain recovers each frame.
+    release: f32,
+}
+
+impl Default for Limiter {
+    fn default() -> Limiter {
+        Limiter::new(48_000)
+    }
+}
+
+impl Limiter {
+    const CEILING: f32 = 0.97;
+
+    fn new(rate: u32) -> Limiter {
+        Limiter {
+            gain: 1.0,
+            release: 1.0 / (rate as f32 * 0.08),
+        }
+    }
+
+    fn apply(&mut self, left: f32, right: f32) -> (f32, f32) {
+        let peak = left.abs().max(right.abs());
+        let need = if peak > Self::CEILING {
+            Self::CEILING / peak
+        } else {
+            1.0
+        };
+        if need < self.gain {
+            self.gain = need;
+        } else {
+            self.gain += (1.0 - self.gain) * self.release;
+        }
+        (left * self.gain, right * self.gain)
+    }
 }
 
 pub struct AudioOut {
@@ -36,11 +78,14 @@ impl AudioOut {
     pub fn open() -> AudioOut {
         let mix = Arc::new(Mutex::new(Mix::default()));
         match build(mix.clone()) {
-            Ok((stream, rate)) => AudioOut {
-                _stream: Some(stream),
-                mix,
-                rate,
-            },
+            Ok((stream, rate)) => {
+                mix.lock().unwrap().limiter = Limiter::new(rate);
+                AudioOut {
+                    _stream: Some(stream),
+                    mix,
+                    rate,
+                }
+            }
             Err(error) => {
                 eprintln!("splice: no audio output ({error})");
                 AudioOut {
@@ -60,6 +105,7 @@ impl AudioOut {
         let mut mix = self.mix.lock().unwrap();
         mix.voices = voices;
         mix.position = self.frames(at);
+        mix.limiter.gain = 1.0;
         mix.playing = true;
     }
 
@@ -107,6 +153,7 @@ fn fill<S: Copy + Default>(mix: &Mutex<Mix>, out: &mut [S], channels: usize, con
         out.fill(S::default());
         return;
     }
+    let mix = &mut *mix;
     let start = mix.position;
     for (i, frame) in out.chunks_mut(channels).enumerate() {
         let t = start + i as u64;
@@ -121,10 +168,28 @@ fn fill<S: Copy + Default>(mix: &Mutex<Mix>, out: &mut [S], channels: usize, con
                 right += voice.pcm.samples[index + 1] as f32 / 32768.0 * voice.volume;
             }
         }
+        let (left, right) = mix.limiter.apply(left, right);
         let (left, right) = (left.clamp(-1.0, 1.0), right.clamp(-1.0, 1.0));
         for (c, sample) in frame.iter_mut().enumerate() {
             *sample = convert(if c % 2 == 0 { left } else { right });
         }
     }
     mix.position += (out.len() / channels) as u64;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_limiter_holds_peaks_and_recovers() {
+        let mut limiter = Limiter::new(48_000);
+        assert_eq!(limiter.apply(0.5, -0.5), (0.5, -0.5), "quiet sound passes untouched");
+        let (l, r) = limiter.apply(1.6, -0.8);
+        assert!(l <= Limiter::CEILING + 1e-6 && r.abs() < 0.5);
+        for _ in 0..48_000 {
+            limiter.apply(0.1, 0.1);
+        }
+        assert!(limiter.gain > 0.99, "a second later the gain is back");
+    }
 }

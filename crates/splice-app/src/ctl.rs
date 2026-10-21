@@ -84,7 +84,38 @@ Scenes (animation and diagrams: layers of shapes, lines, paths and words that mo
   scene remove --media M --remove NAME [--wait]
   scene check --file scene.json [--duration D]
                                  validate without changing anything: errors, warnings, an outline
-  open --media M                 open a score or scene in Splice's own editor
+  open --media M                 open a score or scene in Splice's own editor (a symbol: its own window)
+
+Symbols (pieces kept for reuse in any movie: intros, lower thirds, logos)
+  symbol list                    your symbols: names, ids, lengths, canvas sizes, placeholders
+  symbol read --name N           one of your symbols, without using it
+  symbol make [--clip C,…] [--name N] [--keep] [--wait]
+                                 make the clips (default: the selection) a symbol; they become one use
+                                 of it unless --keep. Titles become placeholders ("Title", "Title 2")
+  symbol make --media M [--name N]          keep one piece of media (or a score, a scene) as a symbol
+  symbol add --name N [--at T] [--track N] [--wait]
+                                 use a symbol (default: at the playhead, over what is there)
+  symbol read --media M|--clip C           a use: its placeholders, what each holds, how it stands
+                                 against your symbols (current, newer, different, missing)
+  symbol fill --media M|--clip C --label L (--text WORDS | --color C | --use MEDIA | --reset) [--wait]
+                                 fill one placeholder for this use only; it re-renders
+  symbol length --media M|--clip C --duration D [--wait]
+                                 make a use run longer or shorter: its hold stretches (so does dragging
+                                 the end of a whole use on the timeline)
+  symbol fit --media M|--clip C --as canvas|own [--wait]
+                                 in a movie of another shape: lay it out for this movie, or keep its own
+  symbol update --media M|--clip C          take the published version, keeping fills that still fit
+  symbol update --all [--name N]           update every out-of-date use (of N)
+  symbol break --clip C          turn a use back into its clips
+  symbol keep --media M [--name N]          put a use's own copy in your symbols (when it is missing)
+  symbol edit --name N|--media M           open the symbol in its own window; save there to publish
+  symbol rename --name N --new NEW | duplicate --name N --new NEW | delete --name N
+                                 manage your symbols (delete moves it to the Trash)
+  placeholder --clip C [--label L] | --none
+                                 in a symbol's own window: mark what each use can change (no label: named
+                                 by what it is); the same label joins placeholders. Then `save` publishes
+  hold --start T --end T | --clear         in a symbol's own window: the part a longer or shorter use
+                                 stretches (default: all of it, evenly)
 
 Story (planning: beats end to end along the timeline, and cues)
   story read                     beats (id, start, length, title, story, capture, coverage) and cues
@@ -424,12 +455,12 @@ fn build(args: &[String]) -> Result<Value, String> {
                     clips.push(json!(id.trim().parse::<u64>().map_err(|_| "--clip expects clip ids")?));
                 }
             }
-            "--media" => {
+            "--media" | "--use" => {
                 let m = next(arg)?;
-                request.insert("media".into(), m.parse::<u64>().map_or(json!(m), |id| json!(id)));
+                request.insert(arg[2..].into(), m.parse::<u64>().map_or(json!(m), |id| json!(id)));
             }
-            "--text" | "--label" | "--name" | "--aspect" | "--layer" | "--into" | "--remove" | "--json" | "--add"
-            | "--title" | "--story" | "--capture" | "--region" | "--note" => {
+            "--text" | "--label" | "--name" | "--new" | "--as" | "--aspect" | "--layer" | "--into" | "--remove"
+            | "--json" | "--add" | "--title" | "--story" | "--capture" | "--region" | "--note" => {
                 request.insert(arg[2..].into(), json!(value(next(arg)?)?));
             }
             "--file" => {
@@ -453,7 +484,7 @@ fn build(args: &[String]) -> Result<Value, String> {
                 let v: f64 = next(arg)?.parse().map_err(|_| format!("{arg} expects points"))?;
                 request.insert(arg[2..].into(), json!(v));
             }
-            "--ripple" | "--wait" => {
+            "--ripple" | "--wait" | "--keep" | "--none" | "--all" | "--reset" | "--clear" => {
                 request.insert(arg[2..].into(), json!(true));
             }
             "--draft" | "--high" => {
@@ -538,6 +569,12 @@ fn build(args: &[String]) -> Result<Value, String> {
             command.as_str()
         }
         "open" => "open",
+        "symbol" => {
+            request.insert("sub".into(), json!(words.first().map_or("list", |w| w.as_str())));
+            "symbol"
+        }
+        "placeholder" => "placeholder",
+        "hold" => "hold",
         "ui" => "ui",
         "story" | "cue" | "record" => {
             let sub = words.first().map_or(
@@ -632,8 +669,10 @@ pub fn cli(args: &[String]) -> i32 {
         }
     };
     let patient = matches!(request["cmd"].as_str(), Some("wait" | "import" | "frame"))
-        || (matches!(request["cmd"].as_str(), Some("export" | "score" | "scene" | "record"))
-            && request["wait"] == json!(true));
+        || (matches!(
+            request["cmd"].as_str(),
+            Some("export" | "score" | "scene" | "record" | "symbol")
+        ) && request["wait"] == json!(true));
     let socket = match choose(project.as_deref()) {
         Ok(socket) => socket,
         Err(e) => {
@@ -693,5 +732,31 @@ mod tests {
         );
         assert!(build(&args("move --clip x")).is_err());
         assert!(build(&args("explode")).is_err());
+    }
+
+    #[test]
+    fn builds_symbol_requests() {
+        let r = build(&args("symbol make --clip 3,4 --name Intro --keep")).unwrap();
+        assert_eq!(
+            r,
+            json!({"cmd": "symbol", "sub": "make", "clips": [3, 4], "name": "Intro", "keep": true})
+        );
+        let r = build(&args("symbol fill --media 9 --label Logo --use logo.png --wait")).unwrap();
+        assert_eq!(
+            r,
+            json!({"cmd": "symbol", "sub": "fill", "media": 9, "label": "Logo", "use": "logo.png", "wait": true})
+        );
+        assert_eq!(build(&args("symbol")).unwrap()["sub"], json!("list"));
+        let r = build(&args("placeholder --clip 5 --none")).unwrap();
+        assert_eq!(r, json!({"cmd": "placeholder", "clips": [5], "none": true}));
+        let r = build(&args("symbol rename --name Intro --new Opener")).unwrap();
+        assert_eq!(
+            r,
+            json!({"cmd": "symbol", "sub": "rename", "name": "Intro", "new": "Opener"})
+        );
+        let r = build(&args("symbol fit --clip 4 --as canvas")).unwrap();
+        assert_eq!(r, json!({"cmd": "symbol", "sub": "fit", "clips": [4], "as": "canvas"}));
+        let r = build(&args("symbol update --all")).unwrap();
+        assert_eq!(r, json!({"cmd": "symbol", "sub": "update", "all": true}));
     }
 }

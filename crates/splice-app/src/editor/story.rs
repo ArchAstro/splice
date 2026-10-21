@@ -727,7 +727,7 @@ impl Editor {
                 this.add_references(id, paths.paths().to_vec(), None, None, cx);
             }))
             .on_drop(cx.listener(move |this, drag: &MediaDrag, _, cx| {
-                if drag.generator.is_none() {
+                if drag.generator.is_none() && drag.symbol.is_none() {
                     let media = drag.media;
                     if let Some(clip) = this.edit(cx, |p| p.fill_beat(id, media)) {
                         this.selection = vec![clip];

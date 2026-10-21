@@ -106,6 +106,7 @@ fn new(path: &Path, media: &[String]) -> anyhow::Result<()> {
             has_audio: probe.has_audio,
             source: std::fs::canonicalize(&file).unwrap_or(file.clone()),
             recipe: None,
+            content: None,
         });
         project.append_clip(id);
     }

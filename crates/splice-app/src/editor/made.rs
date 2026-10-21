@@ -4,7 +4,7 @@
 //! rendering it, while the previous render keeps playing.
 
 use super::*;
-use crate::{music, scenes};
+use crate::{music, scenes, symbols};
 use splice_core::model::{Recipe, Scene};
 use splice_core::score::Score;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -36,18 +36,24 @@ pub struct Made {
     pub seen: HashMap<MediaId, SystemTime>,
 }
 
+/// Where a render of a symbol keeps the part of its frame it draws on.
+fn content_file(render: &Path) -> PathBuf {
+    render.with_extension("content.json")
+}
+
 /// Engine names, so a new synth or painter renders afresh.
 pub fn engine(recipe: &Recipe) -> &'static str {
     match recipe {
         Recipe::Score(_) => music::ENGINE,
         Recipe::Scene(_) => scenes::ENGINE,
+        Recipe::Symbol(_) => symbols::ENGINE,
     }
 }
 
 pub fn ext(recipe: &Recipe) -> &'static str {
     match recipe {
         Recipe::Score(_) => "wav",
-        Recipe::Scene(_) => "mov",
+        Recipe::Scene(_) | Recipe::Symbol(_) => "mov",
     }
 }
 
@@ -58,6 +64,11 @@ impl Editor {
         let (kind, width, height, audio) = match &recipe {
             Recipe::Score(_) => (MediaKind::Audio, 0, 0, true),
             Recipe::Scene(_) => (MediaKind::Video, settings.width, settings.height, false),
+            // A symbol keeps its own canvas, and fits into this one like a video.
+            Recipe::Symbol(symbol) => {
+                let own = symbol.project.settings;
+                (MediaKind::Video, own.width, own.height, symbol.has_audio())
+            }
         };
         Media {
             id: MediaId(0),
@@ -71,6 +82,7 @@ impl Editor {
             has_audio: audio,
             source: PathBuf::new(),
             recipe: Some(recipe),
+            content: None,
         }
     }
 
@@ -91,6 +103,18 @@ impl Editor {
             if let Recipe::Scene(scene) = &recipe {
                 self.sync_scene_file(media.id, scene);
             }
+            // A use of a symbol is named by what it says, and sounds when
+            // anything in it (a fill too) does.
+            if let Recipe::Symbol(symbol) = &recipe {
+                let (title, audio) = (symbol.title(), symbol.has_audio());
+                if media.name != title || media.has_audio != audio {
+                    for m in self.doc.project.media.iter_mut().filter(|m| m.id == media.id) {
+                        m.name = title.clone();
+                        m.has_audio = audio;
+                    }
+                    self.doc.touch();
+                }
+            }
             let mut media = media;
             if media.hash != key || media.duration != duration {
                 // Keep showing the old render until the new one is ready.
@@ -99,10 +123,20 @@ impl Editor {
                     self.library.borrow_render(&old, &key);
                 }
                 self.doc.project.set_render(media.id, &key, duration);
-                if matches!(recipe, Recipe::Scene(_)) {
+                let size = match &recipe {
+                    Recipe::Scene(_) => Some((settings.width, settings.height)),
+                    Recipe::Symbol(symbol) => {
+                        let at = symbol.render_settings(settings);
+                        Some((at.width, at.height))
+                    }
+                    Recipe::Score(_) => None,
+                };
+                if let Some((width, height)) = size {
                     for m in self.doc.project.media.iter_mut().filter(|m| m.id == media.id) {
-                        m.width = settings.width;
-                        m.height = settings.height;
+                        m.width = width;
+                        m.height = height;
+                        // Where it draws comes with the new render.
+                        m.content = None;
                     }
                 }
                 self.doc.touch();
@@ -151,6 +185,7 @@ impl Editor {
             assets.loading = true;
         }
         let settings = self.doc.project.settings;
+        let store = self.doc.path().to_path_buf();
         let id = media.id;
         // Redraw a few times a second so its progress shows.
         let watched = key.clone();
@@ -178,6 +213,18 @@ impl Editor {
                         Recipe::Scene(scene) => scenes::render(&settings, scene, &target, |p| {
                             progress.store(p.to_bits(), Ordering::Relaxed);
                         }),
+                        Recipe::Symbol(symbol) => symbols::render(symbol, settings, &store, &target, |p| {
+                            progress.store(p.to_bits(), Ordering::Relaxed);
+                        })
+                        .map(|content| {
+                            // Kept beside the render, for when it is found in the cache.
+                            if let Some(c) = content {
+                                let _ = std::fs::write(
+                                    content_file(&target),
+                                    serde_json::to_string(&c).unwrap_or_default(),
+                                );
+                            }
+                        }),
                     }
                     .map(|()| target)
                 })
@@ -199,8 +246,20 @@ impl Editor {
                 assets.path = Some(path.clone());
                 if let Some(media) = self.doc.project.media(id).cloned().filter(|_| current) {
                     self.player.forget(id);
-                    if !self.doc.store.has_media(key).unwrap_or(false) {
+                    // A use of a symbol renders again from what the project
+                    // keeps, so its render (large, and new with every fill)
+                    // stays in the cache rather than the project file.
+                    let symbol = matches!(media.recipe, Some(Recipe::Symbol(_)));
+                    if !symbol && !self.doc.store.has_media(key).unwrap_or(false) {
                         self.embed(&media, path.clone(), cx);
+                    }
+                    if symbol {
+                        let content = std::fs::read_to_string(content_file(&path))
+                            .ok()
+                            .and_then(|t| serde_json::from_str::<[f32; 4]>(&t).ok());
+                        for m in self.doc.project.media.iter_mut().filter(|m| m.id == id) {
+                            m.content = content;
+                        }
                     }
                     self.build_assets(media, path, cx);
                     if self.player.is_playing() {
@@ -456,36 +515,7 @@ impl Editor {
             }
         };
         // Answers now, or when the render of `id` is done with `wait`.
-        let answer = |this: &mut Self, id: MediaId, extra: Value| -> Option<Value> {
-            let mut reply_json = this.edited_with(extra);
-            reply_json["media"] = this.made_json(id);
-            let hash = this.doc.project.media(id).map(|m| m.hash.clone()).unwrap_or_default();
-            if wait {
-                if let Some(render) = this.made.renders.get_mut(&hash) {
-                    let (tx, rx) = std::sync::mpsc::channel::<String>();
-                    render.waiters.push(tx);
-                    let base = reply_json.clone();
-                    std::thread::spawn(move || {
-                        if let Ok(done) = rx.recv() {
-                            let done: Value = serde_json::from_str(&done).unwrap_or(json!({}));
-                            let mut out = base;
-                            out["ok"] = done["ok"].clone();
-                            if let Some(e) = done.get("error") {
-                                out["error"] = e.clone();
-                            }
-                            out["media"]["rendering"] = json!(null);
-                            let _ = reply.send(out.to_string());
-                        }
-                    });
-                    return None;
-                }
-                if let Some(e) = this.made.errors.get(&id) {
-                    reply_json["ok"] = json!(false);
-                    reply_json["error"] = json!(e);
-                }
-            }
-            Some(reply_json)
-        };
+        let answer = |this: &mut Self, id: MediaId, extra: Value| this.answer_made(id, extra, wait, reply.clone());
 
         match (cmd, sub) {
             ("score", "instruments") => Some(json!({
@@ -527,6 +557,9 @@ impl Editor {
                     return None;
                 };
                 let mut out = json!({ "ok": true, "media": self.made_json(media.id), "score": score });
+                if let Some(why) = score.silence() {
+                    out["warning"] = json!(why);
+                }
                 if let Ok(c) = score.compile() {
                     out["compiled"] = json!({
                         "seconds": c.seconds,
@@ -560,13 +593,14 @@ impl Editor {
                 }
                 let id = media.id;
                 let title = score.title.clone();
+                let warning = score.silence();
                 self.edit(cx, |p| {
                     p.set_recipe(id, Recipe::Score(score));
                     if let Some(m) = p.media.iter_mut().find(|m| m.id == id) {
                         m.name = title;
                     }
                 });
-                answer(self, id, json!({}))
+                answer(self, id, warning.map_or_else(|| json!({}), |w| json!({ "warning": w })))
             }
             ("scene", "help") => Some(json!({
                 "ok": true,
@@ -756,6 +790,12 @@ impl Editor {
                     id.0
                 ));
             }
+            Some(Recipe::Symbol(_)) => {
+                out["how"] = serde_json::json!(format!(
+                    "splice ctl symbol read --media {0}; fill a placeholder with splice ctl symbol fill --media {0} --label L --text WORDS --wait",
+                    id.0
+                ));
+            }
             None => {}
         }
         out
@@ -768,6 +808,46 @@ impl Editor {
     }
 
     /// A score or scene as `read` shows it.
+    /// The reply to a change of made media: now, or with `wait` when its
+    /// render is done (`None` then; the reply goes to `reply` later).
+    pub(super) fn answer_made(
+        &mut self,
+        id: MediaId,
+        extra: serde_json::Value,
+        wait: bool,
+        reply: std::sync::mpsc::Sender<String>,
+    ) -> Option<serde_json::Value> {
+        use serde_json::{Value, json};
+        let mut reply_json = self.edited_with(extra);
+        reply_json["media"] = self.made_json(id);
+        let hash = self.doc.project.media(id).map(|m| m.hash.clone()).unwrap_or_default();
+        if wait {
+            if let Some(render) = self.made.renders.get_mut(&hash) {
+                let (tx, rx) = std::sync::mpsc::channel::<String>();
+                render.waiters.push(tx);
+                let base = reply_json.clone();
+                std::thread::spawn(move || {
+                    if let Ok(done) = rx.recv() {
+                        let done: Value = serde_json::from_str(&done).unwrap_or(json!({}));
+                        let mut out = base;
+                        out["ok"] = done["ok"].clone();
+                        if let Some(e) = done.get("error") {
+                            out["error"] = e.clone();
+                        }
+                        out["media"]["rendering"] = json!(null);
+                        let _ = reply.send(out.to_string());
+                    }
+                });
+                return None;
+            }
+            if let Some(e) = self.made.errors.get(&id) {
+                reply_json["ok"] = json!(false);
+                reply_json["error"] = json!(e);
+            }
+        }
+        Some(reply_json)
+    }
+
     pub(super) fn made_json(&self, id: MediaId) -> serde_json::Value {
         use serde_json::json;
         let Some(media) = self.doc.project.media(id) else {

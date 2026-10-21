@@ -284,6 +284,45 @@ fn rng(seed: i64) -> impl FnMut() -> f64 {
 }
 
 impl Score {
+    /// Mutes or unmutes a part. A muted part is no longer soloed, so the two
+    /// never cancel each other out into silence.
+    pub fn toggle_mute(&mut self, index: usize) {
+        if let Some(part) = self.parts.get_mut(index) {
+            part.mute = !part.mute;
+            if part.mute {
+                part.solo = false;
+            }
+        }
+    }
+
+    /// Solos or unsolos a part. A soloed part is also unmuted.
+    pub fn toggle_solo(&mut self, index: usize) {
+        if let Some(part) = self.parts.get_mut(index) {
+            part.solo = !part.solo;
+            if part.solo {
+                part.mute = false;
+            }
+        }
+    }
+
+    /// Why nothing would be heard, when the score has notes but mute and solo
+    /// leave none of them playing.
+    pub fn silence(&self) -> Option<&'static str> {
+        let has_notes = |p: &Part| p.phrases.iter().any(|ph| !ph.notes.is_empty());
+        if !self.parts.iter().any(has_notes) {
+            return None;
+        }
+        let solo = self.parts.iter().any(|p| p.solo);
+        let plays = |p: &Part| has_notes(p) && !p.mute && (!solo || p.solo);
+        if self.parts.iter().any(plays) {
+            None
+        } else if solo {
+            Some("Silent: the soloed parts are muted")
+        } else {
+            Some("Silent: every part is muted")
+        }
+    }
+
     /// Tempo, meter, every note in time order: what plays, and when.
     pub fn compile(&self) -> anyhow::Result<Compiled> {
         if self.title.trim().is_empty() {
@@ -732,6 +771,25 @@ pub fn program_for(instrument: &str) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mute_and_solo_never_cancel_out() {
+        let mut score = Score::starter();
+        assert_eq!(score.silence(), None);
+        score.toggle_solo(0);
+        score.toggle_mute(0);
+        assert!(!score.parts[0].solo, "muting a soloed part drops its solo");
+        score.toggle_solo(0);
+        assert!(!score.parts[0].mute, "soloing a muted part unmutes it");
+        // Written by hand (or by an agent), the two can still meet.
+        score.parts[0].mute = true;
+        assert!(score.silence().unwrap().contains("soloed"));
+        score.parts[0].solo = false;
+        for i in 0..score.parts.len() {
+            score.parts[i].mute = true;
+        }
+        assert!(score.silence().unwrap().contains("every part"));
+    }
 
     #[test]
     fn pitches() {

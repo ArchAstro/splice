@@ -8,7 +8,7 @@ use gpui::{AnyView, App, BoxShadow, FontWeight, Hsla, Rgba, Stateful, Svg, hsla,
 
 pub const TITLEBAR: f32 = 40.0;
 /// The crust showing between panels; also the grab area of each divider.
-const GAP: f32 = 8.0;
+pub(super) const GAP: f32 = 8.0;
 const STATUS: f32 = 26.0;
 const BIN_MIN: f32 = 180.0;
 const TIMELINE_MIN: f32 = 170.0;
@@ -325,6 +325,9 @@ impl Render for Editor {
             .on_action(cx.listener(|this, _: &ShowMedia, _, cx| this.show_shelf(Shelf::Media, cx)))
             .on_action(cx.listener(|this, _: &ShowTextStyles, _, cx| this.show_shelf(Shelf::Text, cx)))
             .on_action(cx.listener(|this, _: &ShowColours, _, cx| this.show_shelf(Shelf::Color, cx)))
+            .on_action(cx.listener(|this, _: &ShowSymbols, _, cx| this.show_shelf(Shelf::Symbols, cx)))
+            .on_action(cx.listener(Self::make_symbol_action))
+            .on_action(cx.listener(Self::break_apart_action))
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &ZoomWindow, window, _| window.zoom_window())
             .on_action(|_: &ToggleFullScreen, window, _| window.toggle_fullscreen())
@@ -344,6 +347,7 @@ impl Render for Editor {
                     .px(px(GAP))
                     .flex()
                     .flex_col()
+                    .when_some(self.symbol_banner(cx), |d, banner| d.child(banner))
                     .child(
                         div()
                             .flex_1()
@@ -794,6 +798,9 @@ impl Editor {
             .project
             .media
             .iter()
+            // Uses of symbols live on the timeline and the Symbols shelf; each
+            // use is its own media, so listing them would repeat one symbol.
+            .filter(|m| !matches!(m.recipe, Some(splice_core::model::Recipe::Symbol(_))))
             .map(|media| {
                 let assets = self.library.get(&media.hash);
                 let thumb = assets.and_then(|a| a.thumb.clone());
@@ -811,6 +818,7 @@ impl Editor {
                         splice_core::model::IMAGE_DURATION
                     },
                     generator: None,
+                    symbol: None,
                 };
                 let (kind_icon, badge) = match media.kind {
                     MediaKind::Image => ("image", None),
@@ -939,7 +947,7 @@ impl Editor {
         if count > 0 {
             items.append(&mut makes);
         }
-        let tabs = self.shelf_tabs(count, cx);
+        let tabs = self.shelf_tabs(count, width < 250.0, cx);
         let action = self.shelf_header_action(cx);
         let on_media = self.shelf == Shelf::Media;
         let shelf = (!on_media).then(|| self.render_shelf(cx));
@@ -1293,6 +1301,7 @@ impl Editor {
                         peaks: a.and_then(|a| a.peaks.clone()),
                         size: (m.width, m.height),
                         offline: a.is_some_and(|a| a.path.is_none() && !a.loading),
+                        outdated: matches!(&m.recipe, Some(splice_core::model::Recipe::Symbol(s)) if self.has_newer(s)),
                     },
                 )
             })
@@ -1456,6 +1465,12 @@ impl Editor {
                 this.hover_drop(event.event.position, 3 * SECOND, cx);
             }))
             .on_drop(cx.listener(|this, drag: &MediaDrag, _, cx| {
+                if let Some(name) = &drag.symbol {
+                    if let Some(ghost) = this.ghost.take() {
+                        this.add_symbol(name.to_string(), Some((ghost.start, ghost.track)), None, cx);
+                    }
+                    return cx.notify();
+                }
                 if let Some(ghost) = this.ghost.take()
                     && let Some(clip) = this.edit(cx, |p| match &drag.generator {
                         Some(generator) => {
@@ -1643,6 +1658,9 @@ impl Editor {
         let content = match &self.overlay {
             Overlay::None => return None,
             Overlay::Record { .. } => panel().child(self.record_overlay(cx)),
+            Overlay::SymbolMenu { .. } | Overlay::SymbolName { .. } => {
+                panel().child(self.symbol_overlay(cx).unwrap_or_else(|| div().into_any_element()))
+            }
             Overlay::Palette { query, index } => {
                 let matches = Self::palette_matches(query);
                 let index = (*index).min(matches.len().saturating_sub(1));

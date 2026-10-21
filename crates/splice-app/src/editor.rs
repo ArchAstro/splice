@@ -35,6 +35,8 @@ mod inspector;
 mod made;
 mod record;
 mod render;
+mod reuse;
+mod reuse_ui;
 mod shelf;
 mod shots;
 mod stage;
@@ -61,6 +63,8 @@ pub struct MediaDrag {
     duration: Time,
     /// A title or colour from the shelf, rather than media.
     generator: Option<Generator>,
+    /// A symbol from the library, by name, rather than media.
+    symbol: Option<SharedString>,
 }
 
 struct DragChip(SharedString);
@@ -130,6 +134,18 @@ enum Overlay {
         index: usize,
         microphone: bool,
         clicks: bool,
+    },
+    /// Naming a symbol: a new one, a renamed or copied one, or a use's copy.
+    SymbolName {
+        naming: reuse::Naming,
+        text: String,
+        /// The name is selected: typing replaces it.
+        all: bool,
+    },
+    /// What to do with a symbol in your symbols.
+    SymbolMenu {
+        name: String,
+        index: usize,
     },
     /// Choosing the instrument a score's part plays.
     Instruments {
@@ -212,6 +228,10 @@ pub struct Editor {
     scrolled_layers: bool,
     /// Scores and scenes: their renders, errors, studios.
     made: made::Made,
+    /// The symbol library, as last read.
+    symbols: reuse::Shelf,
+    /// The ctl request being handled asked to wait for a render.
+    made_wait: bool,
     /// Edit view or Story view.
     mode: story::Mode,
     /// The story beat chosen on the board or the lane.
@@ -238,6 +258,7 @@ pub enum Shelf {
     Media,
     Text,
     Color,
+    Symbols,
 }
 
 impl Editor {
@@ -274,7 +295,13 @@ impl Editor {
         let watch = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_millis(700)).await;
-                if this.update(cx, |editor, cx| editor.poll_scenes(cx)).is_err() {
+                if this
+                    .update(cx, |editor, cx| {
+                        editor.poll_scenes(cx);
+                        editor.poll_symbols(cx);
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -344,6 +371,8 @@ impl Editor {
             card_width: render::CARD_MIN,
             scrolled_layers: false,
             made: made::Made::default(),
+            symbols: reuse::Shelf::default(),
+            made_wait: false,
             workbench: None,
             mode: story::Mode::Edit,
             beat: None,
@@ -590,6 +619,7 @@ impl Editor {
                             has_audio: probe.has_audio,
                             source: path.clone(),
                             recipe: None,
+                            content: None,
                         });
                         let media = project.media(id).cloned().expect("just added");
                         if let Some(beat) = self.fill_after_import.remove(&path) {
@@ -1592,6 +1622,52 @@ impl Editor {
                         query.push_str(&c);
                         *index = 0;
                     }
+                }
+                _ => {}
+            },
+            Overlay::SymbolName { naming, text, all } => match key {
+                "escape" => return self.close_overlay(window, cx),
+                "enter" => {
+                    let (naming, name) = (naming.clone(), text.clone());
+                    return self.finish_naming(naming, name, window, cx);
+                }
+                "backspace" => {
+                    if *all || command {
+                        text.clear();
+                    } else {
+                        text.pop();
+                    }
+                    *all = false;
+                }
+                "a" if command => *all = true,
+                "v" if command => {
+                    if let Some(pasted) = cx.read_from_clipboard().and_then(|c| c.text()) {
+                        if *all {
+                            text.clear();
+                        }
+                        text.push_str(pasted.lines().next().unwrap_or(""));
+                        *all = false;
+                    }
+                }
+                "left" | "right" | "home" | "end" => *all = false,
+                _ if !command => {
+                    if let Some(c) = typed.filter(|c| !c.chars().any(char::is_control)) {
+                        if *all {
+                            text.clear();
+                        }
+                        text.push_str(&c);
+                        *all = false;
+                    }
+                }
+                _ => {}
+            },
+            Overlay::SymbolMenu { name, index } => match key {
+                "escape" => return self.close_overlay(window, cx),
+                "up" => *index = index.saturating_sub(1),
+                "down" => *index = (*index + 1).min(reuse_ui::MENU.len() - 1),
+                "enter" => {
+                    let (name, index) = (name.clone(), *index);
+                    return self.symbol_menu_pick(&name, index, window, cx);
                 }
                 _ => {}
             },

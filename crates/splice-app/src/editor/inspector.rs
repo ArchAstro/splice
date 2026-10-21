@@ -169,14 +169,31 @@ impl Field {
     }
 }
 
-/// A title's words being typed, and the project before the typing began.
+/// Words being typed in the inspector, and the project before the typing began.
 pub struct TitleEdit {
     pub clip: ClipId,
+    /// Which words of the clip.
+    pub what: Typing,
     pub before: Project,
     /// Byte offset of the caret.
     pub cursor: usize,
     /// Everything is selected: the next keystroke replaces it.
     pub all: bool,
+    /// Words typed that are not yet anywhere in the project (a hex colour).
+    pub scratch: String,
+}
+
+/// What is being typed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Typing {
+    /// A title's words.
+    Title,
+    /// The words one use of a symbol puts in its placeholder.
+    Fill(String),
+    /// The name of the placeholder a clip is, in a symbol.
+    Label,
+    /// A colour for one use's placeholder, typed as hex.
+    Hex(String),
 }
 
 /// Swatches offered for text, boxes and colours: 0xRRGGBBAA.
@@ -385,7 +402,7 @@ impl Editor {
             .on_click(cx.listener(move |this, _, _, cx| f(this, cx)))
     }
 
-    fn swatch(
+    pub(super) fn swatch(
         &self,
         id: impl Into<SharedString>,
         color: Option<u32>,
@@ -508,7 +525,7 @@ impl Editor {
             )
     }
 
-    fn section(&self, title: &str) -> gpui::Div {
+    pub(super) fn section(&self, title: &str) -> gpui::Div {
         div()
             .px(px(16.0))
             .pt(px(14.0))
@@ -612,6 +629,7 @@ impl Editor {
                 self.section("Shape")
                     .child(div().flex().flex_wrap().gap(px(6.0)).children(chips)),
             )
+            .when_some(self.hold_section(cx), |d, hold| d.child(hold))
             .child(
                 div()
                     .px(px(16.0))
@@ -627,6 +645,9 @@ impl Editor {
         let id = clip.id;
         let project = &self.doc.project;
         let (glyph, kind, visual, audio, media_clip) = match project.source(&clip) {
+            Some(Source::Media(m)) if matches!(m.recipe, Some(splice_core::model::Recipe::Symbol(_))) => {
+                ("symbol", "Symbol", true, m.has_audio, false)
+            }
             Some(Source::Media(m)) if m.recipe.is_some() => match m.kind {
                 MediaKind::Audio => ("score", "Score", false, true, false),
                 _ => ("scene", "Scene", true, false, false),
@@ -651,10 +672,23 @@ impl Editor {
         );
 
         let mut sections: Vec<AnyElement> = Vec::new();
-        let made = project
+        let symbol = project
             .media(clip.media)
             .filter(|_| clip.generator.is_none())
+            .and_then(|m| match &m.recipe {
+                Some(splice_core::model::Recipe::Symbol(s)) => Some((m.id, s.clone())),
+                _ => None,
+            });
+        let made = project
+            .media(clip.media)
+            .filter(|_| clip.generator.is_none() && symbol.is_none())
             .and_then(|m| m.recipe.as_ref().map(|r| (m.id, r.kind())));
+        if let Some((media, symbol)) = &symbol {
+            sections.extend(self.symbol_sections(id, *media, symbol, window, cx));
+        }
+        if self.editing_a_symbol() {
+            sections.push(self.placeholder_section(id, &clip, window, cx));
+        }
         if let Some((media, kind)) = made {
             let (glyph, label, hint) = if kind == "score" {
                 (
@@ -769,7 +803,7 @@ impl Editor {
         let editing = self
             .title_edit
             .as_ref()
-            .filter(|e| e.clip == id && self.text_focus.is_focused(window));
+            .filter(|e| e.clip == id && e.what == Typing::Title && self.text_focus.is_focused(window));
         let (cursor, all) = editing.map_or((title.text.len(), false), |e| (e.cursor.min(title.text.len()), e.all));
         let focused = editing.is_some();
 
@@ -1287,43 +1321,182 @@ impl Editor {
     // Typing a title.
 
     pub(super) fn begin_title_edit(&mut self, id: ClipId, window: &mut Window, cx: &mut Context<Self>) {
-        if self.title_edit.as_ref().is_some_and(|e| e.clip == id) {
+        self.begin_inspector_typing(id, Typing::Title, window, cx);
+    }
+
+    /// Starts typing `what` of clip `id`, everything selected.
+    pub(super) fn begin_inspector_typing(
+        &mut self,
+        id: ClipId,
+        what: Typing,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.title_edit.as_ref().is_some_and(|e| e.clip == id && e.what == what) {
             window.focus(&self.text_focus);
             return;
         }
         self.end_title_edit(cx);
-        let len = match self.doc.project.clip(id).and_then(|c| c.generator.as_ref()) {
-            Some(Generator::Text(t)) => t.text.len(),
-            _ => return,
+        if self.doc.project.clip(id).is_none() || (what == Typing::Title && self.typed_text(id, &what).is_none()) {
+            return;
+        }
+        // A colour typed as hex starts from the one shown.
+        let scratch = match &what {
+            Typing::Hex(key) => self
+                .doc
+                .project
+                .clip(id)
+                .and_then(|c| self.doc.project.media(c.media))
+                .and_then(|m| match &m.recipe {
+                    Some(splice_core::model::Recipe::Symbol(s)) => s.placeholder(key).map(|p| s.shown(&p)),
+                    _ => None,
+                })
+                .map(|fill| match fill {
+                    splice_core::symbol::Fill::Color { color } => format!("#{:06x}", color >> 8),
+                    _ => String::new(),
+                })
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        let len = match &what {
+            Typing::Hex(_) => scratch.len(),
+            _ => self.typed_text(id, &what).map_or(0, |t| t.len()),
         };
         self.selection = vec![id];
         self.layout.inspector_open = true;
         self.title_edit = Some(TitleEdit {
             clip: id,
+            what,
             before: self.doc.project.clone(),
             cursor: len,
             all: true,
+            scratch,
         });
         window.focus(&self.text_focus);
     }
 
+    /// The words `what` of clip `id` show now.
+    pub(super) fn typed_text(&self, id: ClipId, what: &Typing) -> Option<String> {
+        use splice_core::symbol::Fill;
+        let clip = self.doc.project.clip(id)?;
+        match what {
+            Typing::Title => match &clip.generator {
+                Some(Generator::Text(t)) => Some(t.text.clone()),
+                _ => None,
+            },
+            Typing::Label => Some(clip.placeholder.as_ref().map(|t| t.label.clone()).unwrap_or_default()),
+            Typing::Hex(_) => self.title_edit.as_ref().map(|e| e.scratch.clone()),
+            Typing::Fill(key) => match &self.doc.project.media(clip.media)?.recipe {
+                Some(splice_core::model::Recipe::Symbol(symbol)) => match symbol.shown(&symbol.placeholder(key)?) {
+                    Fill::Text { text } => Some(text),
+                    _ => None,
+                },
+                _ => None,
+            },
+        }
+    }
+
     /// Finishes typing: the words become one undo step.
     pub(super) fn end_title_edit(&mut self, cx: &mut Context<Self>) {
+        use splice_core::model::Recipe;
         if let Some(edit) = self.title_edit.take() {
-            self.doc.commit(edit.before);
+            match &edit.what {
+                Typing::Label => {
+                    // Typed into the tag as it was; now applied properly (a
+                    // name another placeholder has joins it, an empty one
+                    // keeps the old name).
+                    let typed = self.typed_text(edit.clip, &Typing::Label).unwrap_or_default();
+                    let was = edit.before.clip(edit.clip).and_then(|c| c.placeholder.clone());
+                    if let Some(clip) = self.doc.project.clip_mut(edit.clip) {
+                        clip.placeholder = was;
+                    }
+                    self.doc.project.set_placeholder(edit.clip, Some(&typed));
+                }
+                Typing::Fill(key) => {
+                    // A fill typed back to what the symbol has is no fill.
+                    let media = self.doc.project.clip(edit.clip).map(|c| c.media);
+                    if let Some(media) = media
+                        && let Some(Recipe::Symbol(mut symbol)) =
+                            self.doc.project.media(media).and_then(|m| m.recipe.clone())
+                        && let Some(p) = symbol.placeholder(key)
+                    {
+                        let fill = symbol.shown(&p);
+                        let _ = symbol.fill(&p.id, fill);
+                        self.doc.project.set_recipe(media, Recipe::Symbol(symbol));
+                    }
+                }
+                Typing::Hex(key) => {
+                    let media = self.doc.project.clip(edit.clip).map(|c| c.media);
+                    match super::agent::parse_color(edit.scratch.trim()) {
+                        Some(color) => {
+                            if let Some(media) = media
+                                && let Some(Recipe::Symbol(mut symbol)) =
+                                    self.doc.project.media(media).and_then(|m| m.recipe.clone())
+                                && symbol.fill(key, splice_core::symbol::Fill::Color { color }).is_ok()
+                            {
+                                self.doc.project.set_recipe(media, Recipe::Symbol(symbol));
+                            }
+                        }
+                        None if !edit.scratch.trim().is_empty() => {
+                            self.say_error(format!("{} is not a colour: try #ff8800", edit.scratch.trim()));
+                        }
+                        None => {}
+                    }
+                }
+                Typing::Title => {}
+            }
+            if self.doc.project != edit.before {
+                self.doc.commit(edit.before);
+            }
             self.after_edit();
+            self.reconcile_made(cx);
             cx.notify();
         }
     }
 
     fn with_title_text(&mut self, f: impl FnOnce(&mut String, &mut TitleEdit)) {
         let Some(edit) = &mut self.title_edit else { return };
-        if let Some(Generator::Text(title)) = self.doc.project.clip_mut(edit.clip).and_then(|c| c.generator.as_mut()) {
-            f(&mut title.text, edit);
+        let project = &mut self.doc.project;
+        match edit.what.clone() {
+            Typing::Title => {
+                if let Some(Generator::Text(title)) = project.clip_mut(edit.clip).and_then(|c| c.generator.as_mut()) {
+                    f(&mut title.text, edit);
+                }
+            }
+            Typing::Label => {
+                if let Some(tag) = project.clip_mut(edit.clip).and_then(|c| c.placeholder.as_mut()) {
+                    f(&mut tag.label, edit);
+                }
+            }
+            Typing::Hex(_) => {
+                let mut scratch = std::mem::take(&mut edit.scratch);
+                f(&mut scratch, edit);
+                edit.scratch = scratch;
+            }
+            Typing::Fill(key) => {
+                let Some(media) = project.clip(edit.clip).map(|c| c.media) else {
+                    return;
+                };
+                let Some(m) = project.media.iter_mut().find(|m| m.id == media) else {
+                    return;
+                };
+                let Some(splice_core::model::Recipe::Symbol(symbol)) = &mut m.recipe else {
+                    return;
+                };
+                let Some(placeholder) = symbol.placeholder(&key) else {
+                    return;
+                };
+                if !symbol.fills.contains_key(&placeholder.id) {
+                    symbol.fills.insert(placeholder.id.clone(), placeholder.default.clone());
+                }
+                if let Some(splice_core::symbol::Fill::Text { text }) = symbol.fills.get_mut(&placeholder.id) {
+                    f(text, edit);
+                }
+            }
         }
     }
 
-    fn type_text(&mut self, typed: &str, cx: &mut Context<Self>) {
+    pub(super) fn type_text(&mut self, typed: &str, cx: &mut Context<Self>) {
         self.with_title_text(|text, edit| {
             if edit.all {
                 text.clear();
@@ -1334,10 +1507,11 @@ impl Editor {
             text.insert_str(at, typed);
             edit.cursor = at + typed.len();
         });
+        self.preview_typed_fill(cx);
         cx.notify();
     }
 
-    fn title_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn title_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &event.keystroke;
         let (cmd, alt) = (k.modifiers.platform, k.modifiers.alt);
         let prev = |text: &str, at: usize| text[..at].char_indices().next_back().map_or(0, |(i, _)| i);
@@ -1349,6 +1523,16 @@ impl Editor {
         };
         match k.key.as_str() {
             "escape" => {
+                self.end_title_edit(cx);
+                window.focus(&self.focus);
+            }
+            // One-line fields finish on Return; words take a new line.
+            "enter"
+                if self
+                    .title_edit
+                    .as_ref()
+                    .is_some_and(|e| matches!(e.what, Typing::Label | Typing::Hex(_))) =>
+            {
                 self.end_title_edit(cx);
                 window.focus(&self.focus);
             }
@@ -1398,6 +1582,7 @@ impl Editor {
                 None => return,
             },
         }
+        self.preview_typed_fill(cx);
         cx.stop_propagation();
         cx.notify();
     }

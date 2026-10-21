@@ -158,6 +158,47 @@ impl Store {
         json.map(|j| Project::from_json(&j)).transpose()
     }
 
+    /// The newest version kept with Save, not an autosave: what a symbol
+    /// publishes.
+    pub fn latest_saved(&self) -> Result<Option<Project>> {
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT project FROM versions WHERE kind = 'save' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        json.map(|j| Project::from_json(&j)).transpose()
+    }
+
+    /// Every version kept with Save, oldest first.
+    pub fn saved(&self) -> Result<Vec<Project>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT project FROM versions WHERE kind = 'save' ORDER BY id")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for json in rows {
+            out.push(Project::from_json(&json?)?);
+        }
+        Ok(out)
+    }
+
+    /// A value kept beside the project, such as a symbol's identity.
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .optional()?)
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn
+            .execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)", [key, value])?;
+        Ok(())
+    }
+
     pub fn load_version(&self, id: i64) -> Result<Project> {
         let json: String = self
             .conn
@@ -336,6 +377,7 @@ mod tests {
             has_audio: false,
             source: source.clone(),
             recipe: None,
+            content: None,
         });
         project.append_clip(media);
 
