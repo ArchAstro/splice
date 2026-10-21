@@ -186,7 +186,7 @@ fn align(layer: &Layer) -> Align {
 
 fn to_pixmap(picture: &Picture) -> Option<Pixmap> {
     let mut pixmap = Pixmap::new(picture.width, picture.height)?;
-    for (dst, src) in pixmap.pixels_mut().iter_mut().zip(picture.rgba.chunks_exact(4)) {
+    for (dst, src) in pixmap.pixels_mut().iter_mut().zip(picture.rgba.as_chunks::<4>().0) {
         *dst = tiny_skia::ColorU8::from_rgba(src[0], src[1], src[2], src[3]).premultiply();
     }
     Some(pixmap)

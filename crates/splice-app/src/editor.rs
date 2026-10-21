@@ -192,6 +192,8 @@ pub struct Editor {
     drawings: titles::Drawings,
     /// Where each picture sat on the stage at the last paint, bottom first.
     stage_layers: Rc<std::cell::RefCell<Vec<stage::Placed>>>,
+    /// Shift is held while dragging: faders move a fifth as far.
+    fine_drag: bool,
     /// Something held with the mouse on the stage or in the inspector.
     grab: Option<stage::Grab>,
     /// Centre lines shown while a picture snaps to them.
@@ -332,6 +334,7 @@ impl Editor {
             drawings: titles::Drawings::default(),
             stage_layers: Rc::default(),
             grab: None,
+            fine_drag: false,
             guides: (false, false),
             slider_bounds: Rc::default(),
             folds: HashMap::new(),

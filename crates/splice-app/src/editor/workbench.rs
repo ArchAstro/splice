@@ -17,6 +17,62 @@ pub struct Bench {
     pub notes: Vec<(usize, usize, usize)>,
     /// Where each part's roll was drawn, for the mouse.
     pub rolls: Rc<RefCell<HashMap<usize, Roll>>>,
+    /// Where each part's mixer faders were drawn.
+    pub faders: Faders,
+}
+
+/// Where each part's faders were drawn, by part and fader.
+pub type Faders = Rc<RefCell<HashMap<(usize, Knob), Bounds<Pixels>>>>;
+
+/// A fader in a part's mixer strip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Knob {
+    Level,
+    Pan,
+}
+
+/// The level fader runs from silence through −40 dB to +6 dB.
+const QUIETEST: f64 = -40.0;
+const LOUDEST: f64 = 6.0;
+
+/// A part's gain at a fader position, 0–1.
+fn gain_at(frac: f64) -> f64 {
+    if frac < 0.02 {
+        0.0
+    } else {
+        10f64.powf((QUIETEST + frac * (LOUDEST - QUIETEST)) / 20.0)
+    }
+}
+
+/// Where a gain sits on the fader, 0–1.
+fn fader_of(gain: f64) -> f64 {
+    if gain <= 0.0 {
+        0.0
+    } else {
+        ((20.0 * gain.log10() - QUIETEST) / (LOUDEST - QUIETEST)).clamp(0.02, 1.0)
+    }
+}
+
+fn level_text(gain: f64) -> String {
+    if gain <= 0.0 {
+        "off".into()
+    } else {
+        let db = 20.0 * gain.log10();
+        if db.abs() < 0.05 {
+            "0 dB".into()
+        } else {
+            format!("{db:+.1} dB")
+        }
+    }
+}
+
+fn pan_text(pan: f64) -> String {
+    let n = (pan * 100.0).round() as i32;
+    match n {
+        0 => "C".into(),
+        n if n < 0 => format!("L{}", -n),
+        n => format!("R{n}"),
+    }
 }
 
 /// A part's roll as drawn: its box and what fits in it.
@@ -165,6 +221,7 @@ impl Editor {
             media,
             notes: Vec::new(),
             rolls: Rc::default(),
+            faders: Rc::default(),
         });
         self.bin_selection = Some(media);
         // Bring the playhead onto it, so what plays is what is open.
@@ -435,7 +492,7 @@ impl Editor {
                     low = low.saturating_sub(pad);
                     high = (high + pad).min(127);
                 }
-                let height = ((high - low + 1) as f32 * 9.0).clamp(96.0, 270.0);
+                let height = ((high - low + 1) as f32 * 9.0).clamp(132.0, 270.0);
                 let sel: Vec<(usize, usize)> = selected.iter().filter(|s| s.0 == i).map(|s| (s.1, s.2)).collect();
                 self.lane(
                     id,
@@ -719,6 +776,7 @@ impl Editor {
                 })
                 .child(label)
         };
+        let faders = self.workbench.as_ref().map(|b| b.faders.clone()).unwrap_or_default();
         let bars: Vec<f64> = bars.iter().map(|t| *t as f64 / PPQ as f64).collect();
         let used: Vec<u8> = notes.iter().map(|n| n.key).collect();
         // Names on the notes that have room for them (judged from the last
@@ -952,7 +1010,9 @@ impl Editor {
                             .on_click(
                                 cx.listener(move |this, _, window, cx| this.open_instruments(media, index, window, cx)),
                             ),
-                    ),
+                    )
+                    .child(self.fader(index, Knob::Level, part.gain.unwrap_or(1.0), faders.clone(), cx))
+                    .child(self.fader(index, Knob::Pan, part.pan.unwrap_or(0.0), faders.clone(), cx)),
             )
             .child(keyboard)
             .child(
@@ -971,6 +1031,221 @@ impl Editor {
                     ),
             )
             .into_any_element()
+    }
+
+    /// One mixer fader: level in dB, or pan from left to right. Drag to set,
+    /// double-click to go back to 0 dB or the centre.
+    fn fader(&self, part: usize, knob: Knob, value: f64, faders: Faders, cx: &mut Context<Self>) -> AnyElement {
+        let (frac, label, readout) = match knob {
+            Knob::Level => (fader_of(value), "Level", level_text(value)),
+            Knob::Pan => (((value + 1.0) / 2.0).clamp(0.0, 1.0), "Pan", pan_text(value)),
+        };
+        let held = matches!(&self.grab, Some(stage::Grab::Mix { part: p, knob: k, .. }) if *p == part && *k == knob);
+        let group: SharedString = format!("fader-{part}-{knob:?}").into();
+        // Level fills from the left; pan from the centre.
+        let (fill_from, fill_to) = match knob {
+            Knob::Level => (0.0, frac),
+            Knob::Pan => (frac.min(0.5), frac.max(0.5)),
+        };
+        div()
+            .h(px(16.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .w(px(30.0))
+                    .flex_none()
+                    .text_size(px(10.0))
+                    .text_color(Theme::overlay())
+                    .child(label),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("fader-{part}-{knob:?}")))
+                    .group(group.clone())
+                    .flex_1()
+                    .h(px(16.0))
+                    .relative()
+                    .cursor_pointer()
+                    .child(
+                        canvas(
+                            move |b, _, _| {
+                                faders.borrow_mut().insert((part, knob), b);
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .top(px(7.0))
+                            .h(px(2.0))
+                            .rounded_full()
+                            .bg(Theme::surface1()),
+                    )
+                    .when(knob == Knob::Pan, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .left(relative(0.5))
+                                .top(px(4.0))
+                                .w(px(1.0))
+                                .h(px(8.0))
+                                .bg(Theme::surface2()),
+                        )
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .left(relative(fill_from as f32))
+                            .top(px(7.0))
+                            .h(px(2.0))
+                            .w(relative((fill_to - fill_from) as f32))
+                            .rounded_full()
+                            .bg(Theme::subtext()),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(3.0))
+                            .left(relative(frac as f32))
+                            .ml(px(-5.0))
+                            .size(px(10.0))
+                            .rounded_full()
+                            .bg(Theme::text())
+                            .border_2()
+                            .border_color(if held { Theme::accent() } else { Theme::lane() })
+                            .group_hover(group, |s| s.border_color(Theme::accent())),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            window.focus(&this.focus);
+                            if event.click_count >= 2 {
+                                this.change_score(cx, |s| match knob {
+                                    Knob::Level => s.parts[part].gain = None,
+                                    Knob::Pan => s.parts[part].pan = None,
+                                });
+                                return;
+                            }
+                            let before = this.doc.project.clone();
+                            // A press on the knob holds it where it is; elsewhere
+                            // on the track the knob jumps there.
+                            let bounds = this
+                                .workbench
+                                .as_ref()
+                                .and_then(|b| b.faders.borrow().get(&(part, knob)).copied());
+                            let mut start = this.fader_place(part, knob);
+                            if let Some(b) = bounds {
+                                let width = f32::from(b.size.width).max(1.0);
+                                let knob_x = b.left() + px(start as f32 * width);
+                                if (f32::from(event.position.x - knob_x)).abs() > 7.0 {
+                                    start = (f32::from(event.position.x - b.left()) / width) as f64;
+                                    this.set_fader(part, knob, start);
+                                    start = this.fader_place(part, knob);
+                                }
+                            }
+                            this.grab = Some(stage::Grab::Mix {
+                                part,
+                                knob,
+                                from: event.position,
+                                start,
+                                before,
+                            });
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(46.0))
+                    .flex_none()
+                    .flex()
+                    .justify_end()
+                    .font_family(MONO_FONT)
+                    .text_size(px(9.5))
+                    .text_color(Theme::muted())
+                    .child(readout),
+            )
+            .into_any_element()
+    }
+
+    /// Where a part's fader sits now, 0–1.
+    fn fader_place(&self, part: usize, knob: Knob) -> f64 {
+        let Some((_, score)) = self.bench_score() else {
+            return 0.5;
+        };
+        let Some(p) = score.parts.get(part) else { return 0.5 };
+        match knob {
+            Knob::Level => fader_of(p.gain.unwrap_or(1.0)),
+            Knob::Pan => (p.pan.unwrap_or(0.0) + 1.0) / 2.0,
+        }
+    }
+
+    /// Sets a fader to a place, 0–1, live (the change lands on release).
+    fn set_fader(&mut self, part: usize, knob: Knob, frac: f64) {
+        let frac = frac.clamp(0.0, 1.0);
+        self.change_score_live(|s| {
+            let Some(p) = s.parts.get_mut(part) else { return };
+            match knob {
+                Knob::Level => {
+                    let mut g = gain_at(frac);
+                    // Rest at 0 dB when near it.
+                    if g > 0.0 && (20.0 * g.log10()).abs() < 0.4 {
+                        g = 1.0;
+                    }
+                    p.gain = if (g - 1.0).abs() < 1e-9 {
+                        None
+                    } else {
+                        Some((g * 1000.0).round() / 1000.0)
+                    };
+                }
+                Knob::Pan => {
+                    let mut v = frac * 2.0 - 1.0;
+                    if v.abs() < 0.02 {
+                        v = 0.0;
+                    }
+                    p.pan = if v == 0.0 {
+                        None
+                    } else {
+                        Some((v * 100.0).round() / 100.0)
+                    };
+                }
+            }
+        });
+    }
+
+    /// Follows the pointer on a mixer fader, from where the drag began; with
+    /// Shift held it moves a fifth as far, for fine changes.
+    pub(super) fn mix_slide(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(stage::Grab::Mix {
+            part,
+            knob,
+            from,
+            start,
+            ..
+        }) = &self.grab
+        else {
+            return;
+        };
+        let (part, knob, from, start) = (*part, *knob, *from, *start);
+        let Some(bounds) = self
+            .workbench
+            .as_ref()
+            .and_then(|b| b.faders.borrow().get(&(part, knob)).copied())
+        else {
+            return;
+        };
+        let scale = if self.fine_drag { 0.2 } else { 1.0 };
+        let moved = f32::from(at.x - from.x) as f64 / f32::from(bounds.size.width).max(1.0) as f64;
+        self.set_fader(part, knob, start + moved * scale);
+        cx.notify();
     }
 
     fn roll_down(&mut self, part: usize, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1404,5 +1679,22 @@ impl Editor {
         };
         f(&mut scene);
         self.edit(cx, |p| p.set_recipe(id, Recipe::Scene(scene)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn faders_read_in_decibels() {
+        assert_eq!(gain_at(0.0), 0.0);
+        assert!((gain_at(fader_of(1.0)) - 1.0).abs() < 1e-9);
+        assert!((gain_at(1.0) - 10f64.powf(0.3)).abs() < 1e-9);
+        assert_eq!(level_text(1.0), "0 dB");
+        assert_eq!(level_text(0.5), "-6.0 dB");
+        assert_eq!(level_text(0.0), "off");
+        assert_eq!(pan_text(-0.25), "L25");
+        assert_eq!(pan_text(0.0), "C");
     }
 }

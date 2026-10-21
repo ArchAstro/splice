@@ -17,9 +17,12 @@ const SOUNDFONT_SHA256: &str = "9575028c7a1f589f5770fccc8cff2734566af40cd26ed836
 pub const SOUNDFONT_SIZE_MB: u32 = 32;
 
 /// Renders with this synth and these sounds name the same bytes.
-pub const ENGINE: &str = "splice-score-1|rustysynth-1.3|GeneralUser-GS-2.0.3";
+pub const ENGINE: &str = "splice-score-2|rustysynth-1.3|GeneralUser-GS-2.0.3";
 
 pub const RATE: i32 = 48_000;
+
+/// The MIDI volume (CC7) a part at its own level plays at.
+const UNITY_VOLUME: f64 = 80.0;
 
 pub fn soundfont_path() -> PathBuf {
     dirs().cache.join("sounds").join("GeneralUser-GS-2.0.3.sf2")
@@ -96,7 +99,9 @@ fn events(compiled: &Compiled) -> Vec<Event> {
                 data2: 0,
             });
         }
-        let volume = (100.0 * part.gain.sqrt()).clamp(0.0, 127.0).round() as i32;
+        // MIDI volume is 40·log10(cc/127) dB, so cc grows with the square
+        // root of the gain. Unity sits at 80, leaving 8 dB above it.
+        let volume = (UNITY_VOLUME * part.gain.sqrt()).clamp(0.0, 127.0).round() as i32;
         let pan = (64.0 + part.pan * 63.0).clamp(0.0, 127.0).round() as i32;
         let reverb = (part.reverb * 127.0).clamp(0.0, 127.0).round() as i32;
         events.push(Event {

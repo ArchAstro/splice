@@ -97,7 +97,7 @@ impl Picture {
     /// BGRA, as gpui wants it.
     pub fn bgra(&self) -> Vec<u8> {
         let mut out = self.rgba.clone();
-        for px in out.chunks_exact_mut(4) {
+        for px in out.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
         }
         out
@@ -123,7 +123,7 @@ pub fn draw(generator: &Generator, mask: Option<&Mask>, canvas: (u32, u32)) -> P
         Generator::Color { color } => {
             let mut p = Picture::new(canvas.0.max(2), canvas.1.max(2));
             let c = rgba(*color);
-            for px in p.rgba.chunks_exact_mut(4) {
+            for px in p.rgba.as_chunks_mut::<4>().0 {
                 px.copy_from_slice(&c);
             }
             p
@@ -468,7 +468,7 @@ mod tests {
         };
         let p = draw(&Generator::Text(title.clone()), None, (1920, 1080));
         assert!(p.width > 100 && p.height > 150, "{}x{}", p.width, p.height);
-        let inked = p.rgba.chunks_exact(4).filter(|px| px[3] > 128).count();
+        let inked = p.rgba.as_chunks::<4>().0.iter().filter(|px| px[3] > 128).count();
         assert!(inked > 1000, "the letters cover pixels");
 
         let boxed = Title {

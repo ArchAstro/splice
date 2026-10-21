@@ -134,8 +134,10 @@ with every clip of it following.
 
 - **Score**: music as notes. Instruments, tempo, meter and notes in beats,
   shown as a piano roll with one lane per instrument. Click to add a note,
-  drag to move or lengthen it, ⌫ to delete. Each lane has mute, solo and an
-  instrument picker covering the 128 General MIDI instruments plus a drum kit.
+  drag to move or lengthen it, ⌫ to delete. Each lane has mute, solo, an
+  instrument picker covering the 128 General MIDI instruments plus a drum kit,
+  and a little mixer: a Level fader in dB and a Pan. Shift-drag a fader for
+  fine changes; double-click resets it.
   It plays with the timeline, so you hear it against the picture. Splice
   renders it with rustysynth and the GeneralUser GS SoundFont, which it
   downloads once (32 MB) and checks. The assistant can compose it from JSON

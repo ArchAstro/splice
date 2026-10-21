@@ -1,6 +1,6 @@
 ---
 name: splice
-description: Work with the user inside their Splice video editor - see the project they have open, place, move, trim, split and delete clips on the timeline, import media, plan the story as beats and cues, record the screen, compose music as a score, make animated scenes and diagrams, look at any frame, export, and take requests they send from the editor. Use when the user asks for help editing a video they have open in Splice, says "my edit/timeline/movie", or asks you to listen for requests from Splice.
+description: Work with the user inside their Splice video editor - see the project they have open, place, move, trim, split and delete clips on the timeline, import media, plan the story as beats and cues, record the screen, compose music as a score, make animated scenes and diagrams, look at any frame, export, and take requests they send from the editor. Also covers installing Splice and this skill. Use when the user asks for help editing a video they have open in Splice, says "my edit/timeline/movie/story/score", asks you to listen for requests from Splice, or asks to install or set up Splice.
 ---
 
 # Working in the user's Splice editor
@@ -10,8 +10,51 @@ description: Work with the user inside their Splice video editor - see the proje
 one undo step for the user, shows at once, and is autosaved into their
 project file. Nothing you do saves a version or exports unless you ask it to.
 
-If `splice` is not on the PATH, use the binary from the repository:
-`target/release/splice` (build it with `make build-release`).
+## 0. Is Splice installed?
+
+```sh
+command -v splice && splice --version && splice ctl status
+```
+
+- `splice` found, and `status` answers: go to step 1.
+- `splice` found, but the reply says Splice is not running: ask the user to
+  open it (Splice in Applications, or `splice my-film.splice`). Do not launch
+  it for them unless asked.
+- `splice` not found: offer to install it, and install only when they agree.
+  In a checkout of the repository, `target/release/splice` works too (build
+  it with `make build-release`).
+
+### Installing Splice and this skill
+
+Splice runs on macOS 13 or newer (Apple Silicon or Intel).
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ArchAstro/splice/main/install.sh | sh
+```
+
+This downloads the latest release, verifies its checksum, installs
+`Splice.app` in `/Applications` with the `splice` command in `~/.local/bin`
+(the same program), this skill in `~/.claude/skills/splice` (other agents:
+copy `SKILL.md` to wherever your skills live), and ffmpeg with Homebrew if it
+is missing. If the download is refused because the repository is private, and
+`gh` is signed in:
+
+```sh
+gh api repos/ArchAstro/splice/contents/install.sh -H "Accept: application/vnd.github.raw" | sh
+```
+
+To build from source instead (needs Rust; if `cargo` is missing, point the
+user to https://rustup.rs rather than installing a toolchain yourself):
+
+```sh
+gh repo clone ArchAstro/splice && sh splice/scripts/install.sh
+```
+
+Check it worked with `splice --version`, then have the user open Splice.
+Running the installer again updates it. To remove it: delete
+`/Applications/Splice.app`, `~/.local/bin/splice` and
+`~/.claude/skills/splice`. Projects (`.splice` files) and recordings in
+`~/Movies/Splice` are the user's; never delete them.
 
 ## 1. See what is open
 
@@ -138,6 +181,14 @@ splice ctl score write --media 20 --file score.json --wait
   the cuts (seconds = beats × 60 / tempo).
 - Write the JSON with a script when it is long (loops for chords and
   patterns). `write` refuses a score that does not compile and says why.
+- Mix with each track's `gain` (1 is as written; 0.5 is −6 dB, 2 is +6 dB;
+  leave it out for 1), `pan` (−1 left to 1 right) and `reverb` (0–1). Keep
+  the melody forward, pads and harmony under it, bass centred; the render
+  is normalized, so only the balance matters. The person can also mix by
+  ear in the score editor's Level and Pan faders; `score read` shows what
+  they set, so read before you write.
+- For the movie's overall mix, each clip has a `volume` (`splice ctl volume
+  --clip C --value 0.4`): music under voice usually sits around 0.3–0.5.
 - You cannot hear it. Check what you can (`score read` ranges and lengths,
   `frame` for picture sync) and say so; ask the person to listen.
 

@@ -29,6 +29,15 @@ pub enum Grab {
     Slider { field: inspector::Field, before: Project },
     /// Dragging notes in a score's roll.
     Note(workbench::NoteGrab),
+    /// Dragging a part's level or pan in the score's mixer.
+    Mix {
+        part: usize,
+        knob: workbench::Knob,
+        /// Where the drag began, and the fader's place then (0–1).
+        from: Point<Pixels>,
+        start: f64,
+        before: Project,
+    },
 }
 
 /// A picture's clip, the part of the stage it shows in (inside its mask),
@@ -404,6 +413,7 @@ impl Editor {
                 self.slide(field, at, cx);
             }
             Some(Grab::Note(_)) => return self.note_drag(at, cx),
+            Some(Grab::Mix { .. }) => return self.mix_slide(at, cx),
             None => return,
         }
         cx.notify();
@@ -415,6 +425,10 @@ impl Editor {
             Some(Grab::Move { before, .. } | Grab::Scale { before, .. } | Grab::Slider { before, .. }) => before,
             Some(Grab::Note(grab)) => {
                 self.note_drop(grab.before, cx);
+                return cx.notify();
+            }
+            Some(Grab::Mix { before, .. }) => {
+                self.note_drop(before, cx);
                 return cx.notify();
             }
             None => return,

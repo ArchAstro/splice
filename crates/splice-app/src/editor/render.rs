@@ -397,6 +397,7 @@ impl Render for Editor {
                         .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                             if event.pressed_button == Some(MouseButton::Left) {
                                 this.resize_to(event.position, cx);
+                                this.fine_drag = event.modifiers.shift;
                                 this.grab_to(event.position, cx);
                             } else {
                                 this.end_resize(cx);
