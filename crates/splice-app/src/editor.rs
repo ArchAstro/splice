@@ -654,6 +654,8 @@ impl Editor {
                             source: path.clone(),
                             recipe: None,
                             content: None,
+                            // A screen recording's clicks, noted beside it.
+                            clicks: crate::recorder::read_clicks(&path),
                         });
                         let media = project.media(id).cloned().expect("just added");
                         if let Some(landing) = self.take_after_import.remove(&path) {

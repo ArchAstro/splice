@@ -6,6 +6,7 @@ use cosmic_text::{Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, St
 use splice_core::export::{Rendered, Resolve};
 use splice_core::look::Mask;
 use splice_core::model::{Align, Clip, Generator, Media, Title};
+use splice_core::textmotion::{Unit, Units};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -83,6 +84,20 @@ impl Picture {
         self.rgba[i + 3] = (out_a * 255.0).round() as u8;
     }
 
+    /// Lays `top` (the same size) over this picture.
+    fn over(&mut self, top: &Picture) {
+        for y in 0..self.height.min(top.height) {
+            for x in 0..self.width.min(top.width) {
+                let i = ((y * top.width + x) * 4) as usize;
+                let px = [top.rgba[i], top.rgba[i + 1], top.rgba[i + 2], 255];
+                let coverage = top.rgba[i + 3] as f32 / 255.0;
+                if coverage > 0.0 {
+                    self.blend(x as i32, y as i32, px, coverage);
+                }
+            }
+        }
+    }
+
     fn apply_mask(&mut self, mask: &Mask) {
         let (w, h) = (self.width as f32, self.height as f32);
         for y in 0..self.height {
@@ -136,7 +151,28 @@ pub fn draw(generator: &Generator, mask: Option<&Mask>, canvas: (u32, u32)) -> P
     picture
 }
 
+/// A title drawn in parts, for one that comes in a piece at a time: its box
+/// alone, its letters (and their shadow) alone, and where each word, letter
+/// and line is among them. Both pictures are the size of the whole title.
+pub struct Parts {
+    pub back: Option<Picture>,
+    pub text: Picture,
+    pub units: Units,
+}
+
 fn draw_title(title: &Title, canvas: (u32, u32)) -> Picture {
+    let parts = draw_title_parts(title, canvas);
+    match parts.back {
+        Some(mut back) => {
+            back.over(&parts.text);
+            back
+        }
+        None => parts.text,
+    }
+}
+
+/// Draws a title as its parts (see `Parts`).
+pub fn draw_title_parts(title: &Title, canvas: (u32, u32)) -> Parts {
     let size = (title.size * canvas.1 as f32).clamp(4.0, 2000.0);
     let line = size * 1.18;
     let text = if title.text.trim().is_empty() {
@@ -183,10 +219,67 @@ fn draw_title(title: &Title, canvas: (u32, u32)) -> Picture {
     let shadow = if title.shadow { size * 0.06 } else { 0.0 };
     let width = (widest + pad * 2.0 + shadow * 2.0).ceil() as u32;
     let full_height = (height + pad * 2.0 + shadow * 2.0).ceil() as u32;
+    let mut back = Picture::new(width.max(2), full_height.max(2));
     let mut picture = Picture::new(width.max(2), full_height.max(2));
     let origin = (pad + shadow, pad + shadow);
 
+    // Where each word, letter and line is, with room for its shadow.
+    let units = {
+        let margin = if title.shadow { size * 0.14 } else { size * 0.05 };
+        let (pw, ph) = (picture.width as f32, picture.height as f32);
+        let rect = |x0: f32, x1: f32, top: f32, height: f32| -> [u32; 4] {
+            let left = (origin.0 + x0 - margin).clamp(0.0, pw - 1.0);
+            let right = (origin.0 + x1 + margin).clamp(left + 1.0, pw);
+            let top_px = (origin.1 + top - margin).clamp(0.0, ph - 1.0);
+            let bottom = (origin.1 + top + height + margin).clamp(top_px + 1.0, ph);
+            [
+                left.floor() as u32,
+                top_px.floor() as u32,
+                (right - left.floor()).ceil() as u32,
+                (bottom - top_px.floor()).ceil() as u32,
+            ]
+        };
+        let mut units = Units::default();
+        let mut word = 0usize;
+        for run in buffer.layout_runs() {
+            let mut line: Option<(f32, f32, usize)> = None;
+            let mut current: Option<(f32, f32)> = None;
+            let close = |current: &mut Option<(f32, f32)>, units: &mut Units, word: &mut usize| {
+                if let Some((a, z)) = current.take() {
+                    units.words.push(Unit {
+                        rect: rect(a, z, run.line_top, run.line_height),
+                        word: *word,
+                    });
+                    *word += 1;
+                }
+            };
+            for glyph in run.glyphs.iter() {
+                let blank = run.text.get(glyph.start..glyph.end).is_none_or(|t| t.trim().is_empty());
+                if blank {
+                    close(&mut current, &mut units, &mut word);
+                    continue;
+                }
+                let (a, z) = (glyph.x, glyph.x + glyph.w);
+                current = Some(current.map_or((a, z), |(ca, cz)| (ca.min(a), cz.max(z))));
+                units.letters.push(Unit {
+                    rect: rect(a, z, run.line_top, run.line_height),
+                    word,
+                });
+                line = Some(line.map_or((a, z, word), |(la, lz, lw)| (la.min(a), lz.max(z), lw)));
+            }
+            close(&mut current, &mut units, &mut word);
+            if let Some((a, z, first)) = line {
+                units.lines.push(Unit {
+                    rect: rect(a, z, run.line_top, run.line_height),
+                    word: first,
+                });
+            }
+        }
+        units
+    };
+
     if let Some(background) = title.background {
+        let picture = &mut back;
         let (x0, y0) = (shadow, shadow);
         let (x1, y1) = (width as f32 - shadow, full_height as f32 - shadow);
         let radius = size * 0.22;
@@ -253,7 +346,11 @@ fn draw_title(title: &Title, canvas: (u32, u32)) -> Picture {
             }
         },
     );
-    picture
+    Parts {
+        back: title.background.is_some().then_some(back),
+        text: picture,
+        units,
+    }
 }
 
 /// Text alone, tightly drawn: for scenes. Lines wrap at `wrap` pixels.
@@ -369,10 +466,58 @@ pub fn png(
     Ok((path, picture.width, picture.height))
 }
 
+/// A title's parts as PNGs in `dir` (made once and kept), and its pieces.
+pub fn png_parts(
+    dir: &Path,
+    title: &Title,
+    mask: Option<&Mask>,
+    canvas: (u32, u32),
+) -> anyhow::Result<splice_core::export::TitleParts> {
+    let key = key(&Generator::Text(title.clone()), mask, canvas);
+    let (back, text) = (
+        dir.join(format!("{key:016x}-back.png")),
+        dir.join(format!("{key:016x}-text.png")),
+    );
+    std::fs::create_dir_all(dir)?;
+    let mut parts = draw_title_parts(title, canvas);
+    if let Some(mask) = mask {
+        parts.text.apply_mask(mask);
+        if let Some(b) = &mut parts.back {
+            b.apply_mask(mask);
+        }
+    }
+    if !text.exists() {
+        parts.text.save_png(&text)?;
+    }
+    let back = match &parts.back {
+        Some(picture) => {
+            if !back.exists() {
+                picture.save_png(&back)?;
+            }
+            Some(back)
+        }
+        None => None,
+    };
+    Ok(splice_core::export::TitleParts {
+        back,
+        text,
+        units: parts.units,
+    })
+}
+
+/// A title drawn in parts for the viewer.
+pub struct Shown {
+    pub back: Option<std::sync::Arc<gpui::RenderImage>>,
+    pub text: std::sync::Arc<gpui::RenderImage>,
+    pub units: Units,
+    pub size: (u32, u32),
+}
+
 /// Drawn titles and colours for the viewer, kept while they are on screen.
 #[derive(Default)]
 pub struct Drawings {
     map: std::collections::HashMap<u64, Drawn>,
+    parts: std::collections::HashMap<u64, (std::sync::Arc<Shown>, u64)>,
     frame: u64,
 }
 
@@ -408,21 +553,58 @@ impl Drawings {
         Some((drawn.image.clone(), drawn.size))
     }
 
+    /// A title drawn in parts (one that comes in a piece at a time).
+    pub fn parts(&mut self, title: &Title, mask: Option<&Mask>, canvas: (u32, u32)) -> Option<std::sync::Arc<Shown>> {
+        let key = key(&Generator::Text(title.clone()), mask, canvas);
+        if !self.parts.contains_key(&key) {
+            let mut parts = draw_title_parts(title, canvas);
+            if let Some(mask) = mask {
+                parts.text.apply_mask(mask);
+                if let Some(b) = &mut parts.back {
+                    b.apply_mask(mask);
+                }
+            }
+            let image = |p: &Picture| crate::ffmpeg::render_image(p.width, p.height, p.bgra());
+            let shown = Shown {
+                back: parts.back.as_ref().and_then(image),
+                text: image(&parts.text)?,
+                units: parts.units,
+                size: (parts.text.width, parts.text.height),
+            };
+            self.parts.insert(key, (std::sync::Arc::new(shown), self.frame));
+        }
+        let entry = self.parts.get_mut(&key)?;
+        entry.1 = self.frame;
+        Some(entry.0.clone())
+    }
+
     /// Ends a frame: pictures unused for a while are handed back for release.
     pub fn sweep(&mut self) -> Vec<std::sync::Arc<gpui::RenderImage>> {
         self.frame += 1;
         let frame = self.frame;
+        let stale_parts: Vec<u64> = self
+            .parts
+            .iter()
+            .filter(|(_, (_, used))| frame - used > 90)
+            .map(|(k, _)| *k)
+            .collect();
+        let mut released = Vec::new();
+        for k in stale_parts {
+            if let Some((shown, _)) = self.parts.remove(&k)
+                && let Ok(shown) = std::sync::Arc::try_unwrap(shown)
+            {
+                released.push(shown.text);
+                released.extend(shown.back);
+            }
+        }
         let stale: Vec<u64> = self
             .map
             .iter()
             .filter(|(_, d)| frame - d.used > 90)
             .map(|(k, _)| *k)
             .collect();
-        stale
-            .into_iter()
-            .filter_map(|k| self.map.remove(&k))
-            .map(|d| d.image)
-            .collect()
+        released.extend(stale.into_iter().filter_map(|k| self.map.remove(&k)).map(|d| d.image));
+        released
     }
 }
 
@@ -440,8 +622,25 @@ impl<F: Fn(&Media) -> Option<PathBuf>> Resolve for Resolver<F> {
     }
 
     fn generated(&self, clip: &Clip, generator: &Generator) -> Option<Rendered> {
-        match png(&self.dir, generator, clip.look.mask.as_ref(), self.canvas) {
-            Ok((path, width, height)) => Some(Rendered { path, width, height }),
+        let mask = clip.look.mask.as_ref();
+        // A title coming in a piece at a time: its box and letters apart too.
+        let parts = match generator {
+            Generator::Text(title) if title.animate.is_some() => match png_parts(&self.dir, title, mask, self.canvas) {
+                Ok(parts) => Some(parts),
+                Err(e) => {
+                    eprintln!("splice: could not draw {}: {e}", generator.name());
+                    return None;
+                }
+            },
+            _ => None,
+        };
+        match png(&self.dir, generator, mask, self.canvas) {
+            Ok((path, width, height)) => Some(Rendered {
+                path,
+                width,
+                height,
+                parts,
+            }),
             Err(e) => {
                 eprintln!("splice: could not draw {}: {e}", generator.name());
                 None

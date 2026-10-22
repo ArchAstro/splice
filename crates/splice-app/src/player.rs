@@ -68,6 +68,13 @@ struct Wanted {
     filters: Option<String>,
     /// The source time it shows.
     source: Time,
+    /// The size its frames are decoded at.
+    size: (u32, u32),
+}
+
+/// A backdrop's decoded size: small, since it is blurred and scaled up anyway.
+pub fn backdrop_size(full: (u32, u32)) -> (u32, u32) {
+    ((full.0 / 4).max(16) & !1, (full.1 / 4).max(16) & !1)
 }
 
 /// What the editor should do after a tick.
@@ -140,16 +147,17 @@ impl Player {
         }
     }
 
-    /// The image to draw for a media clip at the playhead. Pictures with
-    /// no key or mask come straight from the library; the rest are decoded.
+    /// The image to draw for a media clip at the playhead. Pictures whose
+    /// pixels nothing changes (`filtered`) come straight from the library;
+    /// the rest are decoded.
     pub fn frame<'a>(
         &'a self,
         clip: ClipId,
         media: &Media,
-        filters: Option<&str>,
+        filtered: bool,
         library: &'a Library,
     ) -> Option<&'a Arc<RenderImage>> {
-        if media.kind == MediaKind::Image && filters.is_none() {
+        if media.kind == MediaKind::Image && !filtered {
             return library.get(&media.hash).and_then(|a| a.still.as_ref());
         }
         self.shown.get(&clip).map(|s| &s.image)
@@ -230,6 +238,13 @@ impl Player {
         // colour; each with the source time it shows now (held inside the
         // media where a transition draws it past its ends).
         let frame = project.frame();
+        let shown_at = |clip: &Clip, m: &Media| {
+            if m.kind == MediaKind::Video {
+                floor_to_frame(clip.source_at(position).clamp(0, (m.duration - frame).max(0)), fps)
+            } else {
+                0
+            }
+        };
         let stack: Vec<Wanted> = project
             .picture(position)
             .into_iter()
@@ -237,22 +252,40 @@ impl Player {
                 compose::Shown::Clip { drawn, .. } => match drawn.source {
                     Source::Media(m) => {
                         let clip = drawn.clip;
-                        let filters = clip.look.pixel_filters();
+                        let size = self.decode_size((m.width, m.height));
+                        let filters = clip.look.pixel_filters(size, "p");
                         let video = m.kind == MediaKind::Video;
                         (video || filters.is_some()).then(|| Wanted {
                             clip: clip.clone(),
                             media: m.clone(),
                             filters,
-                            source: if video {
-                                floor_to_frame(clip.source_at(position).clamp(0, (m.duration - frame).max(0)), fps)
-                            } else {
-                                0
-                            },
+                            source: shown_at(clip, m),
+                            size,
                         })
                     }
                     Source::Generated(_) => None,
                 },
-                compose::Shown::Fill { .. } => None,
+                // A backdrop: the same media, small (it is blurred anyway),
+                // decoded as a clip of its own.
+                compose::Shown::Backdrop {
+                    clip,
+                    source: Source::Media(m),
+                    ..
+                } => {
+                    let size = backdrop_size(self.decode_size((m.width, m.height)));
+                    let backdrop = clip.look.backdrop.unwrap_or_default();
+                    Some(Wanted {
+                        clip: Clip {
+                            id: compose::backdrop_id(clip.id),
+                            ..clip.clone()
+                        },
+                        media: m.clone(),
+                        filters: Some(format!("{},format=rgba", backdrop.ffmpeg(size))),
+                        source: shown_at(clip, m),
+                        size,
+                    })
+                }
+                compose::Shown::Backdrop { .. } | compose::Shown::Fill { .. } => None,
             })
             .collect();
         let visible: HashSet<ClipId> = stack.iter().map(|w| w.clip.id).collect();
@@ -263,8 +296,10 @@ impl Player {
             media,
             filters,
             source,
+            size,
         } in &stack
         {
+            let size = *size;
             let source = *source;
             // A held frame is a still, playing or not.
             if playing && media.kind == MediaKind::Video && !clip.frozen {
@@ -272,7 +307,7 @@ impl Player {
                 let Some(path) = library.path(&media.hash) else {
                     continue;
                 };
-                self.ensure_stream(clip, media, filters, path, source, fps);
+                self.ensure_stream(clip, media, filters, path, source, fps, size);
                 // Half a frame of playback, in source time.
                 let half = (half_frame as f64 * clip.speed) as Time;
                 let due = if clip.reverse { source - half } else { source + half };
@@ -280,7 +315,6 @@ impl Player {
                     self.show(clip.id, media.id, filters.clone(), t, size, image);
                 }
             } else {
-                let size = self.decode_size((media.width, media.height));
                 let current = self
                     .shown
                     .get(&clip.id)
@@ -291,14 +325,7 @@ impl Player {
                     let Some(path) = library.path(&media.hash) else {
                         continue;
                     };
-                    self.request_still(
-                        clip.id,
-                        media.id,
-                        filters.clone(),
-                        path.to_path_buf(),
-                        source,
-                        (media.width, media.height),
-                    );
+                    self.request_still(clip.id, media.id, filters.clone(), path.to_path_buf(), source, size);
                 }
             }
         }
@@ -321,9 +348,10 @@ impl Player {
                         continue;
                     };
                     keep_streams.insert(clip.id);
-                    let filters = clip.look.pixel_filters();
+                    let size = self.decode_size((media.width, media.height));
+                    let filters = clip.look.pixel_filters(size, "p");
                     let source = clip.source_at(drawn.from).clamp(0, (media.duration - frame).max(0));
-                    self.ensure_stream(clip, media, &filters, path, source, fps);
+                    self.ensure_stream(clip, media, &filters, path, source, fps, size);
                 }
             }
         }
@@ -375,7 +403,9 @@ impl Player {
         ffmpeg::fit(media.0, media.1, self.preview.0.max(64), self.preview.1.max(64))
     }
 
-    /// Keeps a stream for `clip` that will reach `source` soon, opening one if not.
+    /// Keeps a stream for `clip` that will reach `source` soon, opening one
+    /// if not, decoding frames of `size`.
+    #[allow(clippy::too_many_arguments)]
     fn ensure_stream(
         &mut self,
         clip: &Clip,
@@ -384,6 +414,7 @@ impl Player {
         path: &std::path::Path,
         source: Time,
         fps: u32,
+        size: (u32, u32),
     ) {
         let (speed, reverse) = (clip.speed, clip.reverse);
         if let Some(stream) = self.streams.get(&clip.id) {
@@ -400,7 +431,7 @@ impl Player {
                 return;
             }
         }
-        let (w, h) = self.decode_size((media.width, media.height));
+        let (w, h) = size;
         match FrameStream::open(path, source, fps, w, h, filters.as_deref(), speed, reverse) {
             Ok(decoder) => {
                 self.streams.insert(
@@ -453,7 +484,7 @@ impl Player {
         size: (u32, u32),
     ) {
         self.stills.insert(clip);
-        let (w, h) = self.decode_size(size);
+        let (w, h) = size;
         let tx = self.still_tx.clone();
         std::thread::spawn(move || {
             let image = ffmpeg::still(&path, source, w, h, filters.as_deref()).ok();

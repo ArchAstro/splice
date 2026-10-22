@@ -14,6 +14,7 @@ mod pointer;
 mod recorder;
 mod scenes;
 mod session;
+mod speech;
 mod symbols;
 mod theme;
 mod timeline;

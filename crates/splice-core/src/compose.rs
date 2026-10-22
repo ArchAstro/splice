@@ -168,6 +168,11 @@ impl Sound {
     }
 }
 
+/// The id the viewer gives a clip's backdrop, which it decodes on its own.
+pub fn backdrop_id(id: crate::model::ClipId) -> crate::model::ClipId {
+    crate::model::ClipId(id.0 | 1 << 62)
+}
+
 /// What the viewer draws at a moment, bottom first.
 #[derive(Clone, Debug)]
 pub enum Shown<'a> {
@@ -176,6 +181,13 @@ pub enum Shown<'a> {
         pose: Pose,
         /// The part of its frame that shows.
         part: [f32; 4],
+    },
+    /// The blurred fill behind a clip (its `look.backdrop`), covering the
+    /// canvas, showing as much as the clip does.
+    Backdrop {
+        clip: &'a Clip,
+        source: Source<'a>,
+        opacity: f64,
     },
     Fill {
         color: u32,
@@ -426,6 +438,13 @@ impl Project {
                     let pose = drawn.pose_at(t);
                     let part = drawn.shows(t);
                     let tint = drawn.tint.filter(|(_, a, z)| t >= *a && t < *z);
+                    if clip.look.backdrop.is_some() && matches!(drawn.source, Source::Media(_)) {
+                        out.push(Shown::Backdrop {
+                            clip,
+                            source: drawn.source,
+                            opacity: pose.opacity,
+                        });
+                    }
                     out.push(Shown::Clip {
                         drawn: Box::new(drawn),
                         pose,
@@ -477,6 +496,7 @@ mod tests {
             source: PathBuf::new(),
             recipe: None,
             content: None,
+            clicks: Vec::new(),
         })
     }
 
@@ -493,7 +513,7 @@ mod tests {
             .iter()
             .map(|s| match s {
                 Shown::Clip { pose, .. } => pose.opacity,
-                Shown::Fill { .. } => -1.0,
+                _ => -1.0,
             })
             .collect();
         assert_eq!(opacities[0], 1.0, "a solid picture stays solid under the dissolve");

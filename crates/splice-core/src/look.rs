@@ -38,6 +38,171 @@ pub struct Look {
     /// between. A property with keyframes follows them instead of its value above.
     #[serde(skip_serializing_if = "Keys::is_empty")]
     pub keys: Keys,
+    /// Blur, vignette, grain, shake and glitch.
+    #[serde(skip_serializing_if = "Effects::is_none")]
+    pub fx: Effects,
+    /// A blurred, darkened copy of the picture filling the canvas behind it:
+    /// a portrait phone video on a wide canvas.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backdrop: Option<Backdrop>,
+    /// Part of the picture hidden: a face, a screen, a number plate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redact: Option<Redact>,
+}
+
+/// Effects on a clip's picture, each 0 (off) to 1 (strongest).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Effects {
+    pub blur: f32,
+    /// Darker towards the corners.
+    pub vignette: f32,
+    /// Film grain.
+    pub grain: f32,
+    /// A handheld wobble.
+    pub shake: f32,
+    /// Colour fringes, and now and then a jolt.
+    pub glitch: f32,
+}
+
+impl Effects {
+    pub fn is_none(&self) -> bool {
+        *self == Effects::default()
+    }
+
+    pub fn clamped(self) -> Effects {
+        let unit = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+        Effects {
+            blur: unit(self.blur),
+            vignette: unit(self.vignette),
+            grain: unit(self.grain),
+            shake: unit(self.shake),
+            glitch: unit(self.glitch),
+        }
+    }
+
+    /// What is on, in a few words.
+    pub fn summary(&self) -> String {
+        let fx = self.clamped();
+        let mut said = Vec::new();
+        for (v, name) in [
+            (fx.blur, "Blur"),
+            (fx.vignette, "Vignette"),
+            (fx.grain, "Grain"),
+            (fx.shake, "Shake"),
+            (fx.glitch, "Glitch"),
+        ] {
+            if v > 0.0 {
+                said.push(name);
+            }
+        }
+        if said.is_empty() {
+            "None".into()
+        } else {
+            said.join(" · ")
+        }
+    }
+}
+
+/// The blurred fill behind a picture.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Backdrop {
+    /// 0 to 1.
+    pub blur: f32,
+    /// How much darker than the picture, 0 to 1.
+    pub dim: f32,
+}
+
+impl Default for Backdrop {
+    fn default() -> Backdrop {
+        Backdrop { blur: 0.6, dim: 0.35 }
+    }
+}
+
+impl Backdrop {
+    /// Its filters, for a frame of `size` (the backdrop is scaled to cover
+    /// the canvas after them).
+    pub fn ffmpeg(&self, size: (u32, u32)) -> String {
+        let radius = blur_radius(self.blur.clamp(0.0, 1.0) * 0.6 + 0.2, size);
+        let k = 1.0 - self.dim.clamp(0.0, 1.0) * 0.85;
+        format!(
+            "boxblur=lr={radius}:lp=3:cr={}:cp=3,colorchannelmixer=rr={k:.3}:gg={k:.3}:bb={k:.3}",
+            (radius / 2).max(1)
+        )
+    }
+}
+
+/// How hidden part of a picture is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RedactStyle {
+    #[default]
+    Blur,
+    Pixelate,
+    Black,
+}
+
+impl RedactStyle {
+    pub const ALL: [RedactStyle; 3] = [RedactStyle::Blur, RedactStyle::Pixelate, RedactStyle::Black];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            RedactStyle::Blur => "blur",
+            RedactStyle::Pixelate => "pixelate",
+            RedactStyle::Black => "black",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<RedactStyle> {
+        RedactStyle::ALL
+            .into_iter()
+            .find(|s| s.name() == name.trim().to_lowercase())
+    }
+}
+
+/// A box of the picture hidden, in fractions of its frame (centre and size).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Redact {
+    pub style: RedactStyle,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Default for Redact {
+    fn default() -> Redact {
+        Redact {
+            style: RedactStyle::Blur,
+            x: 0.5,
+            y: 0.4,
+            width: 0.3,
+            height: 0.35,
+        }
+    }
+}
+
+impl Redact {
+    /// Its box in pixels of a frame of `size`: left, top, width, height,
+    /// even and inside the frame.
+    pub fn pixels(&self, size: (u32, u32)) -> (u32, u32, u32, u32) {
+        let (w, h) = (size.0.max(2) as f32, size.1.max(2) as f32);
+        let even = |v: f32| ((v.max(2.0) as u32) / 2) * 2;
+        let bw = even((self.width.clamp(0.02, 1.0) * w).min(w));
+        let bh = even((self.height.clamp(0.02, 1.0) * h).min(h));
+        let x = ((self.x * w - bw as f32 / 2.0).clamp(0.0, w - bw as f32)) as u32;
+        let y = ((self.y * h - bh as f32 / 2.0).clamp(0.0, h - bh as f32)) as u32;
+        (x, y, bw, bh)
+    }
+}
+
+/// A box blur radius for a blur of `amount` (0 to 1) on a frame of `size`:
+/// the same look at any size.
+fn blur_radius(amount: f32, size: (u32, u32)) -> u32 {
+    let short = size.0.min(size.1).max(2) as f32;
+    ((amount * 0.035 * short).round() as u32).min((short as u32 / 2).saturating_sub(1))
 }
 
 impl Default for Look {
@@ -55,6 +220,9 @@ impl Default for Look {
             drift: Drift::None,
             grade: Grade::default(),
             keys: Keys::default(),
+            fx: Effects::default(),
+            backdrop: None,
+            redact: None,
         }
     }
 }
@@ -759,6 +927,8 @@ pub enum Drift {
 
 /// How far a slide travels, as a fraction of the canvas.
 const SLIDE: f64 = 0.12;
+/// How far a full shake wanders, as a fraction of the canvas.
+const SHAKE: f64 = 0.012;
 /// How much a drift zooms over the clip.
 const DRIFT: f64 = 0.15;
 
@@ -782,6 +952,7 @@ pub enum Expr {
     Div(Box<Expr>, Box<Expr>),
     Clip(Box<Expr>, f64, f64),
     Pow(Box<Expr>, f64),
+    Sin(Box<Expr>),
 }
 
 use Expr::C;
@@ -837,6 +1008,7 @@ impl Expr {
             Expr::Div(a, z) => a.eval(t) / z.eval(t),
             Expr::Clip(a, lo, hi) => a.eval(t).clamp(*lo, *hi),
             Expr::Pow(a, n) => a.eval(t).powf(*n),
+            Expr::Sin(a) => a.eval(t).sin(),
         }
     }
 
@@ -859,6 +1031,7 @@ impl Expr {
             Expr::Div(a, z) => format!("({}/{})", a.ffmpeg(t), z.ffmpeg(t)),
             Expr::Clip(a, lo, hi) => format!("clip({},{lo:.6},{hi:.6})", a.ffmpeg(t)),
             Expr::Pow(a, n) => format!("pow({},{n:.6})", a.ffmpeg(t)),
+            Expr::Sin(a) => format!("sin({})", a.ffmpeg(t)),
         }
     }
 }
@@ -1000,6 +1173,30 @@ impl Look {
             Drift::ZoomIn => scale = mul(scale, add(C(1.0), mul(C(DRIFT), progress))),
             Drift::ZoomOut => scale = mul(scale, sub(C(1.0 + DRIFT), mul(C(DRIFT), progress))),
         }
+        // A wave at `hz`, `phase` along: sin(2π·hz·t + phase).
+        let wave = |hz: f64, phase: f64| Expr::Sin(b(add(mul(C(std::f64::consts::TAU * hz), Expr::T), C(phase))));
+        let fx = self.fx.clamped();
+        if fx.shake > 0.0 {
+            // Two slow waves a side, out of step: a hand, not a machine.
+            let a = SHAKE * fx.shake as f64;
+            x = add(
+                x,
+                mul(C(a), add(mul(C(0.6), wave(1.1, 0.0)), mul(C(0.4), wave(2.7, 1.3)))),
+            );
+            y = add(
+                y,
+                mul(C(a), add(mul(C(0.6), wave(1.4, 0.7)), mul(C(0.4), wave(3.1, 2.1)))),
+            );
+            // A little bigger, so its edges stay off the canvas.
+            scale = mul(scale, C(1.0 + 2.4 * a));
+        }
+        if fx.glitch > 0.0 {
+            // Now and then (when two slow waves peak together), a quick jolt.
+            let g = fx.glitch as f64;
+            let gate = clip01(mul(sub(add(wave(0.63, 0.0), wave(1.71, 0.9)), C(1.6)), C(8.0)));
+            x = add(x, mul(C(0.025 * g), mul(gate, wave(13.0, 0.0))));
+            scale = mul(scale, C(1.0 + 0.05 * g));
+        }
         PoseExpr { x, y, scale, opacity }
     }
 
@@ -1014,15 +1211,57 @@ impl Look {
             || self.exit.kind != MotionKind::None
             || self.drift != Drift::None
             || !self.keys.is_empty()
+            || self.fx.shake > 0.0
+            || self.fx.glitch > 0.0
     }
 
-    /// Filters that change the clip's own pixels (crop, colour, key and
-    /// mask), shared by the viewer's decoder and export. They leave an RGBA frame.
-    pub fn pixel_filters(&self) -> Option<String> {
+    /// Whether anything changes the clip's own pixels (see `pixel_filters`).
+    pub fn has_pixel_filters(&self) -> bool {
+        self.pixel_filters((64, 64), "x").is_some()
+    }
+
+    /// Filters that change the clip's own pixels (crop, a hidden box, blur,
+    /// key, colour, vignette, grain, fringes and mask), shared by the
+    /// viewer's decoder and export, for frames of `size` arriving. They leave
+    /// an RGBA frame. Some branch and join again inside; their labels start
+    /// with `prefix`, so several clips' filters can share one graph.
+    pub fn pixel_filters(&self, size: (u32, u32), prefix: &str) -> Option<String> {
         let mut filters = Vec::new();
+        let mut size = size;
         // Cut first, so a key and a mask work on what remains.
         if let Some(crop) = self.crop.filter(|c| !c.is_none()) {
             filters.push(crop.ffmpeg());
+            let kept = crop.size((size.0 as f64, size.1 as f64));
+            size = ((kept.0 as u32 / 2 * 2).max(2), (kept.1 as u32 / 2 * 2).max(2));
+        }
+        if let Some(redact) = self.redact {
+            let (x, y, w, h) = redact.pixels(size);
+            filters.push(match redact.style {
+                RedactStyle::Black => format!("drawbox=x={x}:y={y}:w={w}:h={h}:color=black:t=fill"),
+                style => {
+                    let hide = match style {
+                        RedactStyle::Pixelate => {
+                            let block = (w.min(h) / 8).max(4);
+                            format!("pixelize=w={block}:h={block}")
+                        }
+                        _ => {
+                            let r = (w.min(h) / 5).max(2).min(w.min(h) / 2 - 1);
+                            format!("boxblur=lr={r}:lp=3:cr={}:cp=3", (r / 2).max(1))
+                        }
+                    };
+                    format!(
+                        "split[{prefix}r0][{prefix}r1];[{prefix}r1]crop={w}:{h}:{x}:{y},{hide}[{prefix}r2];\
+                         [{prefix}r0][{prefix}r2]overlay={x}:{y}"
+                    )
+                }
+            });
+        }
+        let fx = self.fx.clamped();
+        if fx.blur > 0.0 {
+            let r = blur_radius(fx.blur, size);
+            if r > 0 {
+                filters.push(format!("boxblur=lr={r}:lp=2:cr={}:cp=2", (r / 2).max(1)));
+            }
         }
         // Colour before the key would change what counts as green: key first.
         let graded = self.grade.ffmpeg();
@@ -1044,6 +1283,24 @@ impl Look {
         }
         if let Some(grade) = graded {
             filters.push(grade);
+        }
+        if fx.vignette > 0.0 {
+            // vignette drops transparency: darken the colour, keep the alpha.
+            let angle = 0.25 + 0.75 * fx.vignette;
+            filters.push(format!(
+                "format=rgba,split[{prefix}v0][{prefix}v1];[{prefix}v1]alphaextract[{prefix}va];\
+                 [{prefix}v0]vignette=angle={angle:.4},format=rgb24[{prefix}vc];[{prefix}vc][{prefix}va]alphamerge"
+            ));
+        }
+        if fx.grain > 0.0 {
+            let amount = (6.0 + 34.0 * fx.grain).round();
+            filters.push(format!(
+                "format=rgba,noise=c0s={amount}:c1s={amount}:c2s={amount}:allf=t"
+            ));
+        }
+        if fx.glitch > 0.0 {
+            let shift = ((size.0 as f32 * 0.008 * fx.glitch).round() as i32).max(1);
+            filters.push(format!("format=rgba,rgbashift=rh={shift}:bh=-{shift}"));
         }
         if let Some(mask) = self.mask {
             filters.push("format=rgba".into());
@@ -1123,7 +1380,7 @@ mod tests {
             crop: Some(crop),
             ..Look::default()
         };
-        assert!(look.pixel_filters().unwrap().starts_with("crop="));
+        assert!(look.pixel_filters((400, 200), "t").unwrap().starts_with("crop="));
     }
 
     #[test]
@@ -1185,8 +1442,8 @@ mod tests {
             mask: Some(m),
             ..Look::default()
         };
-        let f = look.pixel_filters().unwrap();
+        let f = look.pixel_filters((640, 360), "t").unwrap();
         assert!(f.starts_with("chromakey=0x00ff00:") && f.contains("despill=type=green") && f.contains("geq="));
-        assert!(Look::default().pixel_filters().is_none());
+        assert!(Look::default().pixel_filters((640, 360), "t").is_none());
     }
 }

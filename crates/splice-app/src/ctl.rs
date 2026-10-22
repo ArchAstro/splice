@@ -33,7 +33,7 @@ Editing (each is one undo step; clips and media are named by id, media also by n
   duplicate --clip C                       copy clips to just after themselves
   volume --clip C --value V                1 is as recorded, 0 silent, up to 4
   track --track N [--mute|--unmute] [--hide|--show]
-  canvas [--aspect 16:9|9:16|1:1|4:5] [--size WxH] [--fps N]
+  canvas [--aspect 16:9|9:16|1:1|4:5] [--size WxH] [--fps N] [--letterbox 2.39|1.85|2|none]
   undo | redo
 
 Titles, colours and looks
@@ -47,6 +47,8 @@ Titles, colours and looks
 
   style:  --font NAME  --size PX  --color C  --box C|none  --align left|center|right
           --bold/--no-bold  --italic/--no-italic  --shadow/--no-shadow
+          --animate fade|rise|pop|type|karaoke|none [--by word|letter|line] [--over S]
+                (words come in one at a time, spread over S seconds, or as captions' words are said)
   look:   --x F --y F (centre offset, fractions of the canvas)  --scale F (1 = natural)  --opacity F
           --enter KIND [--enter-for S]  --exit KIND [--exit-for S]
               KIND: none, fade, slide-up, slide-down, slide-left, slide-right, zoom, pop
@@ -59,6 +61,10 @@ Titles, colours and looks
           --grade none|warm|cool|vivid|muted|faded|film|teal-orange|mono|noir   (a ready-made look)
           --exposure F (stops, −1 to 1) --contrast F --saturation F --warmth F --tint F (each −1 to 1)
                 (colour, for video and pictures; `look --all` gives every video and picture the same)
+          --blur F --vignette F --grain F --shake F --glitch F   (effects, 0 to 1; 0 is off)
+          --backdrop on|off [--backdrop-blur F --backdrop-dim F]   (a blurred copy filling the canvas behind)
+          --redact blur|pixelate|black|none [--redact-x F --redact-y F --redact-width F --redact-height F]
+                (hide a box of the picture: a face, a screen; fractions of the clip's frame, centre and size)
   C is #rrggbb, #rrggbbaa or a name: white, black, paper, ink, vermilion, gold, green, blue, clear.
 
 Transitions, speed and keyframes
@@ -79,6 +85,14 @@ Transitions, speed and keyframes
                                  (from this keyframe to the next): linear, in, out, in-out (default), hold
   keyframe --clip C --at T --drop [--prop x|y|scale|opacity]   take keyframes at T away
   keyframe --clip C --clear [--prop NAME]  take them all away; values stay as they are at the playhead
+  zoom --clip C [--to 2] | --none          a screen recording made in Splice: zoom in towards each burst
+                                 of clicks noted while recording (keyframes on place and size)
+  leak --kind warm|sun|cool [--at T]       a light leak washing over what is there, 4s (a scene: edit as one)
+  captions --clip C [--words N] [--plain] [--wait]
+                                 hear what is said in clip C (on this Mac, whisper.cpp) and lay captions
+                                 over it on a new track: lines of up to N words (6), each word lighting up
+                                 as it is said (--plain: whole lines). Each caption is a title to edit
+  captions --file subtitles.srt  captions from an .srt or .vtt file
 
 Music (a score: instruments and notes, played by General MIDI sounds)
   score new [--file score.json] [--name N] [--at T] [--track N] [--wait]
@@ -447,13 +461,16 @@ fn build(args: &[String]) -> Result<Value, String> {
         let mut next = |name: &str| rest.next().ok_or(format!("{name} needs a value"));
         match arg.as_str() {
             "--font" | "--color" | "--box" | "--align" | "--enter" | "--exit" | "--drift" | "--key" | "--mask"
-            | "--query" | "--crop" | "--grade" | "--ease" | "--prop" => {
+            | "--query" | "--crop" | "--grade" | "--ease" | "--prop" | "--backdrop" | "--redact" | "--letterbox"
+            | "--animate" | "--by" => {
                 request.insert(arg[2..].into(), json!(value(next(arg)?)?));
             }
             "--size" | "--x" | "--y" | "--scale" | "--opacity" | "--similarity" | "--blend" | "--feather"
             | "--mask-x" | "--mask-y" | "--mask-width" | "--mask-height" | "--enter-for" | "--exit-for"
             | "--crop-left" | "--crop-top" | "--crop-right" | "--crop-bottom" | "--exposure" | "--contrast"
-            | "--saturation" | "--warmth" | "--tint" | "--rate" => {
+            | "--saturation" | "--warmth" | "--tint" | "--rate" | "--blur" | "--vignette" | "--grain" | "--shake"
+            | "--glitch" | "--backdrop-blur" | "--backdrop-dim" | "--redact-x" | "--redact-y" | "--redact-width"
+            | "--redact-height" => {
                 let raw = next(arg)?;
                 let v = match raw.parse::<f64>() {
                     Ok(v) => json!(v),
@@ -490,6 +507,10 @@ fn build(args: &[String]) -> Result<Value, String> {
                 let w = next(arg)?;
                 request.insert("window".into(), w.parse::<u64>().map_or(json!(w), |id| json!(id)));
             }
+            "--over" => {
+                let v: f64 = next(arg)?.parse().map_err(|_| "--over expects seconds".to_string())?;
+                request.insert("over".into(), json!(v));
+            }
             "--for" => {
                 let v: f64 = next(arg)?.parse().map_err(|_| "--for expects seconds".to_string())?;
                 request.insert("for".into(), json!(v));
@@ -500,6 +521,10 @@ fn build(args: &[String]) -> Result<Value, String> {
             "--every" => {
                 let v: f64 = next(arg)?.parse().map_err(|_| "--every expects seconds".to_string())?;
                 request.insert("every".into(), json!(v));
+            }
+            "--words" if command == "captions" => {
+                let n: u64 = next(arg)?.parse().map_err(|_| "--words expects a number".to_string())?;
+                request.insert("words".into(), json!(n));
             }
             "--value" => {
                 let v: f64 = next(arg)?.parse().map_err(|_| "--value expects a number".to_string())?;
@@ -540,7 +565,8 @@ fn build(args: &[String]) -> Result<Value, String> {
                 let v: f64 = next(arg)?.parse().map_err(|_| format!("{arg} expects points"))?;
                 request.insert(arg[2..].into(), json!(v));
             }
-            "--ripple" | "--wait" | "--keep" | "--none" | "--all" | "--reset" | "--clear" | "--seam" | "--drop" => {
+            "--ripple" | "--wait" | "--keep" | "--none" | "--all" | "--reset" | "--clear" | "--seam" | "--drop"
+            | "--plain" => {
                 request.insert(arg[2..].into(), json!(true));
             }
             "--reverse" | "--forwards" => {
@@ -565,7 +591,8 @@ fn build(args: &[String]) -> Result<Value, String> {
     let cmd = match command.as_str() {
         "status" | "read" | "versions" | "add" | "move" | "trim" | "split" | "delete" | "duplicate" | "volume"
         | "track" | "canvas" | "undo" | "redo" | "play" | "pause" | "select" | "save" | "say" | "wait" | "text"
-        | "color" | "style" | "look" | "fonts" | "transition" | "speed" | "freeze" | "keyframe" => command.as_str(),
+        | "color" | "style" | "look" | "fonts" | "transition" | "speed" | "freeze" | "keyframe" | "leak"
+        | "captions" | "zoom" => command.as_str(),
         "restore" => {
             if let Some(id) = words.first().and_then(|w| w.parse::<u64>().ok()) {
                 request.insert("version".into(), json!(id));

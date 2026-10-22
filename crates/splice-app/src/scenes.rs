@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tiny_skia::{
     Color, FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Paint as Brush, PathBuilder, Pixmap, PixmapPaint,
-    Point, Rect, Shader, SpreadMode, Stroke, StrokeDash, Transform,
+    Point, RadialGradient, Rect, Shader, SpreadMode, Stroke, StrokeDash, Transform,
 };
 
 /// Renders by this painter name the same bytes.
@@ -365,13 +365,26 @@ fn gradient(g: &motion::Gradient, w: f32, h: f32, opacity: f64) -> Brush<'static
             )
         })
         .collect();
-    let shader = LinearGradient::new(
-        Point::from_xy(-dx, -dy),
-        Point::from_xy(dx, dy),
-        stops,
-        SpreadMode::Pad,
-        Transform::identity(),
-    )
+    let shader = if g.radial {
+        // A circle the shape's width across, squashed to its height.
+        let r = (w / 2.0).max(0.5);
+        RadialGradient::new(
+            Point::from_xy(0.0, 0.0),
+            Point::from_xy(0.0, 0.0),
+            r,
+            stops,
+            SpreadMode::Pad,
+            Transform::from_scale(1.0, (h / w.max(1.0)).max(0.01)),
+        )
+    } else {
+        LinearGradient::new(
+            Point::from_xy(-dx, -dy),
+            Point::from_xy(dx, dy),
+            stops,
+            SpreadMode::Pad,
+            Transform::identity(),
+        )
+    }
     .unwrap_or(Shader::SolidColor(Color::WHITE));
     Brush {
         shader,

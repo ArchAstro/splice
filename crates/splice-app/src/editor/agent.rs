@@ -105,6 +105,9 @@ fn look_json(look: &splice_core::look::Look) -> Value {
         })),
         "mask": look.mask,
         "crop": look.crop,
+        "effects": (!look.fx.is_none()).then_some(look.fx),
+        "backdrop": look.backdrop,
+        "redact": look.redact,
         "grade": (!look.grade.is_none()).then(|| json!({
             "look": look.grade.preset.name(),
             "exposure": look.grade.exposure,
@@ -187,7 +190,8 @@ impl Editor {
                 return self.ctl_plan(request, reply, cx);
             }
             "bible" => return self.ctl_bible(request, reply, cx),
-            "transition" | "speed" | "freeze" | "keyframe" => self.ctl_effects(cmd, request, cx),
+            "captions" => return self.ctl_captions(request, reply, cx),
+            "transition" | "speed" | "freeze" | "keyframe" | "leak" | "zoom" => self.ctl_effects(cmd, request, cx),
             "story" | "cue" | "view" => self.ctl_story(cmd, request, cx),
             "record" => return self.ctl_record(request, reply, cx),
             "symbol" | "placeholder" | "hold" => return self.ctl_symbol(cmd, request, reply, cx),
@@ -540,7 +544,30 @@ impl Editor {
                     }
                     settings.fps = fps as u32;
                 }
-                self.edit(cx, |p| p.settings = settings);
+                // Black bars: a shape (2.39, 1.85, 2:1, 16:9) or none.
+                let letterbox = match text("letterbox") {
+                    None => self.doc.project.letterbox,
+                    Some("none" | "off") => None,
+                    Some(shape) => {
+                        let parsed = match shape.split_once(':') {
+                            Some((w, h)) => w
+                                .trim()
+                                .parse::<f32>()
+                                .ok()
+                                .zip(h.trim().parse::<f32>().ok())
+                                .map(|(w, h)| w / h),
+                            None => shape.trim().parse::<f32>().ok(),
+                        };
+                        match parsed.filter(|a| (0.3..=4.0).contains(a)) {
+                            Some(a) => Some(a),
+                            None => return Some(fail("`letterbox` is a shape like 2.39, 1.85 or 2:1, or none")),
+                        }
+                    }
+                };
+                self.edit(cx, |p| {
+                    p.settings = settings;
+                    p.letterbox = letterbox;
+                });
                 self.edited()
             }
             "undo" | "redo" => {
@@ -747,6 +774,30 @@ impl Editor {
         title.bold = flag("bold").unwrap_or(title.bold);
         title.italic = flag("italic").unwrap_or(title.italic);
         title.shadow = flag("shadow").unwrap_or(title.shadow);
+        // Coming in a piece at a time.
+        use splice_core::textmotion::{By, Style, TextMotion};
+        match request.get("animate").and_then(Value::as_str) {
+            Some("none" | "off") => title.animate = None,
+            Some(name) => {
+                let style = Style::parse(name).ok_or_else(|| {
+                    let names: Vec<_> = Style::ALL.iter().map(|s| s.name()).collect();
+                    format!("`animate` is none or one of {}", names.join(", "))
+                })?;
+                title.animate = Some(TextMotion {
+                    style,
+                    ..title.animate.unwrap_or_default()
+                });
+            }
+            None => {}
+        }
+        if let Some(m) = &mut title.animate {
+            if let Some(name) = request.get("by").and_then(Value::as_str) {
+                m.by = By::parse(name).ok_or("`by` is word, letter or line")?;
+            }
+            if let Some(over) = request.get("over").and_then(Value::as_f64) {
+                m.over = splice_core::time::from_secs(over.clamp(0.05, 30.0));
+            }
+        }
         Ok(())
     }
 
@@ -850,6 +901,12 @@ impl Editor {
                     "align": title.align,
                     "box": title.background.map(hex),
                     "shadow": title.shadow,
+                    "animate": title.animate.map(|m| json!({
+                        "style": m.style.name(),
+                        "by": m.by.name(),
+                        "over": s(m.over),
+                    })),
+                    "timed": !title.timing.is_empty(),
                 });
             }
             Some(Generator::Color { color }) => value["color"] = json!(hex(*color)),
@@ -859,6 +916,12 @@ impl Editor {
         }
         if clip.frozen {
             value["frozen"] = json!(true);
+        }
+        if let Some(m) = project
+            .media(clip.media)
+            .filter(|m| !m.clicks.is_empty() && clip.generator.is_none())
+        {
+            value["clicks"] = json!(m.clicks.len());
         }
         if clip.speed != 1.0 {
             value["speed"] = json!(clip.speed);
@@ -894,7 +957,12 @@ impl Editor {
                 "saved": !self.doc.edited,
                 "revision": self.doc.revision,
             },
-            "canvas": { "width": settings.width, "height": settings.height, "fps": settings.fps },
+            "canvas": {
+                "width": settings.width,
+                "height": settings.height,
+                "fps": settings.fps,
+                "letterbox": self.doc.project.letterbox,
+            },
             "duration": s(project.duration()),
             "playhead": s(self.player.position),
             "playing": self.player.is_playing(),
@@ -1102,6 +1170,41 @@ fn apply_look(look: &mut splice_core::look::Look, request: &Value, at: Time) -> 
     grade.temperature = number("warmth").unwrap_or(grade.temperature);
     grade.tint = number("tint").unwrap_or(grade.tint);
     *grade = grade.clamped();
+    let fx = &mut look.fx;
+    fx.blur = number("blur").unwrap_or(fx.blur);
+    fx.vignette = number("vignette").unwrap_or(fx.vignette);
+    fx.grain = number("grain").unwrap_or(fx.grain);
+    fx.shake = number("shake").unwrap_or(fx.shake);
+    fx.glitch = number("glitch").unwrap_or(fx.glitch);
+    *fx = fx.clamped();
+    match text("backdrop") {
+        Some("on" | "yes" | "blur") => look.backdrop = Some(look.backdrop.unwrap_or_default()),
+        Some("off" | "no" | "none") => look.backdrop = None,
+        Some(other) => return Err(format!("`backdrop` is on or off, not {other}")),
+        None => {}
+    }
+    if let Some(b) = &mut look.backdrop {
+        b.blur = number("backdrop_blur").map_or(b.blur, |v| v.clamp(0.0, 1.0));
+        b.dim = number("backdrop_dim").map_or(b.dim, |v| v.clamp(0.0, 1.0));
+    }
+    match text("redact") {
+        Some("none" | "off") => look.redact = None,
+        Some(name) => {
+            let style = splice_core::look::RedactStyle::parse(name)
+                .ok_or(format!("`redact` is blur, pixelate, black or none, not {name}"))?;
+            look.redact = Some(splice_core::look::Redact {
+                style,
+                ..look.redact.unwrap_or_default()
+            });
+        }
+        None => {}
+    }
+    if let Some(r) = &mut look.redact {
+        r.x = number("redact_x").map_or(r.x, |v| v.clamp(0.0, 1.0));
+        r.y = number("redact_y").map_or(r.y, |v| v.clamp(0.0, 1.0));
+        r.width = number("redact_width").map_or(r.width, |v| v.clamp(0.02, 1.0));
+        r.height = number("redact_height").map_or(r.height, |v| v.clamp(0.02, 1.0));
+    }
     if text("crop") == Some("none") {
         look.crop = None;
     }

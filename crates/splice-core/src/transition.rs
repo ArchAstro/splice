@@ -288,6 +288,7 @@ mod tests {
             source: PathBuf::new(),
             recipe: None,
             content: None,
+            clicks: Vec::new(),
         });
         let a = p.append_clip(m).unwrap();
         let b = p.append_clip(m).unwrap();

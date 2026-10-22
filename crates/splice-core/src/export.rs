@@ -71,6 +71,33 @@ pub struct Rendered {
     pub path: PathBuf,
     pub width: u32,
     pub height: u32,
+    /// For a title that comes in a piece at a time.
+    pub parts: Option<TitleParts>,
+}
+
+/// A title drawn in parts (one that comes in a piece at a time): its box
+/// alone, its letters alone, and where each piece of the letters is.
+pub struct TitleParts {
+    pub back: Option<PathBuf>,
+    pub text: PathBuf,
+    pub units: crate::textmotion::Units,
+}
+
+/// One picture placed on the canvas: its frames, size at scale 1, the shift
+/// a crop gives it, and its pose.
+struct Part {
+    frames: String,
+    natural: (f64, f64),
+    offset: (f64, f64),
+    pose: crate::look::PoseExpr,
+    tag: String,
+}
+
+fn source_generator<'a>(source: Source<'a>) -> &'a Generator {
+    match source {
+        Source::Generated(g) => g,
+        Source::Media(_) => unreachable!("only drawn titles come in parts"),
+    }
 }
 
 /// Where export finds its pictures.
@@ -275,7 +302,6 @@ fn build(
                     Source::Media(_) => look.cropped(natural),
                     Source::Generated(_) => (natural, (0.0, 0.0)),
                 };
-                let pose = &drawn.pose;
                 // Clip time, in seconds, of the picture's frames: they start
                 // at `drawn.from`. A still knows its one moment.
                 let local = |frame: &str| -> String {
@@ -286,202 +312,271 @@ fn build(
                         None => format!("({frame}/{fps})"),
                     }
                 };
-                let mut chain = Vec::new();
-                if matches!(source, Source::Media(_))
-                    && let Some(pixels) = look.pixel_filters()
+                // The blurred fill behind it: the same frames, covering the
+                // canvas, showing as much as the picture does.
+                let size = match source {
+                    Source::Media(m) => (m.width.max(2), m.height.max(2)),
+                    Source::Generated(_) => (w, h),
+                };
+                let frames = match (look.backdrop, source) {
+                    (Some(backdrop), Source::Media(_)) => {
+                        filters.push(format!("[{frames}]split[{frames}m][{frames}b]"));
+                        let mut chain = vec![
+                            backdrop.ffmpeg(size),
+                            format!("scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"),
+                            "format=rgba".to_string(),
+                        ];
+                        opacity(
+                            &mut chain,
+                            &mut prepare,
+                            drawn,
+                            &drawn.pose,
+                            still_at,
+                            fps,
+                            &format!("{tag}b"),
+                        );
+                        let placed = fmt(if still_at.is_some() { 0 } else { drawn.from });
+                        chain.push(format!(
+                            "format={},setpts=PTS-STARTPTS+{placed}/TB",
+                            if layer { "rgba" } else { "yuva420p" }
+                        ));
+                        filters.push(format!("[{frames}b]{}[b{tag}]", chain.join(",")));
+                        let end = fmt(if still_at.is_some() { frame } else { drawn.to });
+                        filters.push(format!(
+                            "[{picture}][b{tag}]overlay=x=0:y=0:{}eof_action=pass:enable='between(t,{placed},{end})'[pb{tag}]",
+                            if layer { "format=auto:" } else { "" }
+                        ));
+                        picture = format!("pb{tag}");
+                        format!("{frames}m")
+                    }
+                    _ => frames,
+                };
+                // What is placed: the picture, or for a title that comes in a
+                // piece at a time, its box and each of its pieces.
+                let mut parts = vec![Part {
+                    frames: frames.clone(),
+                    natural: (nw, nh),
+                    offset: (cx, cy),
+                    pose: drawn.pose.clone(),
+                    tag: tag.clone(),
+                }];
+                if let Source::Generated(crate::model::Generator::Text(title)) = source
+                    && let Some(motion) = &title.animate
+                    && let Some(split) = resolve.generated(clip, source_generator(source)).and_then(|r| r.parts)
                 {
-                    chain.push(pixels);
+                    // The whole title's picture is not drawn as one.
+                    filters.push(format!("[{frames}]nullsink"));
+                    parts.clear();
+                    let length = fmt(if still_at.is_some() {
+                        frame
+                    } else {
+                        drawn.to - drawn.from
+                    });
+                    let mut looped = |args: &mut Vec<String>, path: &Path| {
+                        args.extend(strings(&[
+                            "-loop",
+                            "1",
+                            "-framerate",
+                            &fps.to_string(),
+                            "-t",
+                            &length,
+                            "-i",
+                        ]));
+                        args.push(path.to_string_lossy().to_string());
+                        let i = next_input;
+                        next_input += 1;
+                        i
+                    };
+                    if let Some(back) = &split.back {
+                        let i = looped(&mut args, back);
+                        filters.push(format!("[{i}:v]fps={fps},setpts=PTS-STARTPTS[k{tag}]"));
+                        parts.push(Part {
+                            frames: format!("k{tag}"),
+                            natural: (nw, nh),
+                            offset: (0.0, 0.0),
+                            pose: drawn.pose.clone(),
+                            tag: format!("{tag}k"),
+                        });
+                    }
+                    let pieces = crate::textmotion::pieces(
+                        motion,
+                        &split.units,
+                        &title.timing,
+                        (nw, nh),
+                        (w as f64, h as f64),
+                        title.size as f64,
+                        &drawn.pose,
+                    );
+                    if !pieces.is_empty() {
+                        let i = looped(&mut args, &split.text);
+                        let outs: String = (0..pieces.len()).map(|k| format!("[u{tag}s{k}]")).collect();
+                        filters.push(format!(
+                            "[{i}:v]fps={fps},setpts=PTS-STARTPTS,split={}{outs}",
+                            pieces.len()
+                        ));
+                        for (k, piece) in pieces.into_iter().enumerate() {
+                            let [x, y, pw, ph] = piece.rect;
+                            filters.push(format!("[u{tag}s{k}]crop={pw}:{ph}:{x}:{y}[u{tag}c{k}]"));
+                            parts.push(Part {
+                                frames: format!("u{tag}c{k}"),
+                                natural: (pw as f64, ph as f64),
+                                offset: (0.0, 0.0),
+                                pose: piece.pose,
+                                tag: format!("{tag}u{k}"),
+                            });
+                        }
+                    }
                 }
-                chain.push("format=rgba".into());
-                // Coming up out of a colour.
-                if let Some((color, a, z)) = drawn.tint {
-                    match still_at {
-                        Some(t) => {
-                            let k = ((t - a) as f64 / (z - a).max(1) as f64).clamp(0.0, 1.0);
-                            let (r, g, b) = ((color >> 16) & 0xff, (color >> 8) & 0xff, color & 0xff);
-                            chain.push(format!(
+                for Part {
+                    frames,
+                    natural: (nw, nh),
+                    offset: (cx, cy),
+                    pose,
+                    tag,
+                } in parts
+                {
+                    let pose = &pose;
+                    let mut chain = Vec::new();
+                    if matches!(source, Source::Media(_))
+                        && let Some(pixels) = look.pixel_filters(size, &format!("x{tag}"))
+                    {
+                        chain.push(pixels);
+                    }
+                    chain.push("format=rgba".into());
+                    // Coming up out of a colour.
+                    if let Some((color, a, z)) = drawn.tint {
+                        match still_at {
+                            Some(t) => {
+                                let k = ((t - a) as f64 / (z - a).max(1) as f64).clamp(0.0, 1.0);
+                                let (r, g, b) = ((color >> 16) & 0xff, (color >> 8) & 0xff, color & 0xff);
+                                chain.push(format!(
                                 "geq=r='r(X,Y)*{k:.4}+{:.3}':g='g(X,Y)*{k:.4}+{:.3}':b='b(X,Y)*{k:.4}+{:.3}':a='alpha(X,Y)'",
                                 r as f64 * (1.0 - k),
                                 g as f64 * (1.0 - k),
                                 b as f64 * (1.0 - k)
                             ));
+                            }
+                            None => chain.push(format!(
+                                "fade=t=in:st={}:d={}:color=0x{color:06x}",
+                                fmt(a - drawn.from),
+                                fmt(z - a)
+                            )),
                         }
-                        None => chain.push(format!(
-                            "fade=t=in:st={}:d={}:color=0x{color:06x}",
-                            fmt(a - drawn.from),
-                            fmt(z - a)
-                        )),
                     }
-                }
-                // A wipe shows part of the picture; outside it, all of it.
-                let masks: Vec<String> = [&drawn.reveal, &drawn.conceal]
-                    .into_iter()
-                    .flatten()
-                    .map(|r| r.ffmpeg(&local("N")))
-                    .collect();
-                if !masks.is_empty() {
-                    let cut_window = [project.cut_into(clip.id), project.cut_out_of(clip.id)]
+                    // A wipe shows part of the picture; outside it, all of it.
+                    let masks: Vec<String> = [&drawn.reveal, &drawn.conceal]
                         .into_iter()
                         .flatten()
-                        .filter(|c| c.kind.dip().is_none())
-                        .map(|c| (c.start - drawn.from, c.end - drawn.from))
-                        .reduce(|a, z| (a.0.min(z.0), a.1.max(z.1)))
-                        .unwrap_or((0, drawn.to - drawn.from));
-                    let enable = match still_at {
-                        Some(_) => String::new(),
-                        None => format!(
-                            ":enable='between(t,{},{})'",
-                            fmt(cut_window.0 - project.frame()),
-                            fmt(cut_window.1 + project.frame())
-                        ),
+                        .map(|r| r.ffmpeg(&local("N")))
+                        .collect();
+                    if !masks.is_empty() {
+                        let cut_window = [project.cut_into(clip.id), project.cut_out_of(clip.id)]
+                            .into_iter()
+                            .flatten()
+                            .filter(|c| c.kind.dip().is_none())
+                            .map(|c| (c.start - drawn.from, c.end - drawn.from))
+                            .reduce(|a, z| (a.0.min(z.0), a.1.max(z.1)))
+                            .unwrap_or((0, drawn.to - drawn.from));
+                        let enable = match still_at {
+                            Some(_) => String::new(),
+                            None => format!(
+                                ":enable='between(t,{},{})'",
+                                fmt(cut_window.0 - project.frame()),
+                                fmt(cut_window.1 + project.frame())
+                            ),
+                        };
+                        chain.push(format!(
+                            "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*{}'{enable}",
+                            masks.join("*")
+                        ));
+                    }
+                    opacity(&mut chain, &mut prepare, drawn, pose, still_at, fps, &tag);
+                    let moving = still_at.is_none() && pose.moves();
+                    // A moving picture keeps one size and is placed anew each
+                    // frame to a fraction of a pixel. Resizing it every frame
+                    // rounded its size to whole pixels and moved its centre with
+                    // the rounding, so a slow zoom or slide jittered.
+                    let (pw, ph) = (even(nw.round()), even(nh.round()));
+                    // A clear border all round: perspective fills what lies outside
+                    // the picture with its edge pixels, so without one a picture
+                    // that shrinks or slides smeared its edges across the canvas.
+                    let (fw, fh) = (pw.max(w) + 2 * BORDER, ph.max(h) + 2 * BORDER);
+                    let fixed = match still_at {
+                        Some(t) => Some(pose.at(secs(t - clip.start))),
+                        None if !moving => Some(pose.at(0.0)),
+                        None => None,
                     };
-                    chain.push(format!(
-                        "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*{}'{enable}",
-                        masks.join("*")
-                    ));
-                }
-                // How much shows: a still knows exactly; a movie fades as
-                // its motions do, or follows keyframes and transitions frame by frame.
-                match (still_at, pose.opacity.constant()) {
-                    (Some(t), _) => {
-                        let o = drawn.pose_at(t).opacity;
-                        if o < 1.0 {
-                            chain.push(format!("colorchannelmixer=aa={:.4}", o.max(0.0)));
+                    match fixed {
+                        Some(p) => chain.push(format!(
+                            "scale={}:{}",
+                            even((nw * p.scale).round()),
+                            even((nh * p.scale).round())
+                        )),
+                        None => {
+                            chain.push(format!("scale={pw}:{ph}"));
+                            chain.push(format!("pad={fw}:{fh}:(ow-iw)/2:(oh-ih)/2:color=black@0"));
                         }
                     }
-                    (None, Some(o)) => {
-                        if o < 1.0 {
-                            chain.push(format!("colorchannelmixer=aa={:.4}", o.max(0.0)));
-                        }
-                    }
-                    (None, None)
-                        if pose.opacity == look.pose_expr(clip.duration).opacity && look.keys.opacity.is_empty() =>
-                    {
-                        if look.opacity < 1.0 {
-                            chain.push(format!("colorchannelmixer=aa={:.4}", look.opacity.max(0.0)));
-                        }
-                        for (motion, inward) in [(look.enter, true), (look.exit, false)] {
-                            if motion.kind == MotionKind::None {
-                                continue;
+                    if moving {
+                        // perspective has no clock of its own; its frame count is one.
+                        let t = local("in");
+                        let k = format!("max(0.0001,{})", pose.scale.ffmpeg(&t));
+                        let along = |by: f64| {
+                            if by.abs() < 1e-6 {
+                                String::new()
+                            } else {
+                                format!("+{by:.3}*{k}")
                             }
-                            let fd = secs(motion.duration.min(clip.duration));
-                            let head = secs(drawn.head());
-                            let st = if inward { head } else { head + secs(clip.duration) - fd };
-                            chain.push(format!(
-                                "fade=t={}:st={st:.6}:d={fd:.6}:alpha=1",
-                                if inward { "in" } else { "out" }
-                            ));
-                        }
-                    }
-                    (None, None) => {
-                        // Sent to the mixer as each frame arrives.
-                        let name = format!("colorchannelmixer@o{tag}");
-                        let count = ((drawn.to - drawn.from) as f64 * fps as f64 / SECOND as f64).ceil() as i64;
-                        let head = secs(drawn.head());
-                        let mut said: Option<String> = None;
-                        let mut commands = Vec::new();
-                        for n in 0..count.max(1) {
-                            let at = n as f64 / fps as f64;
-                            let v = format!("{:.4}", pose.opacity.eval(at - head).clamp(0.0, 1.0));
-                            if said.as_ref() != Some(&v) {
-                                commands.push(format!("{at:.6} {name} aa {v}"));
-                                said = Some(v);
-                            }
-                        }
-                        let first = pose.opacity.eval(-head).clamp(0.0, 1.0);
-                        // In a file: a long clip has a command for every frame.
-                        let file = prepare.dir.join(format!("{tag}-opacity.txt"));
-                        prepare.files.push((file.clone(), commands.join(";\n") + ";\n"));
-                        prepare.used = true;
-                        chain.push(format!("sendcmd=f='{}'", file.to_string_lossy().replace('\'', "")));
-                        chain.push(format!("{name}=aa={first:.4}"));
-                    }
-                }
-                let moving = still_at.is_none() && pose.moves();
-                // A moving picture keeps one size and is placed anew each
-                // frame to a fraction of a pixel. Resizing it every frame
-                // rounded its size to whole pixels and moved its centre with
-                // the rounding, so a slow zoom or slide jittered.
-                let (pw, ph) = (even(nw.round()), even(nh.round()));
-                // A clear border all round: perspective fills what lies outside
-                // the picture with its edge pixels, so without one a picture
-                // that shrinks or slides smeared its edges across the canvas.
-                let (fw, fh) = (pw.max(w) + 2 * BORDER, ph.max(h) + 2 * BORDER);
-                let fixed = match still_at {
-                    Some(t) => Some(drawn.pose_at(t)),
-                    None if !moving => Some(drawn.pose_at(clip.start)),
-                    None => None,
-                };
-                match fixed {
-                    Some(p) => chain.push(format!(
-                        "scale={}:{}",
-                        even((nw * p.scale).round()),
-                        even((nh * p.scale).round())
-                    )),
-                    None => {
-                        chain.push(format!("scale={pw}:{ph}"));
-                        chain.push(format!("pad={fw}:{fh}:(ow-iw)/2:(oh-ih)/2:color=black@0"));
-                    }
-                }
-                if moving {
-                    // perspective has no clock of its own; its frame count is one.
-                    let t = local("in");
-                    let k = format!("max(0.0001,{})", pose.scale.ffmpeg(&t));
-                    let along = |by: f64| {
-                        if by.abs() < 1e-6 {
-                            String::new()
-                        } else {
-                            format!("+{by:.3}*{k}")
-                        }
-                    };
-                    // The picture's centre, in the frame it moves in.
-                    let cx_at = format!("({fw}/2+{}*{w}{})", pose.x.ffmpeg(&t), along(cx));
-                    let cy_at = format!("({fh}/2+{}*{h}{})", pose.y.ffmpeg(&t), along(cy));
-                    let (hx, hy) = (format!("{}*{k}", fw as f64 / 2.0), format!("{}*{k}", fh as f64 / 2.0));
-                    chain.push("format=yuva444p".into());
-                    chain.push(format!(
-                        "perspective=sense=destination:interpolation=cubic:eval=frame:\
+                        };
+                        // The picture's centre, in the frame it moves in.
+                        let cx_at = format!("({fw}/2+{}*{w}{})", pose.x.ffmpeg(&t), along(cx));
+                        let cy_at = format!("({fh}/2+{}*{h}{})", pose.y.ffmpeg(&t), along(cy));
+                        let (hx, hy) = (format!("{}*{k}", fw as f64 / 2.0), format!("{}*{k}", fh as f64 / 2.0));
+                        chain.push("format=yuva444p".into());
+                        chain.push(format!(
+                            "perspective=sense=destination:interpolation=cubic:eval=frame:\
                          x0='{cx_at}-{hx}':y0='{cy_at}-{hy}':x1='{cx_at}+{hx}':y1='{cy_at}-{hy}':\
                          x2='{cx_at}-{hx}':y2='{cy_at}+{hy}':x3='{cx_at}+{hx}':y3='{cy_at}+{hy}'"
+                        ));
+                    }
+                    let placed_at = if still_at.is_some() { 0 } else { drawn.from };
+                    let start = fmt(placed_at);
+                    // Over a see-through canvas the overlay negotiates its format
+                    // from its inputs: a picture that changes size frame to frame
+                    // only stays right as RGBA (as yuva420p it froze at its first size).
+                    chain.push(format!(
+                        "format={},setpts=PTS-STARTPTS+{start}/TB",
+                        if layer { "rgba" } else { "yuva420p" }
                     ));
-                }
-                let placed_at = if still_at.is_some() { 0 } else { drawn.from };
-                let start = fmt(placed_at);
-                // Over a see-through canvas the overlay negotiates its format
-                // from its inputs: a picture that changes size frame to frame
-                // only stays right as RGBA (as yuva420p it froze at its first size).
-                chain.push(format!(
-                    "format={},setpts=PTS-STARTPTS+{start}/TB",
-                    if layer { "rgba" } else { "yuva420p" }
-                ));
-                filters.push(format!("[{frames}]{}[v{tag}]", chain.join(",")));
+                    filters.push(format!("[{frames}]{}[v{tag}]", chain.join(",")));
 
-                let end = fmt(if still_at.is_some() { frame } else { drawn.to });
-                // A cropped picture's remains stay where they were, scaled with it.
-                let (x, y) = if moving {
-                    // Already placed in its frame.
-                    (format!("-{}", (fw - w) / 2), format!("-{}", (fh - h) / 2))
-                } else {
-                    let p = fixed.expect("a still picture has a pose");
-                    let shift = |by: f64| {
-                        if by.abs() < 1e-6 {
-                            String::new()
-                        } else {
-                            format!("+{:.3}", by * p.scale)
-                        }
+                    let end = fmt(if still_at.is_some() { frame } else { drawn.to });
+                    // A cropped picture's remains stay where they were, scaled with it.
+                    let (x, y) = if moving {
+                        // Already placed in its frame.
+                        (format!("-{}", (fw - w) / 2), format!("-{}", (fh - h) / 2))
+                    } else {
+                        let p = fixed.expect("a still picture has a pose");
+                        let shift = |by: f64| {
+                            if by.abs() < 1e-6 {
+                                String::new()
+                            } else {
+                                format!("+{:.3}", by * p.scale)
+                            }
+                        };
+                        (
+                            format!("(W-w)/2+{:.6}*W{}", p.x, shift(cx)),
+                            format!("(H-h)/2+{:.6}*H{}", p.y, shift(cy)),
+                        )
                     };
-                    (
-                        format!("(W-w)/2+{:.6}*W{}", p.x, shift(cx)),
-                        format!("(H-h)/2+{:.6}*H{}", p.y, shift(cy)),
-                    )
-                };
-                filters.push(format!(
-                    "[{picture}][v{tag}]overlay=x='{x}':y='{y}':{}eof_action=pass:\
+                    filters.push(format!(
+                        "[{picture}][v{tag}]overlay=x='{x}':y='{y}':{}eof_action=pass:\
                      enable='between(t,{start},{end})'[p{tag}]",
-                    // Over a see-through canvas, keep what is see-through.
-                    if layer { "format=auto:" } else { "" }
-                ));
-                picture = format!("p{tag}");
+                        // Over a see-through canvas, keep what is see-through.
+                        if layer { "format=auto:" } else { "" }
+                    ));
+                    picture = format!("p{tag}");
+                }
 
                 if sounds_out && let (Some(shared), Some(media)) = (shared, audio_media) {
                     sounds.push(clip_sound(
@@ -560,8 +655,18 @@ fn build(
         ),
         None => (String::new(), String::new()),
     };
+    // Bars over everything, for a letterboxed movie (not a symbol's layer).
+    let bars = match project.letterbox_bars().filter(|_| !layer) {
+        Some((tb, 0)) => format!(
+            "drawbox=x=0:y=0:w=iw:h={tb}:color=black:t=fill,drawbox=x=0:y=ih-{tb}:w=iw:h={tb}:color=black:t=fill,"
+        ),
+        Some((0, lr)) => format!(
+            "drawbox=x=0:y=0:w={lr}:h=ih:color=black:t=fill,drawbox=x=iw-{lr}:y=0:w={lr}:h=ih:color=black:t=fill,"
+        ),
+        _ => String::new(),
+    };
     filters.push(format!(
-        "[{picture}]{cut}format={}[vout]",
+        "[{picture}]{bars}{cut}format={}[vout]",
         if layer { "yuva444p10le" } else { "yuv420p" }
     ));
     if out.is_some() {
@@ -676,6 +781,75 @@ fn scratch_dir() -> PathBuf {
 
 /// The clear margin around a moving picture, in pixels each side.
 const BORDER: u32 = 2;
+
+/// The filters that set how much of a clip shows: a still knows exactly; a
+/// movie fades as its motions do, or follows keyframes and transitions frame
+/// by frame (commands in a file, sent to a mixer named after `tag`).
+fn opacity(
+    chain: &mut Vec<String>,
+    prepare: &mut Prepare,
+    drawn: &crate::compose::Drawn,
+    pose: &crate::look::PoseExpr,
+    still_at: Option<Time>,
+    fps: u32,
+    tag: &str,
+) {
+    let clip = drawn.clip;
+    let look = &clip.look;
+    match (still_at, pose.opacity.constant()) {
+        (Some(t), _) => {
+            let o = pose.at(secs(t - clip.start)).opacity;
+            if o < 1.0 {
+                chain.push(format!("colorchannelmixer=aa={:.4}", o.max(0.0)));
+            }
+        }
+        (None, Some(o)) => {
+            if o < 1.0 {
+                chain.push(format!("colorchannelmixer=aa={:.4}", o.max(0.0)));
+            }
+        }
+        (None, None) if pose.opacity == look.pose_expr(clip.duration).opacity && look.keys.opacity.is_empty() => {
+            if look.opacity < 1.0 {
+                chain.push(format!("colorchannelmixer=aa={:.4}", look.opacity.max(0.0)));
+            }
+            for (motion, inward) in [(look.enter, true), (look.exit, false)] {
+                if motion.kind == MotionKind::None {
+                    continue;
+                }
+                let fd = secs(motion.duration.min(clip.duration));
+                let head = secs(drawn.head());
+                let st = if inward { head } else { head + secs(clip.duration) - fd };
+                chain.push(format!(
+                    "fade=t={}:st={st:.6}:d={fd:.6}:alpha=1",
+                    if inward { "in" } else { "out" }
+                ));
+            }
+        }
+        (None, None) => {
+            // Sent to the mixer as each frame arrives.
+            let name = format!("colorchannelmixer@o{tag}");
+            let count = ((drawn.to - drawn.from) as f64 * fps as f64 / SECOND as f64).ceil() as i64;
+            let head = secs(drawn.head());
+            let mut said: Option<String> = None;
+            let mut commands = Vec::new();
+            for n in 0..count.max(1) {
+                let at = n as f64 / fps as f64;
+                let v = format!("{:.4}", pose.opacity.eval(at - head).clamp(0.0, 1.0));
+                if said.as_ref() != Some(&v) {
+                    commands.push(format!("{at:.6} {name} aa {v}"));
+                    said = Some(v);
+                }
+            }
+            let first = pose.opacity.eval(-head).clamp(0.0, 1.0);
+            // In a file: a long clip has a command for every frame.
+            let file = prepare.dir.join(format!("{tag}-opacity.txt"));
+            prepare.files.push((file.clone(), commands.join(";\n") + ";\n"));
+            prepare.used = true;
+            chain.push(format!("sendcmd=f='{}'", file.to_string_lossy().replace('\'', "")));
+            chain.push(format!("{name}=aa={first:.4}"));
+        }
+    }
+}
 
 /// How much of a reversed clip's source each of its pieces holds: reversing
 /// keeps a whole piece in memory, so a long clip goes backwards in pieces.
@@ -1027,6 +1201,7 @@ mod tests {
                 path: PathBuf::from(format!("/g/{}.png", clip.id.0)),
                 width: 600,
                 height: 120,
+                parts: None,
             })
         }
     }
@@ -1045,6 +1220,7 @@ mod tests {
             source: PathBuf::new(),
             recipe: None,
             content: None,
+            clicks: Vec::new(),
         })
     }
 
@@ -1069,6 +1245,7 @@ mod tests {
             source: PathBuf::new(),
             recipe: None,
             content: None,
+            clicks: Vec::new(),
         });
         p.append_clip(v);
         p.insert_clip(image, 0, SECOND);
