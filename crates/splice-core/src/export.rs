@@ -890,7 +890,16 @@ fn clip_frames(
             .collect(),
     ));
     let mut join = strings(&["-hide_banner", "-nostdin", "-y", "-loglevel", "error"]);
-    join.extend(strings(&["-f", "concat", "-safe", "0", "-i", &list.to_string_lossy(), "-c", "copy"]));
+    join.extend(strings(&[
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        &list.to_string_lossy(),
+        "-c",
+        "copy",
+    ]));
     join.push(joined.to_string_lossy().to_string());
     prepare.commands.push(join);
     prepare.used = true;
