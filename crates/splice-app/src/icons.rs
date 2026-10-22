@@ -109,6 +109,19 @@ fn icon(name: &str) -> Option<&'static str> {
         "layers" => {
             r#"<path d="m12 3.5 9 4.5-9 4.5-9-4.5z"/><path d="m3 12 9 4.5 9-4.5"/><path d="m3 16 9 4.5 9-4.5"/>"#
         }
+        // A keyframe: hollow where one could go, filled where one is.
+        "key" => r#"<path d="M12 4.5 19.5 12 12 19.5 4.5 12z"/>"#,
+        "key-on" => r#"<path d="M12 4.5 19.5 12 12 19.5 4.5 12z" fill="black"/>"#,
+        "chevron-left" => r#"<path d="m14.5 7-5 5 5 5"/>"#,
+        "speed" => {
+            r#"<path d="M4.5 16.5a8 8 0 1 1 15 0"/><path d="m12 13 4-4.5"/><circle cx="12" cy="13.5" r="1.2" fill="black"/>"#
+        }
+        "reverse" => r#"<path d="M9 7 4 12l5 5"/><path d="M4 12h12a4 4 0 0 0 0-8h-2"/>"#,
+        "freeze" => r#"<rect x="4.5" y="5.5" width="15" height="13" rx="2"/><path d="M10 9.5v5M14 9.5v5"/>"#,
+        "transition" => r#"<path d="M4 6v12l8-6z"/><path d="M20 6v12l-8-6z"/>"#,
+        "colour" => {
+            r#"<path d="M12 3.5c3.5 4.2 6 7.4 6 10.5a6 6 0 0 1-12 0c0-3.1 2.5-6.3 6-10.5z"/><path d="M9 14.5a3 3 0 0 0 3 3"/>"#
+        }
         _ => return None,
     })
 }

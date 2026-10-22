@@ -56,7 +56,29 @@ Titles, colours and looks
                 [--feather F] [--invert/--no-invert]   (mask numbers are fractions of the clip's frame)
           --crop-left F --crop-right F --crop-top F --crop-bottom F | --crop none
                 (cut edges away, fractions of the picture; it keeps its size and what remains stays put)
+          --grade none|warm|cool|vivid|muted|faded|film|teal-orange|mono|noir   (a ready-made look)
+          --exposure F (stops, −1 to 1) --contrast F --saturation F --warmth F --tint F (each −1 to 1)
+                (colour, for video and pictures; `look --all` gives every video and picture the same)
   C is #rrggbb, #rrggbbaa or a name: white, black, paper, ink, vermilion, gold, green, blue, clear.
+
+Transitions, speed and keyframes
+  transition --clip C --kind KIND [--for S] | --none
+                                 the way into clip C from the clip before it (centred on the cut), or,
+                                 with nothing just before, in over what is beneath. KIND: dissolve,
+                                 dip-black, dip-white, wipe-left/right/up/down, push-left/right/up/down,
+                                 zoom. Default length 0.6s
+  transition --all --kind KIND [--for S] [--track N]
+                                 the same at every cut between two clips (on track N)
+  speed --clip C [--rate R] [--reverse|--forwards]
+                                 play at R (2 is twice as fast, 0.5 half; 0.1 to 16): the clip gets
+                                 shorter or longer over the same source, and what follows on its track
+                                 moves to match. Sound keeps its pitch
+  freeze --clip C [--at T] [--for S]       hold the frame at T (default: the playhead) for S (default 2)
+  keyframe --clip C --at T [--x F] [--y F] [--scale F] [--opacity F] [--ease EASE]
+                                 set values at timeline time T; between keyframes they glide. EASE
+                                 (from this keyframe to the next): linear, in, out, in-out (default), hold
+  keyframe --clip C --at T --drop [--prop x|y|scale|opacity]   take keyframes at T away
+  keyframe --clip C --clear [--prop NAME]  take them all away; values stay as they are at the playhead
 
 Music (a score: instruments and notes, played by General MIDI sounds)
   score new [--file score.json] [--name N] [--at T] [--track N] [--wait]
@@ -425,12 +447,13 @@ fn build(args: &[String]) -> Result<Value, String> {
         let mut next = |name: &str| rest.next().ok_or(format!("{name} needs a value"));
         match arg.as_str() {
             "--font" | "--color" | "--box" | "--align" | "--enter" | "--exit" | "--drift" | "--key" | "--mask"
-            | "--query" | "--crop" => {
+            | "--query" | "--crop" | "--grade" | "--ease" | "--prop" => {
                 request.insert(arg[2..].into(), json!(value(next(arg)?)?));
             }
             "--size" | "--x" | "--y" | "--scale" | "--opacity" | "--similarity" | "--blend" | "--feather"
             | "--mask-x" | "--mask-y" | "--mask-width" | "--mask-height" | "--enter-for" | "--exit-for"
-            | "--crop-left" | "--crop-top" | "--crop-right" | "--crop-bottom" => {
+            | "--crop-left" | "--crop-top" | "--crop-right" | "--crop-bottom" | "--exposure" | "--contrast"
+            | "--saturation" | "--warmth" | "--tint" | "--rate" => {
                 let raw = next(arg)?;
                 let v = match raw.parse::<f64>() {
                     Ok(v) => json!(v),
@@ -517,8 +540,11 @@ fn build(args: &[String]) -> Result<Value, String> {
                 let v: f64 = next(arg)?.parse().map_err(|_| format!("{arg} expects points"))?;
                 request.insert(arg[2..].into(), json!(v));
             }
-            "--ripple" | "--wait" | "--keep" | "--none" | "--all" | "--reset" | "--clear" | "--seam" => {
+            "--ripple" | "--wait" | "--keep" | "--none" | "--all" | "--reset" | "--clear" | "--seam" | "--drop" => {
                 request.insert(arg[2..].into(), json!(true));
+            }
+            "--reverse" | "--forwards" => {
+                request.insert("reverse".into(), json!(arg == "--reverse"));
             }
             "--draft" | "--high" => {
                 request.insert("quality".into(), json!(&arg[2..]));
@@ -539,7 +565,7 @@ fn build(args: &[String]) -> Result<Value, String> {
     let cmd = match command.as_str() {
         "status" | "read" | "versions" | "add" | "move" | "trim" | "split" | "delete" | "duplicate" | "volume"
         | "track" | "canvas" | "undo" | "redo" | "play" | "pause" | "select" | "save" | "say" | "wait" | "text"
-        | "color" | "style" | "look" | "fonts" => command.as_str(),
+        | "color" | "style" | "look" | "fonts" | "transition" | "speed" | "freeze" | "keyframe" => command.as_str(),
         "restore" => {
             if let Some(id) = words.first().and_then(|w| w.parse::<u64>().ok()) {
                 request.insert("version".into(), json!(id));

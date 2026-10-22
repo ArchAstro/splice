@@ -104,6 +104,8 @@ pub enum Hit {
     StoryEmpty,
     Gutter(usize, Option<GutterButton>),
     Body(ClipId),
+    /// The tab of the transition into a clip.
+    Transition(ClipId),
     Start(ClipId),
     End(ClipId),
     Empty,
@@ -144,6 +146,14 @@ pub fn hit(project: &Project, view: &View, p: Point<f32>) -> Hit {
     if track >= n || !within_row {
         return Hit::Empty;
     }
+    // A transition's tab sits over the cut, above the clips' edges.
+    for clip in &project.tracks[track].clips {
+        if let Some(cut) = project.cut_into(clip.id)
+            && transition_tab(view, &cut, y0).contains(&point(px(p.x), px(p.y)))
+        {
+            return Hit::Transition(clip.id);
+        }
+    }
     for clip in &project.tracks[track].clips {
         let (x0, x1) = (view.x(clip.start), view.x(clip.end()));
         if p.x < x0 || p.x >= x1 {
@@ -159,6 +169,21 @@ pub fn hit(project: &Project, view: &View, p: Point<f32>) -> Hit {
         };
     }
     Hit::Empty
+}
+
+/// Where a transition's tab is drawn on a row at `y` (timeline coordinates):
+/// across the stretch it takes, at least wide enough to hold.
+pub fn transition_tab(view: &View, cut: &splice_core::transition::Cut, y: f32) -> Bounds<Pixels> {
+    let (a, z) = (view.x(cut.start), view.x(cut.end));
+    let width = (z - a).max(16.0);
+    let middle = (a + z) / 2.0;
+    bounds(point(px(middle - width / 2.0), px(y + 4.0)), size(px(width), px(16.0)))
+}
+
+/// A speed as people say it: 2, 0.5, 1.25.
+pub fn speed_label(speed: f64) -> String {
+    let s = format!("{speed:.2}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// The nearest snap target within reach of any of `candidates`, as a shift.
@@ -350,13 +375,24 @@ pub fn paint(b: Bounds<Pixels>, frame: Frame, window: &mut Window, cx: &mut App)
                         rect(window, cb, Theme::scrim(), 5.0);
                     }
                     // Name on a quiet backdrop.
-                    let label: String = if art.offline {
+                    let mut label: String = if art.offline {
                         format!("{} (offline)", art.name)
                     } else if art.outdated {
                         format!("{} · update", art.name)
                     } else {
                         art.name.to_string()
                     };
+                    // How it plays, when that differs.
+                    if clip.frozen {
+                        label.push_str(" · held");
+                    } else {
+                        if clip.speed != 1.0 {
+                            label.push_str(&format!(" · {}×", speed_label(clip.speed)));
+                        }
+                        if clip.reverse {
+                            label.push_str(" · reversed");
+                        }
+                    }
                     // An out-of-date use shows a dot in its corner.
                     if art.outdated && x1 - x0 > 16.0 {
                         rect(window, area(x1 - 11.0, y + 5.0, 6.0, 6.0), Theme::accent(), 3.0);
@@ -401,6 +437,67 @@ pub fn paint(b: Bounds<Pixels>, frame: Frame, window: &mut Window, cx: &mut App)
                     );
                 } else {
                     outline(window, cb, Theme::crust(), 1.0, 5.0);
+                }
+                // Keyframes of a chosen clip, as small marks along its foot.
+                if selected {
+                    for k in clip.look.keys.moments() {
+                        if k < 0 || k > clip.duration {
+                            continue;
+                        }
+                        let kx = view.x(clip.start + k);
+                        rect(window, area(kx - 3.5, y + ROW - 9.0, 7.0, 7.0), Theme::text(), 2.0);
+                        outline(
+                            window,
+                            area(kx - 3.5, y + ROW - 9.0, 7.0, 7.0),
+                            Theme::accent(),
+                            1.5,
+                            2.0,
+                        );
+                    }
+                }
+            }
+            // Transitions: a tab across each cut, the length they take.
+            for clip in &track.clips {
+                let Some(cut) = project.cut_into(clip.id) else { continue };
+                let tab = transition_tab(&view, &cut, y);
+                let (tx, tw) = (f32::from(tab.origin.x), f32::from(tab.size.width));
+                if tx + tw < GUTTER || tx > w {
+                    continue;
+                }
+                let tab = bounds(at(tx, f32::from(tab.origin.y)), tab.size);
+                let chosen = frame.selection.contains(&clip.id);
+                rect(window, tab, if chosen { Theme::accent() } else { Theme::text() }, 4.0);
+                outline(window, tab, Theme::crust(), 1.0, 4.0);
+                let ink = Theme::ground();
+                let label = if tw > 58.0 {
+                    cut.kind.label().to_string()
+                } else {
+                    String::new()
+                };
+                if label.is_empty() {
+                    // Two marks, like a bow tie.
+                    rect(
+                        window,
+                        area(tx + tw / 2.0 - 3.0, f32::from(tab.origin.y - o.y) + 4.0, 2.0, 8.0),
+                        ink,
+                        1.0,
+                    );
+                    rect(
+                        window,
+                        area(tx + tw / 2.0 + 1.0, f32::from(tab.origin.y - o.y) + 4.0, 2.0, 8.0),
+                        ink,
+                        1.0,
+                    );
+                } else {
+                    text(
+                        window,
+                        cx,
+                        &label,
+                        at(tx + 6.0, f32::from(tab.origin.y - o.y) + 1.5),
+                        9.5,
+                        ink,
+                        ui.clone(),
+                    );
                 }
             }
         }
@@ -639,7 +736,7 @@ fn paint_clip_art(
             }
             let image = match art.kind {
                 Some(MediaKind::Video) => {
-                    let source = clip.source_in + view.px_to_time(tx - x0 + tile_w / 2.0);
+                    let source = clip.source_at(clip.start + view.px_to_time(tx - x0 + tile_w / 2.0));
                     let index = art.strip.partition_point(|(t, _)| *t <= source).saturating_sub(1);
                     art.strip
                         .get(index)
@@ -668,14 +765,19 @@ fn paint_clip_art(
         let mid = top + height / 2.0;
         let mut x = visible_from;
         while x < visible_to {
-            let source = clip.source_in + view.px_to_time(x - x0);
-            let span = view.px_to_time(2.0).max(PEAK_BUCKET);
+            // What plays here, backwards or at speed; a held frame is silent.
+            let (a, z) = (
+                clip.source_at(clip.start + view.px_to_time(x - x0)),
+                clip.source_at(clip.start + view.px_to_time(x + 2.0 - x0)),
+            );
+            let (source, span) = (a.min(z), (z - a).abs().max(PEAK_BUCKET));
             let from = (source / PEAK_BUCKET).max(0) as usize;
             let to = (((source + span) / PEAK_BUCKET) as usize)
                 .max(from + 1)
                 .min(peaks.len());
             let peak = peaks.get(from..to).and_then(|s| s.iter().max()).copied().unwrap_or(0) as f32 / 255.0;
-            let bar = (peak * clip.volume.min(1.5) * height).clamp(1.0, height);
+            let loud = if clip.frozen { 0.0 } else { clip.volume.min(1.5) };
+            let bar = (peak * loud * height).clamp(1.0, height);
             rect(window, area(x, mid - bar / 2.0, 1.4, bar), Theme::wave(), 0.0);
             x += 2.0;
         }

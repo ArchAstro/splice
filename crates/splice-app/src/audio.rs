@@ -13,8 +13,27 @@ pub struct Voice {
     pub length: u64,
     /// Frame in the PCM the clip begins at.
     pub source_in: u64,
+    /// PCM frames per frame of playback: 1 normally; a clip whose retimed
+    /// sound is not ready yet plays its own faster or slower (or, negative,
+    /// backwards), pitch and all.
+    pub step: f64,
     pub volume: f32,
     pub pcm: Arc<Pcm>,
+    /// Rising and falling across transitions: timeline frames, start and end.
+    pub fade_in: Option<(u64, u64)>,
+    pub fade_out: Option<(u64, u64)>,
+}
+
+impl Voice {
+    /// Quarter-sine fades, as export makes them (`afade` with `qsin`).
+    fn gain(&self, t: u64) -> f32 {
+        let ramp = |(a, z): (u64, u64), rising: bool| {
+            let p = (t.saturating_sub(a) as f64 / (z.saturating_sub(a)).max(1) as f64).clamp(0.0, 1.0);
+            let p = if rising { p } else { 1.0 - p };
+            (p * std::f64::consts::FRAC_PI_2).sin() as f32
+        };
+        self.fade_in.map_or(1.0, |f| ramp(f, true)) * self.fade_out.map_or(1.0, |f| ramp(f, false))
+    }
 }
 
 #[derive(Default)]
@@ -162,10 +181,16 @@ fn fill<S: Copy + Default>(mix: &Mutex<Mix>, out: &mut [S], channels: usize, con
             if t < voice.start || t >= voice.start + voice.length {
                 continue;
             }
-            let index = (voice.source_in + (t - voice.start)) as usize * 2;
+            let along = (t - voice.start) as f64 * voice.step;
+            let frame = voice.source_in as f64 + along;
+            if frame < 0.0 {
+                continue;
+            }
+            let index = frame as usize * 2;
             if index + 1 < voice.pcm.samples.len() {
-                left += voice.pcm.samples[index] as f32 / 32768.0 * voice.volume;
-                right += voice.pcm.samples[index + 1] as f32 / 32768.0 * voice.volume;
+                let gain = voice.volume * voice.gain(t);
+                left += voice.pcm.samples[index] as f32 / 32768.0 * gain;
+                right += voice.pcm.samples[index + 1] as f32 / 32768.0 * gain;
             }
         }
         let (left, right) = mix.limiter.apply(left, right);

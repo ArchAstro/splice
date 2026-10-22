@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 /// Version of the project JSON. Bump it and add a step to `migrate` when the
 /// shape changes.
-pub const SCHEMA: u32 = 5;
+pub const SCHEMA: u32 = 6;
 
 /// How long a still image runs when it is first placed.
 pub const IMAGE_DURATION: Time = 5 * SECOND;
@@ -177,11 +177,39 @@ pub struct Clip {
     /// together.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<crate::symbol::Tag>,
+    /// How fast the source plays: 2 is twice as fast (and the clip half as long).
+    #[serde(default = "one64", skip_serializing_if = "is_one")]
+    pub speed: f64,
+    /// Plays its stretch of the source backwards.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reverse: bool,
+    /// Holds one frame (at `source_in`) for as long as the clip lasts.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub frozen: bool,
+    /// The way in from the clip before it (or from what is beneath).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition: Option<crate::transition::Transition>,
 }
 
 fn is_default(look: &Look) -> bool {
     *look == Look::default()
 }
+
+fn one64() -> f64 {
+    1.0
+}
+
+fn is_one(v: &f64) -> bool {
+    *v == 1.0
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+/// The slowest and fastest a clip plays.
+pub const SLOWEST: f64 = 0.1;
+pub const FASTEST: f64 = 16.0;
 
 /// Content Splice draws itself.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -276,6 +304,25 @@ fn one() -> f32 {
 }
 
 impl Clip {
+    /// A plain clip of `media`: as it is, at full volume, playing forwards.
+    pub fn new(id: ClipId, media: MediaId, start: Time, source_in: Time, duration: Time) -> Clip {
+        Clip {
+            id,
+            media,
+            start,
+            source_in,
+            duration,
+            volume: 1.0,
+            look: Look::default(),
+            generator: None,
+            placeholder: None,
+            speed: 1.0,
+            reverse: false,
+            frozen: false,
+            transition: None,
+        }
+    }
+
     pub fn end(&self) -> Time {
         self.start + self.duration
     }
@@ -284,9 +331,42 @@ impl Clip {
         self.start <= t && t < self.end()
     }
 
-    /// The source time shown at timeline time `t`.
+    /// How much source passes per second of timeline: its speed, or 0 when frozen.
+    pub fn rate(&self) -> f64 {
+        if self.frozen { 0.0 } else { self.speed }
+    }
+
+    /// How much of the source the clip plays.
+    pub fn span(&self) -> Time {
+        Self::scaled(self.duration, self.rate())
+    }
+
+    /// Where the stretch of source it plays ends.
+    pub fn source_out(&self) -> Time {
+        self.source_in + self.span()
+    }
+
+    fn scaled(t: Time, k: f64) -> Time {
+        (t as f64 * k).round() as Time
+    }
+
+    /// The source time shown at timeline time `t`. Outside the clip (a
+    /// transition drawing it early or late) it carries on the same way.
     pub fn source_at(&self, t: Time) -> Time {
-        self.source_in + (t - self.start)
+        let local = Self::scaled(t - self.start, self.rate());
+        if self.frozen {
+            self.source_in
+        } else if self.reverse {
+            // The last frame first: just before where its stretch ends.
+            self.source_out() - 1 - local
+        } else {
+            self.source_in + local
+        }
+    }
+
+    /// Whether this clip changes how its source plays.
+    pub fn is_retimed(&self) -> bool {
+        self.speed != 1.0 || self.reverse || self.frozen
     }
 }
 
@@ -523,18 +603,22 @@ impl Project {
             {
                 // A clip of the whole thing stays the whole thing, as far as
                 // the next clip allows.
-                let whole = clip.source_in == 0 && (clip.duration - old).abs() <= frame;
+                let whole = clip.source_in == 0 && (clip.span() - old).abs() <= frame;
                 clip.source_in = clip.source_in.min((duration - frame).max(0));
+                if clip.frozen {
+                    continue;
+                }
                 let room = starts
                     .iter()
                     .copied()
                     .filter(|s| *s > clip.start)
                     .min()
                     .map_or(Time::MAX, |s| s - clip.start);
+                let timeline = |source: Time| (source as f64 / clip.speed).floor() as Time;
                 clip.duration = if whole {
-                    duration.min(room)
+                    timeline(duration).min(room)
                 } else {
-                    clip.duration.min(duration - clip.source_in)
+                    clip.duration.min(timeline(duration - clip.source_in))
                 }
                 .max(frame);
             }
@@ -612,17 +696,7 @@ impl Project {
             return None;
         }
         let id = ClipId(self.alloc());
-        let clip = Clip {
-            id,
-            media,
-            start: start.max(0),
-            source_in: 0,
-            duration,
-            volume: 1.0,
-            look: Look::default(),
-            generator: None,
-            placeholder: None,
-        };
+        let clip = Clip::new(id, media, start.max(0), 0, duration);
         self.place(clip, track);
         Some(id)
     }
@@ -631,15 +705,8 @@ impl Project {
     pub fn insert_generated(&mut self, generator: Generator, track: usize, start: Time, duration: Time) -> ClipId {
         let id = ClipId(self.alloc());
         let clip = Clip {
-            id,
-            media: MediaId(0),
-            start: start.max(0),
-            source_in: 0,
-            duration: duration.max(self.frame()),
-            volume: 1.0,
-            look: Look::default(),
             generator: Some(generator),
-            placeholder: None,
+            ..Clip::new(id, MediaId(0), start.max(0), 0, duration.max(self.frame()))
         };
         self.place(clip, track);
         id
@@ -704,20 +771,30 @@ impl Project {
         let min_len = self.frame();
         let track = &self.tracks[slot.track];
         let clip = &track.clips[slot.index];
-        let timed = self.media(clip.media).is_some_and(Media::is_timed);
+        let media_length = self.media(clip.media).filter(|m| m.is_timed()).map(|m| m.duration);
+        let timed = media_length.is_some() && !clip.frozen;
         let previous_end = slot.index.checked_sub(1).map_or(0, |i| track.clips[i].end());
         let mut lower = previous_end.max(0);
-        if timed {
-            lower = lower.max(clip.start - clip.source_in);
+        if let Some(length) = media_length.filter(|_| timed) {
+            let timeline = |source: Time| (source as f64 / clip.speed).floor() as Time;
+            lower = lower.max(if clip.reverse {
+                // The left edge shows where its stretch ends, which the media bounds.
+                clip.end() - timeline(length - clip.source_in)
+            } else {
+                clip.start - timeline(clip.source_in)
+            });
         }
         let t = t.clamp(lower, clip.end() - min_len);
         let clip = &mut self.tracks[slot.track].clips[slot.index];
         let delta = t - clip.start;
+        let out = clip.source_out();
         clip.start = t;
         clip.duration -= delta;
-        if timed {
-            clip.source_in += delta;
+        if timed && !clip.reverse {
+            clip.source_in = (out - clip.span()).max(0);
         }
+        // Keyframes stay with the moments they were set on.
+        clip.look.keys.shift(-delta);
     }
 
     /// Moves a clip's right edge to `t`.
@@ -748,12 +825,27 @@ impl Project {
             return;
         }
         let mut upper = next_start;
-        if let Some(media) = self.media(clip.media).filter(|m| m.is_timed()) {
-            upper = upper.min(clip.start + media.duration - clip.source_in);
+        let timed = self.media(clip.media).filter(|m| m.is_timed() && !clip.frozen);
+        if let Some(media) = timed {
+            let timeline = |source: Time| (source as f64 / clip.speed).floor() as Time;
+            upper = upper.min(
+                clip.start
+                    + if clip.reverse {
+                        // The right edge shows where its stretch starts, which can reach 0.
+                        timeline(clip.source_out())
+                    } else {
+                        timeline(media.duration - clip.source_in)
+                    },
+            );
         }
+        let timed = timed.is_some();
         let t = t.clamp(clip.start + min_len, upper.max(clip.start + min_len));
         let clip = &mut self.tracks[slot.track].clips[slot.index];
+        let out = clip.source_out();
         clip.duration = t - clip.start;
+        if timed && clip.reverse {
+            clip.source_in = (out - clip.span()).max(0);
+        }
     }
 
     /// Cuts a clip in two at `t`; returns the right half.
@@ -764,24 +856,34 @@ impl Project {
         if t < clip.start + min_len || t > clip.end() - min_len {
             return None;
         }
-        let timed = self.media(clip.media).is_some_and(Media::is_timed);
+        let timed = self.media(clip.media).is_some_and(Media::is_timed) && !clip.frozen;
         let new_id = ClipId(self.alloc());
         let clip = &mut self.tracks[slot.track].clips[slot.index];
         let left = t - clip.start;
+        let whole = clip.duration;
         let mut right = Clip {
             id: new_id,
-            media: clip.media,
             start: t,
-            source_in: if timed { clip.source_in + left } else { 0 },
-            duration: clip.duration - left,
-            volume: clip.volume,
-            look: clip.look.clone(),
-            generator: clip.generator.clone(),
-            placeholder: clip.placeholder.clone(),
+            duration: whole - left,
+            // A cut in the middle of a clip has no transition.
+            transition: None,
+            ..clip.clone()
         };
-        // The animation in stays with the left half, the one out with the right.
+        if timed {
+            let source = |t: Time| (t as f64 * clip.speed).round() as Time;
+            if clip.reverse {
+                // Backwards, the left half plays the later part of the source.
+                clip.source_in += source(whole - left);
+            } else {
+                right.source_in = clip.source_in + source(left);
+            }
+        }
+        // The animation in stays with the left half, the one out with the right;
+        // keyframes go with the half they are in, each half keeping its ends.
         right.look.enter.kind = MotionKind::None;
         clip.look.exit.kind = MotionKind::None;
+        right.look.keys = clip.look.keys.part(left, whole);
+        clip.look.keys = clip.look.keys.part(0, left);
         clip.duration = left;
         self.tracks[slot.track].clips.insert(slot.index + 1, right);
         Some(new_id)
@@ -852,14 +954,143 @@ impl Project {
         copies
     }
 
+    /// Moves every clip on `track` that starts at or after `from` by `dt`.
+    fn ripple(&mut self, track: usize, from: Time, dt: Time, except: ClipId) {
+        if dt == 0 {
+            return;
+        }
+        for clip in &mut self.tracks[track].clips {
+            if clip.id != except && clip.start >= from {
+                clip.start += dt;
+            }
+        }
+        self.tracks[track].clips.sort_by_key(|c| c.start);
+    }
+
+    /// Plays clips at `speed` (2 is twice as fast), keeping what of the
+    /// source each plays: a clip sped up gets shorter and one slowed down
+    /// longer, and what follows on its track moves up or along to match.
+    pub fn set_speed(&mut self, ids: &[ClipId], speed: f64) {
+        let speed = if speed.is_finite() {
+            speed.clamp(SLOWEST, FASTEST)
+        } else {
+            1.0
+        };
+        let frame = self.frame();
+        for &id in ids {
+            let Some(slot) = self.slot(id) else { continue };
+            let clip = &self.tracks[slot.track].clips[slot.index];
+            let timed = self.media(clip.media).is_some_and(|m| m.is_timed());
+            if clip.generator.is_some() || !timed || clip.frozen || clip.speed == speed {
+                continue;
+            }
+            let (end, old) = (clip.end(), clip.speed);
+            let span = clip.span();
+            // On whole frames, so what follows stays on the frame grid.
+            let fps = self.settings.fps;
+            let length = crate::time::floor_to_frame((span as f64 / speed).round() as Time + frame / 2, fps);
+            if length < frame {
+                // Too short to play that fast.
+                continue;
+            }
+            let clip = &mut self.tracks[slot.track].clips[slot.index];
+            let out = clip.source_out();
+            clip.speed = speed;
+            clip.duration = length;
+            if clip.reverse {
+                clip.source_in = (out - clip.span()).max(0);
+            }
+            // Keyframes and the way in keep their place in what is shown.
+            clip.look.keys.scale_time(old / speed);
+            if let Some(t) = &mut clip.transition {
+                t.duration = t.duration.min(clip.duration);
+            }
+            let dt = clip.end() - end;
+            self.ripple(slot.track, end, dt, id);
+        }
+    }
+
+    /// Plays clips backwards (or forwards again), over the same stretch of source.
+    pub fn set_reverse(&mut self, ids: &[ClipId], reverse: bool) {
+        for &id in ids {
+            let timed = self
+                .clip(id)
+                .filter(|c| c.generator.is_none() && !c.frozen)
+                .and_then(|c| self.media(c.media))
+                .is_some_and(|m| m.kind == MediaKind::Video || m.kind == MediaKind::Audio);
+            if let Some(clip) = self.clip_mut(id).filter(|_| timed) {
+                clip.reverse = reverse;
+            }
+        }
+    }
+
+    /// Holds the frame of clip `id` at timeline time `t` for `hold`: the clip
+    /// is cut there, the held frame goes between the halves, and what follows
+    /// on the track moves along. Returns the held clip.
+    pub fn freeze_frame(&mut self, id: ClipId, t: Time, hold: Time) -> Option<ClipId> {
+        let frame = self.frame();
+        let clip = self.clip(id)?.clone();
+        let media = self.media(clip.media)?;
+        if clip.generator.is_some() || media.kind != MediaKind::Video || clip.frozen || !clip.contains(t) {
+            return None;
+        }
+        let hold = hold.max(frame);
+        // The frame shown there, kept inside the media.
+        let at =
+            crate::time::floor_to_frame(clip.source_at(t), self.settings.fps).clamp(0, (media.duration - frame).max(0));
+        let slot = self.slot(id)?;
+        let mut t = crate::time::floor_to_frame(t, self.settings.fps).max(clip.start);
+        // Cut there; too near an edge to cut, the frame goes before or after it.
+        if t > clip.start && self.split(id, t).is_none() {
+            t = if t - clip.start < clip.end() - t {
+                clip.start
+            } else {
+                clip.end()
+            };
+        }
+        // What follows on the track (the right half too) moves along.
+        self.ripple(slot.track, t, hold, ClipId(u64::MAX));
+        let held = ClipId(self.alloc());
+        let mut still = Clip {
+            frozen: true,
+            volume: 0.0,
+            ..Clip::new(held, clip.media, t, at, hold)
+        };
+        still.look = clip.look.clone();
+        still.look.enter.kind = MotionKind::None;
+        still.look.exit.kind = MotionKind::None;
+        // Animated values hold where they were at the frame.
+        let local = (t - clip.start).min(clip.duration);
+        still.look.keys = clip.look.keys.part(local, local);
+        for prop in crate::look::Prop::ALL {
+            still.look.keys.of_mut(prop).truncate(1);
+        }
+        self.tracks[slot.track].insert_sorted(still);
+        Some(held)
+    }
+
     /// The timeline with only what plays between `from` and `to`: clips
     /// wholly outside it go, the rest stay as they are (so they move as they
     /// do in the whole movie). Exporting a stretch cuts it from this.
     pub fn window(&self, from: Time, to: Time) -> Project {
         let mut out = self.clone();
         out.story = crate::story::Story::default();
+        // A clip drawn on past its edges for a transition counts by where it is drawn.
+        let drawn: Vec<ClipId> = self
+            .clips()
+            .filter(|(_, c)| {
+                let (head, tail) = self.handles(c.id);
+                c.start - head < to && c.end() + tail > from
+            })
+            .map(|(_, c)| c.id)
+            .collect();
+        // So is a clip a kept one's transition comes from, so it plays the same.
+        let sources: Vec<ClipId> = drawn
+            .iter()
+            .filter_map(|id| self.cut_into(*id).and_then(|cut| cut.from))
+            .collect();
         for track in &mut out.tracks {
-            track.clips.retain(|c| c.start < to && c.end() > from);
+            track.clips.retain(|c| drawn.contains(&c.id) || sources.contains(&c.id));
         }
         out
     }
@@ -923,7 +1154,8 @@ fn migrate(value: &mut serde_json::Value) -> anyhow::Result<()> {
     }
     // Schema 2 added `look` and `generator` to clips, schema 3 `recipe` to
     // media, schema 4 `story` to the project, schema 5 symbols (a recipe) and
-    // `placeholder` on clips; all default, so older projects need nothing.
+    // `placeholder` on clips, schema 6 speed, reverse, freeze, transitions,
+    // colour and keyframes on clips; all default, so older projects need nothing.
     value["schema"] = SCHEMA.into();
     Ok(())
 }

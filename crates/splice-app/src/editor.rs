@@ -30,6 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 mod agent;
+mod effects;
 mod input;
 mod inspector;
 mod made;
@@ -168,12 +169,25 @@ struct ExportJob {
     progress: f32,
     done: Option<Result<(), String>>,
     child: Option<Child>,
+    cancelled: bool,
 }
 
 struct Status {
     text: String,
     error: bool,
     at: Instant,
+}
+
+/// Names the retimed sound of a clip: what it plays, how fast, which way.
+fn retimed_key(clip: &splice_core::model::Clip, media: &Media) -> String {
+    format!(
+        "{}:{}:{}:{}:{}",
+        media.hash,
+        clip.source_in,
+        clip.span(),
+        clip.speed,
+        clip.reverse
+    )
 }
 
 pub struct Editor {
@@ -183,6 +197,9 @@ pub struct Editor {
     library: Library,
     player: Player,
     audio: AudioOut,
+    /// The sound of clips played at another speed or backwards, by
+    /// `retimed_key`; None while it is decoded.
+    retimed_sound: Arc<Mutex<HashMap<String, Option<Arc<ffmpeg::Pcm>>>>>,
     selection: Vec<ClipId>,
     bin_selection: Option<MediaId>,
     view: View,
@@ -350,6 +367,7 @@ impl Editor {
             library: Library::default(),
             player: Player::new(),
             audio: AudioOut::open(),
+            retimed_sound: Default::default(),
             selection: Vec::new(),
             bin_selection: None,
             view: View::default(),
@@ -734,6 +752,7 @@ impl Editor {
     fn after_edit(&mut self) {
         let project = &self.doc.project;
         self.selection.retain(|id| project.slot(*id).is_some());
+        self.prepare_retimed_sound();
         if self.player.is_playing() {
             self.audio.stop();
             self.player.seek(self.player.position);
@@ -764,24 +783,110 @@ impl Editor {
     }
 
     fn start_sound(&mut self) {
+        self.prepare_retimed_sound();
         let audio = &self.audio;
-        let voices = self
-            .doc
-            .project
+        let project = &self.doc.project;
+        let retimed = self.retimed_sound.lock().unwrap();
+        let voices = project
             .audible_clips()
             .into_iter()
+            .filter(|(clip, _)| !clip.frozen)
             .filter_map(|(clip, media)| {
+                // When it plays and how it fades, as export makes it.
+                let sound = project.sound(clip);
+                let fades = |f: Option<(Time, Time)>| f.map(|(a, z)| (audio.frames(a), audio.frames(z)));
+                let (fade_in, fade_out) = (fades(sound.fade_in), fades(sound.fade_out));
+                let volume = clip.volume;
+                // A clip played faster, slower or backwards sounds as export
+                // makes it, once that is decoded; until then, its own sound
+                // retimed on the fly.
+                if clip.is_retimed() {
+                    let (start, length) = (audio.frames(clip.start), audio.frames(clip.duration));
+                    if let Some(Some(pcm)) = retimed.get(&retimed_key(clip, media)) {
+                        return Some(Voice {
+                            start,
+                            length,
+                            source_in: 0,
+                            step: 1.0,
+                            volume,
+                            pcm: pcm.clone(),
+                            fade_in,
+                            fade_out,
+                        });
+                    }
+                    let pcm = self.library.get(&media.hash)?.pcm.clone()?;
+                    let (source_in, step) = if clip.reverse {
+                        (audio.frames(clip.source_out()).saturating_sub(1), -clip.speed)
+                    } else {
+                        (audio.frames(clip.source_in), clip.speed)
+                    };
+                    return Some(Voice {
+                        start,
+                        length,
+                        source_in,
+                        step,
+                        volume,
+                        pcm,
+                        fade_in,
+                        fade_out,
+                    });
+                }
                 let pcm = self.library.get(&media.hash)?.pcm.clone()?;
                 Some(Voice {
-                    start: audio.frames(clip.start),
-                    length: audio.frames(clip.duration),
-                    source_in: audio.frames(clip.source_in),
-                    volume: clip.volume,
+                    start: audio.frames(sound.from),
+                    length: audio.frames(sound.to - sound.from),
+                    source_in: audio.frames(sound.source),
+                    step: 1.0,
+                    volume,
                     pcm,
+                    fade_in,
+                    fade_out,
                 })
             })
             .collect();
+        drop(retimed);
         self.audio.play(self.player.position, voices);
+    }
+
+    /// Decodes, in the background, the sound of every clip played at
+    /// another speed or backwards, as export will make it.
+    fn prepare_retimed_sound(&mut self) {
+        let rate = self.audio.rate;
+        let mut wanted = Vec::new();
+        for (clip, media) in self.doc.project.audible_clips() {
+            if !clip.is_retimed() || clip.frozen {
+                continue;
+            }
+            let key = retimed_key(clip, media);
+            let Some(path) = self.library.path(&media.hash) else {
+                continue;
+            };
+            wanted.push((
+                key,
+                path.to_path_buf(),
+                clip.source_in,
+                clip.span(),
+                clip.speed,
+                clip.reverse,
+            ));
+        }
+        let mut cache = self.retimed_sound.lock().unwrap();
+        let keep: std::collections::HashSet<&String> = wanted.iter().map(|w| &w.0).collect();
+        cache.retain(|k, _| keep.contains(k));
+        for (key, path, from, span, speed, reverse) in wanted {
+            if cache.contains_key(&key) {
+                continue;
+            }
+            cache.insert(key.clone(), None);
+            let cache = self.retimed_sound.clone();
+            std::thread::spawn(move || {
+                if let Ok(pcm) = ffmpeg::decode_audio_retimed(&path, rate, from, span, speed, reverse)
+                    && let Some(slot) = cache.lock().unwrap().get_mut(&key)
+                {
+                    *slot = Some(Arc::new(pcm));
+                }
+            });
+        }
     }
 
     fn say(&mut self, text: impl Into<String>) {
@@ -879,6 +984,12 @@ impl Editor {
                 });
             }
             Hit::Gutter(_, None) => {}
+            // A transition's tab: the clip it leads into, its transition open.
+            Hit::Transition(id) => {
+                self.selection = vec![id];
+                self.layout.inspector_open = true;
+                self.folds.insert((id, "Transition"), true);
+            }
             Hit::Beat(id) => {
                 self.select_beat(Some(id), cx);
                 if event.click_count >= 2 {
@@ -1400,43 +1511,57 @@ impl Editor {
             Ok(plan) => plan,
             Err(e) => return Err(format!("Cannot export: {e}")),
         };
-        let mut command = ffmpeg::export_command().map_err(|e| e.to_string())?;
-        let child = command
-            .args(&plan.args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn();
-        let mut child = match child {
-            Ok(child) => child,
-            Err(e) => return Err(format!("Could not start ffmpeg: {e}")),
-        };
-        let stdout = child.stdout.take().unwrap();
-        let mut stderr = child.stderr.take().unwrap();
+        // Started off the window's thread: reversed clips are made first.
         let job = Arc::new(Mutex::new(ExportJob {
             output: output.clone(),
-            child: Some(child),
             ..Default::default()
         }));
         let shared = job.clone();
         let duration = plan.duration;
         std::thread::spawn(move || {
-            let errors = std::thread::spawn(move || {
-                let mut text = String::new();
-                let _ = stderr.read_to_string(&mut text);
-                text
-            });
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if let Some(t) = export::parse_progress(&line) {
-                    shared.lock().unwrap().progress = (t as f32 / duration as f32).clamp(0.0, 1.0);
+            let result = (|| -> Result<(), String> {
+                let going = || !shared.lock().unwrap().cancelled;
+                ffmpeg::prepare(&plan, going).map_err(|e| e.to_string())?;
+                let mut command = ffmpeg::export_command().map_err(|e| e.to_string())?;
+                let mut child = command
+                    .args(&plan.args)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("Could not start ffmpeg: {e}"))?;
+                let stdout = child.stdout.take().unwrap();
+                let mut stderr = child.stderr.take().unwrap();
+                {
+                    let mut job = shared.lock().unwrap();
+                    if job.cancelled {
+                        let _ = child.kill();
+                        return Err("cancelled".into());
+                    }
+                    job.child = Some(child);
                 }
-            }
-            let child = shared.lock().unwrap().child.take();
-            let status = child.map(|mut c| c.wait());
-            let errors = errors.join().unwrap_or_default();
-            let result = match status {
-                Some(Ok(s)) if s.success() => Ok(()),
-                None => Err("cancelled".to_string()),
-                _ => Err(errors.lines().last().unwrap_or("ffmpeg failed").to_string()),
+                let errors = std::thread::spawn(move || {
+                    let mut text = String::new();
+                    let _ = stderr.read_to_string(&mut text);
+                    text
+                });
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    if let Some(t) = export::parse_progress(&line) {
+                        shared.lock().unwrap().progress = (t as f32 / duration as f32).clamp(0.0, 1.0);
+                    }
+                }
+                let child = shared.lock().unwrap().child.take();
+                let status = child.map(|mut c| c.wait());
+                let errors = errors.join().unwrap_or_default();
+                match status {
+                    Some(Ok(s)) if s.success() => Ok(()),
+                    None => Err("cancelled".to_string()),
+                    _ => Err(errors.lines().last().unwrap_or("ffmpeg failed").to_string()),
+                }
+            })();
+            ffmpeg::tidy(&plan);
+            let result = match result {
+                Err(_) if shared.lock().unwrap().cancelled => Err("cancelled".to_string()),
+                other => other,
             };
             shared.lock().unwrap().done = Some(result);
         });
@@ -1488,6 +1613,7 @@ impl Editor {
             }
             let _ = std::fs::remove_file(&job.output);
             job.child = None;
+            job.cancelled = true;
         }
         cx.notify();
     }

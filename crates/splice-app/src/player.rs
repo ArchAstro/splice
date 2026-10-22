@@ -6,7 +6,8 @@
 use crate::ffmpeg::{self, FrameStream};
 use crate::library::Library;
 use gpui::RenderImage;
-use splice_core::model::{ClipId, Media, MediaId, MediaKind, Project, Source};
+use splice_core::compose;
+use splice_core::model::{Clip, ClipId, Media, MediaId, MediaKind, Project, Source};
 use splice_core::time::{SECOND, Time, floor_to_frame};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -42,6 +43,9 @@ struct Shown {
 struct Stream {
     media: MediaId,
     filters: Option<String>,
+    /// Source seconds a second, and which way.
+    speed: f64,
+    reverse: bool,
     size: (u32, u32),
     decoder: FrameStream,
     /// Decoded, not yet due.
@@ -55,6 +59,15 @@ struct StillResult {
     source: Time,
     size: (u32, u32),
     image: Option<Arc<RenderImage>>,
+}
+
+/// A clip under the playhead whose frames need decoding.
+struct Wanted {
+    clip: Clip,
+    media: Media,
+    filters: Option<String>,
+    /// The source time it shows.
+    source: Time,
 }
 
 /// What the editor should do after a tick.
@@ -213,42 +226,57 @@ impl Player {
         let playing = self.is_playing();
         let position = self.position;
 
-        // Media that needs decoding: video, and pictures with a key or mask.
-        let stack: Vec<_> = project
-            .visual_stack(position)
+        // Media that needs decoding: video, and pictures with a key, mask or
+        // colour; each with the source time it shows now (held inside the
+        // media where a transition draws it past its ends).
+        let frame = project.frame();
+        let stack: Vec<Wanted> = project
+            .picture(position)
             .into_iter()
-            .filter_map(|(c, source)| match source {
-                Source::Media(m) => {
-                    let filters = c.look.pixel_filters();
-                    (m.kind == MediaKind::Video || filters.is_some()).then(|| (c.clone(), m.clone(), filters))
-                }
-                Source::Generated(_) => None,
+            .filter_map(|shown| match shown {
+                compose::Shown::Clip { drawn, .. } => match drawn.source {
+                    Source::Media(m) => {
+                        let clip = drawn.clip;
+                        let filters = clip.look.pixel_filters();
+                        let video = m.kind == MediaKind::Video;
+                        (video || filters.is_some()).then(|| Wanted {
+                            clip: clip.clone(),
+                            media: m.clone(),
+                            filters,
+                            source: if video {
+                                floor_to_frame(clip.source_at(position).clamp(0, (m.duration - frame).max(0)), fps)
+                            } else {
+                                0
+                            },
+                        })
+                    }
+                    Source::Generated(_) => None,
+                },
+                compose::Shown::Fill { .. } => None,
             })
             .collect();
-        let visible: HashSet<ClipId> = stack.iter().map(|(c, _, _)| c.id).collect();
+        let visible: HashSet<ClipId> = stack.iter().map(|w| w.clip.id).collect();
         let mut keep_streams = HashSet::new();
 
-        for (clip, media, filters) in &stack {
-            let source = if media.kind == MediaKind::Image {
-                0
-            } else {
-                floor_to_frame(clip.source_at(position), fps)
-            };
-            if playing && media.kind == MediaKind::Video {
+        for Wanted {
+            clip,
+            media,
+            filters,
+            source,
+        } in &stack
+        {
+            let source = *source;
+            // A held frame is a still, playing or not.
+            if playing && media.kind == MediaKind::Video && !clip.frozen {
                 keep_streams.insert(clip.id);
                 let Some(path) = library.path(&media.hash) else {
                     continue;
                 };
-                self.ensure_stream(
-                    clip.id,
-                    media.id,
-                    filters,
-                    path,
-                    source,
-                    fps,
-                    (media.width, media.height),
-                );
-                if let Some((t, size, image)) = self.pull(clip.id, source + half_frame) {
+                self.ensure_stream(clip, media, filters, path, source, fps);
+                // Half a frame of playback, in source time.
+                let half = (half_frame as f64 * clip.speed) as Time;
+                let due = if clip.reverse { source - half } else { source + half };
+                if let Some((t, size, image)) = self.pull(clip.id, due) {
                     self.show(clip.id, media.id, filters.clone(), t, size, image);
                 }
             } else {
@@ -276,13 +304,17 @@ impl Player {
         }
 
         if playing {
-            // Open streams for clips about to begin so they are ready on time.
-            for (_, clip) in project.clips() {
-                if clip.start > position && clip.start <= position + LOOKAHEAD {
-                    let Some(media) = project.media(clip.media).filter(|m| m.kind == MediaKind::Video) else {
+            // Open streams for clips about to be drawn so they are ready on time.
+            for (track, lane) in project.tracks.iter().enumerate().filter(|(_, l)| !l.hidden) {
+                for clip in &lane.clips {
+                    let Some(drawn) = project.drawn(clip, track) else {
                         continue;
                     };
-                    if project.slot(clip.id).is_some_and(|s| project.tracks[s.track].hidden) {
+                    if drawn.from <= position || drawn.from > position + LOOKAHEAD || clip.frozen {
+                        continue;
+                    }
+                    let Source::Media(media) = drawn.source else { continue };
+                    if media.kind != MediaKind::Video {
                         continue;
                     }
                     let Some(path) = library.path(&media.hash) else {
@@ -290,15 +322,8 @@ impl Player {
                     };
                     keep_streams.insert(clip.id);
                     let filters = clip.look.pixel_filters();
-                    self.ensure_stream(
-                        clip.id,
-                        media.id,
-                        &filters,
-                        path,
-                        clip.source_in,
-                        fps,
-                        (media.width, media.height),
-                    );
+                    let source = clip.source_at(drawn.from).clamp(0, (media.duration - frame).max(0));
+                    self.ensure_stream(clip, media, &filters, path, source, fps);
                 }
             }
         }
@@ -311,7 +336,7 @@ impl Player {
         }
 
         if let State::Priming(since) = self.state {
-            let ready = stack.iter().all(|(c, _, _)| self.shown.contains_key(&c.id));
+            let ready = stack.iter().all(|w| self.shown.contains_key(&w.clip.id));
             if ready || now - since > PRIME_TIMEOUT {
                 self.state = State::Playing {
                     anchor: now,
@@ -351,35 +376,40 @@ impl Player {
     }
 
     /// Keeps a stream for `clip` that will reach `source` soon, opening one if not.
-    #[allow(clippy::too_many_arguments)]
     fn ensure_stream(
         &mut self,
-        clip: ClipId,
-        media: MediaId,
+        clip: &Clip,
+        media: &Media,
         filters: &Option<String>,
         path: &std::path::Path,
         source: Time,
         fps: u32,
-        size: (u32, u32),
     ) {
-        if let Some(stream) = self.streams.get(&clip) {
+        let (speed, reverse) = (clip.speed, clip.reverse);
+        if let Some(stream) = self.streams.get(&clip.id) {
             let next = stream.pending.as_ref().map_or(stream.decoder.next_time(), |(t, _)| *t);
-            let usable = stream.media == media
+            // How far along the stream is towards `source`, in its direction.
+            let ahead = if reverse { source - next } else { next - source };
+            let usable = stream.media == media.id
                 && stream.filters == *filters
-                && next <= source + SECOND / 2
-                && next >= source - SECOND;
+                && stream.speed == speed
+                && stream.reverse == reverse
+                && ahead <= (SECOND as f64 / 2.0 * speed) as Time
+                && ahead >= -(SECOND as f64 * speed) as Time;
             if usable {
                 return;
             }
         }
-        let (w, h) = self.decode_size(size);
-        match FrameStream::open(path, source, fps, w, h, filters.as_deref()) {
+        let (w, h) = self.decode_size((media.width, media.height));
+        match FrameStream::open(path, source, fps, w, h, filters.as_deref(), speed, reverse) {
             Ok(decoder) => {
                 self.streams.insert(
-                    clip,
+                    clip.id,
                     Stream {
-                        media,
+                        media: media.id,
                         filters: filters.clone(),
+                        speed,
+                        reverse,
                         size: (w, h),
                         decoder,
                         pending: None,
@@ -394,6 +424,7 @@ impl Player {
     fn pull(&mut self, clip: ClipId, due: Time) -> Option<(Time, (u32, u32), Arc<RenderImage>)> {
         let stream = self.streams.get_mut(&clip)?;
         let size = stream.size;
+        let reverse = stream.reverse;
         let mut latest = None;
         loop {
             if stream.pending.is_none() {
@@ -401,7 +432,7 @@ impl Player {
                 stream.pending = stream.decoder.try_next().map(|image| (t, image));
             }
             match stream.pending.take() {
-                Some((t, image)) if t <= due => latest = Some((t, image)),
+                Some((t, image)) if (if reverse { t >= due } else { t <= due }) => latest = Some((t, image)),
                 Some(early) => {
                     stream.pending = Some(early);
                     break;

@@ -105,7 +105,36 @@ fn look_json(look: &splice_core::look::Look) -> Value {
         })),
         "mask": look.mask,
         "crop": look.crop,
+        "grade": (!look.grade.is_none()).then(|| json!({
+            "look": look.grade.preset.name(),
+            "exposure": look.grade.exposure,
+            "contrast": look.grade.contrast,
+            "saturation": look.grade.saturation,
+            "warmth": look.grade.temperature,
+            "tint": look.grade.tint,
+        })),
+        "keyframes": (!look.keys.is_empty()).then(|| keyframes_json(look)),
     })
+}
+
+/// Keyframes per property: clip time (seconds from its start), value, ease.
+fn keyframes_json(look: &splice_core::look::Look) -> Value {
+    let mut out = serde_json::Map::new();
+    for prop in splice_core::look::Prop::ALL {
+        let keys = look.keys.of(prop);
+        if keys.is_empty() {
+            continue;
+        }
+        out.insert(
+            prop.name().into(),
+            json!(
+                keys.iter()
+                    .map(|k| json!({ "at": s(k.at), "value": k.value, "ease": k.ease.name() }))
+                    .collect::<Vec<_>>()
+            ),
+        );
+    }
+    Value::Object(out)
 }
 
 fn kind(kind: MediaKind) -> &'static str {
@@ -158,6 +187,7 @@ impl Editor {
                 return self.ctl_plan(request, reply, cx);
             }
             "bible" => return self.ctl_bible(request, reply, cx),
+            "transition" | "speed" | "freeze" | "keyframe" => self.ctl_effects(cmd, request, cx),
             "story" | "cue" | "view" => self.ctl_story(cmd, request, cx),
             "record" => return self.ctl_record(request, reply, cx),
             "symbol" | "placeholder" | "hold" => return self.ctl_symbol(cmd, request, reply, cx),
@@ -381,8 +411,13 @@ impl Editor {
                         .unwrap_or(0)
                 });
                 let mut look = splice_core::look::Look::default();
-                if let Err(e) = apply_look(&mut look, request) {
+                if let Err(e) = apply_look(&mut look, request, 0) {
                     return Some(fail(e));
+                }
+                if !look.grade.is_none() {
+                    return Some(fail(
+                        "colour (--grade, --exposure…) is for video and pictures; a title or colour clip takes its own --color",
+                    ));
                 }
                 let id = self.edit(cx, |p| {
                     let id = p.insert_generated(generator, track, at, duration);
@@ -429,9 +464,20 @@ impl Editor {
                 self.edited_with(json!({ "clips": clips }))
             }
             "look" => {
-                let ids = match self.clips(request) {
-                    Ok(ids) => ids,
-                    Err(e) => return Some(fail(e)),
+                // `--all`: every video and picture, for one colour across the movie.
+                let ids = if flag("all") == Some(true) {
+                    let project = &self.doc.project;
+                    project
+                        .clips()
+                        .filter(|(_, c)| c.generator.is_none())
+                        .filter(|(_, c)| project.media(c.media).is_some_and(|m| m.is_visual()))
+                        .map(|(_, c)| c.id)
+                        .collect()
+                } else {
+                    match self.clips(request) {
+                        Ok(ids) => ids,
+                        Err(e) => return Some(fail(e)),
+                    }
                 };
                 let mut looks = Vec::new();
                 for &id in &ids {
@@ -439,11 +485,17 @@ impl Editor {
                         continue;
                     };
                     let mut look = clip.look.clone();
-                    if let Err(e) = apply_look(&mut look, request) {
+                    let at = (self.player.position - clip.start).clamp(0, clip.duration);
+                    if let Err(e) = apply_look(&mut look, request, at) {
                         return Some(fail(e));
                     }
                     if look.key.is_some() && clip.generator.is_some() {
                         return Some(fail("a green-screen key is for video and pictures, not text or colour"));
+                    }
+                    if look.grade != clip.look.grade && clip.generator.is_some() {
+                        return Some(fail(
+                            "colour (--grade, --exposure…) is for video and pictures; a title or colour clip takes its own --color",
+                        ));
                     }
                     looks.push((id, look));
                 }
@@ -805,6 +857,24 @@ impl Editor {
         if clip.look != splice_core::look::Look::default() {
             value["look"] = look_json(&clip.look);
         }
+        if clip.frozen {
+            value["frozen"] = json!(true);
+        }
+        if clip.speed != 1.0 {
+            value["speed"] = json!(clip.speed);
+        }
+        if clip.reverse {
+            value["reverse"] = json!(true);
+        }
+        if let Some(cut) = project.cut_into(clip.id) {
+            value["transition"] = json!({
+                "kind": cut.kind.name(),
+                "duration": s(cut.duration()),
+                "from": cut.from.map(|c| c.0),
+                "start": s(cut.start),
+                "end": s(cut.end),
+            });
+        }
         value
     }
 
@@ -948,15 +1018,19 @@ impl Editor {
 }
 
 /// Look fields from a request, onto `look`.
-fn apply_look(look: &mut splice_core::look::Look, request: &Value) -> Result<(), String> {
+/// `at` is clip time, where a keyframed value is keyed.
+fn apply_look(look: &mut splice_core::look::Look, request: &Value, at: Time) -> Result<(), String> {
     use splice_core::look::{Drift, Key, Mask, MotionKind, Shape};
     let text = |key: &str| request.get(key).and_then(Value::as_str);
     let number = |key: &str| request.get(key).and_then(Value::as_f64).map(|v| v as f32);
     let flag = |key: &str| request.get(key).and_then(Value::as_bool);
-    look.x = number("x").unwrap_or(look.x);
-    look.y = number("y").unwrap_or(look.y);
-    look.scale = number("scale").map_or(look.scale, |v| v.clamp(0.01, 20.0));
-    look.opacity = number("opacity").map_or(look.opacity, |v| v.clamp(0.0, 1.0));
+    // A keyframed value takes a keyframe at `at`; the rest change throughout.
+    use splice_core::look::Prop;
+    for prop in Prop::ALL {
+        if let Some(v) = number(prop.name()) {
+            look.set_value(prop, at, v);
+        }
+    }
     for (key, motion) in [("enter", &mut look.enter), ("exit", &mut look.exit)] {
         if let Some(kind) = text(key) {
             motion.kind = MotionKind::parse(kind).ok_or_else(|| {
@@ -1015,6 +1089,19 @@ fn apply_look(look: &mut splice_core::look::Look, request: &Value) -> Result<(),
         mask.feather = number("feather").map_or(mask.feather, |v| v.clamp(0.001, 1.0));
         mask.invert = flag("invert").unwrap_or(mask.invert);
     }
+    if let Some(name) = text("grade") {
+        look.grade.preset = splice_core::look::Preset::parse(name).ok_or_else(|| {
+            let names: Vec<_> = splice_core::look::Preset::ALL.iter().map(|p| p.name()).collect();
+            format!("`grade` is one of {}", names.join(", "))
+        })?;
+    }
+    let grade = &mut look.grade;
+    grade.exposure = number("exposure").unwrap_or(grade.exposure);
+    grade.contrast = number("contrast").unwrap_or(grade.contrast);
+    grade.saturation = number("saturation").unwrap_or(grade.saturation);
+    grade.temperature = number("warmth").unwrap_or(grade.temperature);
+    grade.tint = number("tint").unwrap_or(grade.tint);
+    *grade = grade.clamped();
     if text("crop") == Some("none") {
         look.crop = None;
     }

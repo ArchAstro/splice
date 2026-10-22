@@ -10,8 +10,9 @@ use splice_core::time::{SECOND, Time, from_secs, secs};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 const IMAGE_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "heic", "heif", "avif",
@@ -58,6 +59,35 @@ fn base_command() -> Result<Command> {
     let mut command = Command::new(ffmpeg()?);
     command.args(["-hide_banner", "-nostdin", "-loglevel", "error"]);
     Ok(command)
+}
+
+/// Runs what an export needs made first (reversed pieces), one at a time,
+/// stopping when `going` says to. Call `tidy` once the export is over.
+pub fn prepare(plan: &splice_core::export::Plan, going: impl Fn() -> bool) -> Result<()> {
+    if let Some(dir) = &plan.scratch {
+        std::fs::create_dir_all(dir)?;
+    }
+    for (path, text) in &plan.files {
+        std::fs::write(path, text)?;
+    }
+    for command in &plan.prepare {
+        if !going() {
+            bail!("cancelled");
+        }
+        let out = export_command()?.args(command).stdout(Stdio::null()).output()?;
+        if !out.status.success() {
+            let text = String::from_utf8_lossy(&out.stderr);
+            bail!("{}", text.lines().last().unwrap_or("could not reverse a clip"));
+        }
+    }
+    Ok(())
+}
+
+/// Removes what `prepare` made.
+pub fn tidy(plan: &splice_core::export::Plan) {
+    if let Some(dir) = &plan.scratch {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 pub fn export_command() -> Result<Command> {
@@ -190,6 +220,36 @@ pub fn still(path: &Path, at: Time, width: u32, height: u32, filters: Option<&st
         .output()?;
     let expected = (width * height * 4) as usize;
     if output.stdout.len() < expected {
+        // Past the picture's end (its sound runs on): the last frame there is.
+        return last_still(path, at, width, height, filters);
+    }
+    let mut bytes = output.stdout;
+    bytes.truncate(expected);
+    render_image(width, height, bytes).ok_or_else(|| anyhow!("bad frame"))
+}
+
+/// The last frame at or before `at`: read backwards from just after it.
+fn last_still(path: &Path, at: Time, width: u32, height: u32, filters: Option<&str>) -> Result<Arc<RenderImage>> {
+    let from = (at - SECOND).max(0);
+    let output = base_command()?
+        .args([
+            "-ss",
+            &format!("{:.6}", secs(from)),
+            "-t",
+            &format!("{:.6}", secs(at - from + SECOND / 10)),
+        ])
+        .arg("-i")
+        .arg(path)
+        .args(["-an", "-sn", "-vf"])
+        .arg(with_filters(
+            format!("reverse,trim=end_frame=1,scale={width}:{height}:flags=bilinear"),
+            filters,
+        ))
+        .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "bgra", "pipe:1"])
+        .stderr(Stdio::null())
+        .output()?;
+    let expected = (width * height * 4) as usize;
+    if output.stdout.len() < expected {
         bail!("no frame at {:.2}s in {}", secs(at), file_name(path));
     }
     let mut bytes = output.stdout;
@@ -261,6 +321,68 @@ pub fn decode_audio(path: &Path, rate: u32) -> Result<Pcm> {
     Ok(Pcm { rate, samples })
 }
 
+/// The sound of `length` of `path` from `from`, played at `speed` (its
+/// pitch kept) and backwards when `reverse`: what a retimed clip sounds like.
+pub fn decode_audio_retimed(
+    path: &Path,
+    rate: u32,
+    from: Time,
+    length: Time,
+    speed: f64,
+    reverse: bool,
+) -> Result<Pcm> {
+    let mut filters = Vec::new();
+    if reverse {
+        filters.push("areverse".to_string());
+    }
+    // Each atempo stretches by at most a factor of two.
+    let mut rest = speed;
+    while rest < 0.5 - 1e-9 {
+        filters.push("atempo=0.5".into());
+        rest /= 0.5;
+    }
+    while rest > 2.0 + 1e-9 {
+        filters.push("atempo=2.0".into());
+        rest /= 2.0;
+    }
+    if (rest - 1.0).abs() > 1e-9 {
+        filters.push(format!("atempo={rest:.6}"));
+    }
+    let mut command = base_command()?;
+    if from > 0 {
+        command.args(["-ss", &format!("{:.6}", secs(from))]);
+    }
+    command
+        .args(["-t", &format!("{:.6}", secs(length))])
+        .arg("-i")
+        .arg(path);
+    if !filters.is_empty() {
+        command.args(["-af", &filters.join(",")]);
+    }
+    let output = command
+        .args([
+            "-vn",
+            "-sn",
+            "-ac",
+            "2",
+            "-ar",
+            &rate.to_string(),
+            "-f",
+            "s16le",
+            "pipe:1",
+        ])
+        .stderr(Stdio::null())
+        .output()?;
+    let samples = output
+        .stdout
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| i16::from_le_bytes(*b))
+        .collect();
+    Ok(Pcm { rate, samples })
+}
+
 /// Loudness per `bucket` of time, 0–255, for waveforms.
 pub fn peaks(pcm: &Pcm, bucket: Time) -> Vec<u8> {
     let per = ((pcm.rate as i64 * bucket / SECOND) as usize).max(1) * 2;
@@ -277,16 +399,29 @@ pub fn peaks(pcm: &Pcm, bucket: Time) -> Vec<u8> {
 /// A running decoder: frames of one source from a start time onwards, at a
 /// fixed rate and size. Dropping it stops ffmpeg.
 pub struct FrameStream {
-    child: Child,
+    /// The decoder now running; a stream going backwards runs one per piece.
+    child: Arc<Mutex<Option<Child>>>,
+    stop: Arc<AtomicBool>,
     frames: Receiver<Arc<RenderImage>>,
     /// Source time of the first frame.
     pub origin: Time,
     pub fps: u32,
+    /// Source seconds per second of playback.
+    pub speed: f64,
+    /// Frames come from later to earlier source.
+    pub reverse: bool,
     /// Frames taken so far.
     pub taken: u64,
 }
 
+/// How much source each backwards piece decodes: a piece is held whole to
+/// be reversed, so pieces stay short.
+const REVERSE_PIECE: Time = SECOND;
+
 impl FrameStream {
+    /// Frames of `path` from source time `from`, one per frame of playback
+    /// at `fps`: `speed` source seconds a second, backwards when `reverse`.
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         path: &Path,
         from: Time,
@@ -294,40 +429,98 @@ impl FrameStream {
         width: u32,
         height: u32,
         filters: Option<&str>,
+        speed: f64,
+        reverse: bool,
     ) -> Result<FrameStream> {
-        let mut command = base_command()?;
-        if from > 0 {
-            command.args(["-ss", &format!("{:.6}", secs(from))]);
-        }
-        let mut child = command
-            .arg("-i")
-            .arg(path)
-            .args(["-an", "-sn", "-vf"])
-            .arg(with_filters(
-                format!("fps={fps},scale={width}:{height}:flags=fast_bilinear"),
-                filters,
-            ))
-            .args(["-f", "rawvideo", "-pix_fmt", "bgra", "pipe:1"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let stdout = child.stdout.take().unwrap();
+        let speed = if speed.is_finite() && speed > 0.0 { speed } else { 1.0 };
+        let vf = with_filters(
+            format!("setpts=(PTS-STARTPTS)/{speed:.6},fps={fps},scale={width}:{height}:flags=fast_bilinear"),
+            filters,
+        );
+        let decode = {
+            let path = path.to_path_buf();
+            let vf = vf.clone();
+            move |at: Time, length: Option<Time>, backwards: bool| -> Result<Child> {
+                let mut command = base_command()?;
+                if at > 0 {
+                    command.args(["-ss", &format!("{:.6}", secs(at))]);
+                }
+                if let Some(length) = length {
+                    command.args(["-t", &format!("{:.6}", secs(length))]);
+                }
+                let vf = if backwards { format!("{vf},reverse") } else { vf.clone() };
+                Ok(command
+                    .arg("-i")
+                    .arg(&path)
+                    .args(["-an", "-sn", "-vf"])
+                    .arg(vf)
+                    .args(["-f", "rawvideo", "-pix_fmt", "bgra", "pipe:1"])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()?)
+            }
+        };
+        let child: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
+        let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = sync_channel(8);
-        std::thread::Builder::new()
-            .name("splice-decode".into())
-            .spawn(move || pump(stdout, tx, width, height))?;
+        if !reverse {
+            let mut first = decode(from, None, false)?;
+            let stdout = first.stdout.take().unwrap();
+            *child.lock().unwrap() = Some(first);
+            std::thread::Builder::new()
+                .name("splice-decode".into())
+                .spawn(move || {
+                    pump(stdout, &tx, width, height);
+                })?;
+        } else {
+            let (child, stop) = (child.clone(), stop.clone());
+            std::thread::Builder::new()
+                .name("splice-decode-back".into())
+                .spawn(move || {
+                    // Each piece ends where the last began, latest first; the
+                    // first ends a frame past `from`, so its frame comes first.
+                    let mut top = from + SECOND / fps.max(1) as Time;
+                    while top > 0 && !stop.load(Ordering::Relaxed) {
+                        let bottom = (top - REVERSE_PIECE).max(0);
+                        let Ok(mut piece) = decode(bottom, Some(top - bottom), true) else {
+                            break;
+                        };
+                        let stdout = piece.stdout.take().unwrap();
+                        if let Some(mut done) = child.lock().unwrap().replace(piece) {
+                            let _ = done.wait();
+                        }
+                        if !pump(stdout, &tx, width, height) {
+                            break;
+                        }
+                        top = bottom;
+                    }
+                    // A piece started as the stream was dropped is ended here.
+                    if let Some(mut last) = child.lock().unwrap().take() {
+                        let _ = last.kill();
+                        let _ = last.wait();
+                    }
+                })?;
+        }
         Ok(FrameStream {
             child,
+            stop,
             frames: rx,
             origin: from,
             fps,
+            speed,
+            reverse,
             taken: 0,
         })
     }
 
     /// Source time of the next frame this stream will yield.
     pub fn next_time(&self) -> Time {
-        self.origin + (self.taken as i128 * SECOND as i128 / self.fps as i128) as Time
+        let along = (self.taken as f64 * SECOND as f64 * self.speed / self.fps as f64) as Time;
+        if self.reverse {
+            self.origin - along
+        } else {
+            self.origin + along
+        }
     }
 
     /// The next frame if it is decoded already.
@@ -338,26 +531,30 @@ impl FrameStream {
     }
 }
 
-fn pump(mut stdout: std::process::ChildStdout, tx: SyncSender<Arc<RenderImage>>, width: u32, height: u32) {
+/// Passes frames on until the decoder ends; false when nobody wants more.
+fn pump(mut stdout: std::process::ChildStdout, tx: &SyncSender<Arc<RenderImage>>, width: u32, height: u32) -> bool {
     let size = (width * height * 4) as usize;
     loop {
         let mut buffer = vec![0u8; size];
         if stdout.read_exact(&mut buffer).is_err() {
-            return;
+            return true;
         }
         let Some(image) = render_image(width, height, buffer) else {
-            return;
+            return true;
         };
         if tx.send(image).is_err() {
-            return;
+            return false;
         }
     }
 }
 
 impl Drop for FrameStream {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(mut child) = self.child.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -414,7 +611,7 @@ mod tests {
 
         assert!(still(&path, SECOND, 32, 18, None).is_ok());
 
-        let mut stream = FrameStream::open(&path, SECOND / 2, 30, 32, 18, None).unwrap();
+        let mut stream = FrameStream::open(&path, SECOND / 2, 30, 32, 18, None, 1.0, false).unwrap();
         let start = std::time::Instant::now();
         let mut frames = 0;
         while frames < 10 && start.elapsed() < std::time::Duration::from_secs(5) {
@@ -424,6 +621,18 @@ mod tests {
         }
         assert_eq!(frames, 10);
         assert_eq!(stream.next_time(), SECOND / 2 + 10 * SECOND / 30);
+
+        // Backwards, across pieces, and at another speed.
+        let mut back = FrameStream::open(&path, 3 * SECOND / 2, 30, 32, 18, None, 2.0, true).unwrap();
+        let start = std::time::Instant::now();
+        let mut frames = 0;
+        while frames < 20 && start.elapsed() < std::time::Duration::from_secs(5) {
+            if back.try_next().is_some() {
+                frames += 1;
+            }
+        }
+        assert_eq!(frames, 20, "the second piece follows the first");
+        assert_eq!(back.next_time(), 3 * SECOND / 2 - 20 * 2 * SECOND / 30);
 
         assert_eq!(filmstrip(&path, probe.duration, 32, 18).unwrap().len(), 1);
 

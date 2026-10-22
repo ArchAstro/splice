@@ -496,17 +496,7 @@ impl Project {
             (0, room)
         };
         let id = ClipId(self.alloc());
-        let clip = Clip {
-            id,
-            media,
-            start,
-            source_in,
-            duration,
-            volume: 1.0,
-            look: crate::look::Look::default(),
-            generator: None,
-            placeholder: None,
-        };
+        let clip = Clip::new(id, media, start, source_in, duration);
         self.place(clip, track.unwrap_or(0));
         self.set_take(take, |t| t.clip = Some(id));
         self.prune_tracks();

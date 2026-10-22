@@ -6,8 +6,9 @@ use super::render::{caps, icon, tip};
 use super::stage::Grab;
 use super::*;
 use gpui::{Hsla, Stateful};
-use splice_core::look::{Drift, Key, Mask, MotionKind, Shape};
+use splice_core::look::{Drift, Ease, KEY_NEAR, Key, Mask, MotionKind, Preset, Prop, Shape};
 use splice_core::model::{Align, Clip, Source, Title};
+use splice_core::transition::{Kind as TransitionKind, Transition};
 
 pub const INSPECTOR_WIDTH: f32 = 292.0;
 
@@ -33,9 +34,27 @@ pub enum Field {
     CropBottom,
     EnterDuration,
     ExitDuration,
+    Exposure,
+    Contrast,
+    Saturation,
+    Warmth,
+    Tint,
+    Speed,
+    TransitionLength,
 }
 
 impl Field {
+    /// The keyframed property it shows, if it is one.
+    pub fn prop(self) -> Option<Prop> {
+        match self {
+            Field::X => Some(Prop::X),
+            Field::Y => Some(Prop::Y),
+            Field::Scale => Some(Prop::Scale),
+            Field::Opacity => Some(Prop::Opacity),
+            _ => None,
+        }
+    }
+
     fn range(self) -> (f32, f32) {
         match self {
             Field::X | Field::Y => (-0.75, 0.75),
@@ -50,6 +69,9 @@ impl Field {
             Field::MaskFeather => (0.001, 1.0),
             Field::CropLeft | Field::CropRight | Field::CropTop | Field::CropBottom => (0.0, 0.95),
             Field::EnterDuration | Field::ExitDuration => (0.1, 3.0),
+            Field::Exposure | Field::Contrast | Field::Saturation | Field::Warmth | Field::Tint => (-1.0, 1.0),
+            Field::Speed => (0.1, 4.0),
+            Field::TransitionLength => (0.1, 3.0),
         }
     }
 
@@ -66,6 +88,9 @@ impl Field {
             Field::MaskFeather => Mask::default().feather,
             Field::CropLeft | Field::CropRight | Field::CropTop | Field::CropBottom => 0.0,
             Field::EnterDuration | Field::ExitDuration => 0.5,
+            Field::Exposure | Field::Contrast | Field::Saturation | Field::Warmth | Field::Tint => 0.0,
+            Field::Speed => 1.0,
+            Field::TransitionLength => secs(Transition::DEFAULT_LENGTH) as f32,
         }
     }
 
@@ -88,7 +113,13 @@ impl Field {
             Field::CropRight => "Right",
             Field::CropTop => "Top",
             Field::CropBottom => "Bottom",
-            Field::EnterDuration | Field::ExitDuration => "Length",
+            Field::EnterDuration | Field::ExitDuration | Field::TransitionLength => "Length",
+            Field::Exposure => "Exposure",
+            Field::Contrast => "Contrast",
+            Field::Saturation => "Saturation",
+            Field::Warmth => "Warmth",
+            Field::Tint => "Tint",
+            Field::Speed => "Speed",
         }
     }
 
@@ -104,7 +135,10 @@ impl Field {
                 }
             }
             Field::TextSize => format!("{:.0} px", v * canvas_height as f32),
-            Field::EnterDuration | Field::ExitDuration => format!("{v:.1}s"),
+            Field::EnterDuration | Field::ExitDuration | Field::TransitionLength => format!("{v:.1}s"),
+            Field::Exposure => format!("{v:+.1}"),
+            Field::Contrast | Field::Saturation | Field::Warmth | Field::Tint => format!("{:+.0}", v * 100.0),
+            Field::Speed => format!("{}×", crate::timeline::speed_label(v as f64)),
             Field::X | Field::Y => format!("{:+.0}%", v * 100.0),
             // Mask places count from the middle of the picture, like X and Y.
             Field::MaskX | Field::MaskY => format!("{:+.0}%", (v - 0.5) * 100.0),
@@ -112,7 +146,8 @@ impl Field {
         }
     }
 
-    fn get(self, clip: &Clip) -> f32 {
+    /// Its value for `clip`, `at` (clip time) for what keyframes animate.
+    fn get(self, clip: &Clip, at: Time) -> f32 {
         let look = &clip.look;
         let key = look.key.unwrap_or_default();
         let mask = look.mask.unwrap_or_default();
@@ -120,11 +155,11 @@ impl Field {
             Some(Generator::Text(t)) => t.size,
             _ => Title::default().size,
         };
+        if let Some(prop) = self.prop() {
+            return look.value(prop, at);
+        }
         match self {
-            Field::X => look.x,
-            Field::Y => look.y,
-            Field::Scale => look.scale,
-            Field::Opacity => look.opacity,
+            Field::X | Field::Y | Field::Scale | Field::Opacity => unreachable!("keyed above"),
             Field::Volume => clip.volume,
             Field::TextSize => title,
             Field::KeySimilarity => key.similarity,
@@ -140,16 +175,32 @@ impl Field {
             Field::CropBottom => look.crop.map_or(0.0, |c| c.bottom),
             Field::EnterDuration => secs(look.enter.duration) as f32,
             Field::ExitDuration => secs(look.exit.duration) as f32,
+            Field::Exposure => look.grade.exposure,
+            Field::Contrast => look.grade.contrast,
+            Field::Saturation => look.grade.saturation,
+            Field::Warmth => look.grade.temperature,
+            Field::Tint => look.grade.tint,
+            Field::Speed => clip.speed as f32,
+            Field::TransitionLength => clip.transition.map_or(0.6, |t| secs(t.duration) as f32),
         }
     }
 
-    fn set(self, clip: &mut Clip, v: f32) {
+    /// Sets it on `clip`; what keyframes animate gets a keyframe `at` (clip
+    /// time). Speed and transition lengths go through the project instead.
+    fn set(self, clip: &mut Clip, v: f32, at: Time) {
         let look = &mut clip.look;
+        if let Some(prop) = self.prop() {
+            look.set_value(prop, at, v);
+            return;
+        }
         match self {
-            Field::X => look.x = v,
-            Field::Y => look.y = v,
-            Field::Scale => look.scale = v,
-            Field::Opacity => look.opacity = v,
+            Field::X | Field::Y | Field::Scale | Field::Opacity => {}
+            Field::Speed | Field::TransitionLength => {}
+            Field::Exposure => look.grade.exposure = v,
+            Field::Contrast => look.grade.contrast = v,
+            Field::Saturation => look.grade.saturation = v,
+            Field::Warmth => look.grade.temperature = v,
+            Field::Tint => look.grade.tint = v,
             Field::Volume => clip.volume = v,
             Field::TextSize => {
                 if let Some(Generator::Text(t)) = &mut clip.generator {
@@ -271,8 +322,16 @@ impl Editor {
     // Sliders.
 
     fn slider(&self, id: ClipId, clip: &Clip, field: Field, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let (lo, hi) = field.range();
-        let value = field.get(clip);
+        let (lo, hi) = self.field_range(field, clip);
+        let value = match field {
+            // As it plays: trims since can have shortened it.
+            Field::TransitionLength => self
+                .doc
+                .project
+                .cut_into(id)
+                .map_or_else(|| field.get(clip, 0), |c| secs(c.duration()) as f32),
+            _ => field.get(clip, self.clip_time(clip)),
+        };
         let frac = ((value - lo) / (hi - lo)).clamp(0.0, 1.0);
         let bounds = self.slider_bounds.clone();
         let held = matches!(&self.grab, Some(Grab::Slider { field: f, .. }) if *f == field);
@@ -348,7 +407,11 @@ impl Editor {
                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                             cx.stop_propagation();
                             if event.click_count >= 2 {
-                                this.change(id, cx, |clip| field.set(clip, field.default()));
+                                let before = this.doc.project.clone();
+                                this.apply_field(id, field, field.default());
+                                this.doc.commit(before);
+                                this.after_edit();
+                                cx.notify();
                                 return;
                             }
                             this.grab = Some(Grab::Slider {
@@ -378,17 +441,51 @@ impl Editor {
             return;
         };
         let Some(id) = self.inspected() else { return };
-        let (lo, hi) = field.range();
+        let Some(clip) = self.doc.project.clip(id) else { return };
+        let (lo, hi) = self.field_range(field, clip);
         let frac = (f32::from(at.x - bounds.left()) / f32::from(bounds.size.width).max(1.0)).clamp(0.0, 1.0);
         let mut v = lo + frac * (hi - lo);
         // Rest at the natural value when near it.
         if (v - field.default()).abs() < (hi - lo) * 0.015 {
             v = field.default();
         }
-        if let Some(clip) = self.doc.project.clip_mut(id) {
-            field.set(clip, v);
-        }
+        self.apply_field(id, field, v);
         cx.notify();
+    }
+
+    /// A slider's range for this clip: a transition is no longer than its clips allow.
+    fn field_range(&self, field: Field, clip: &Clip) -> (f32, f32) {
+        let (lo, hi) = field.range();
+        match field {
+            Field::TransitionLength => {
+                let most = secs(self.doc.project.longest_transition(clip.id)) as f32;
+                (lo, hi.min(most).max(lo + 0.05))
+            }
+            _ => (lo, hi),
+        }
+    }
+
+    /// Sets a slider's value on clip `id`, not yet an undo step.
+    pub(super) fn apply_field(&mut self, id: ClipId, field: Field, v: f32) {
+        match field {
+            Field::Speed => self.doc.project.set_speed(&[id], v as f64),
+            Field::TransitionLength => {
+                if let Some(t) = self.doc.project.clip(id).and_then(|c| c.transition) {
+                    let length = splice_core::time::from_secs(v as f64);
+                    self.doc
+                        .project
+                        .set_transition(&[id], Some(Transition { duration: length, ..t }));
+                }
+            }
+            _ => {
+                let Some(at) = self.doc.project.clip(id).map(|c| self.clip_time(c)) else {
+                    return;
+                };
+                if let Some(clip) = self.doc.project.clip_mut(id) {
+                    field.set(clip, v, at);
+                }
+            }
+        }
     }
 
     // Small controls.
@@ -696,6 +793,15 @@ impl Editor {
             seconds(clip.start)
         );
 
+        // What its media lets it do: change colour (any picture of media),
+        // change speed (video and sound, not a symbol, which stretches instead).
+        let (graded, timed) = match project.source(&clip) {
+            Some(Source::Media(m)) => (
+                m.is_visual(),
+                m.is_timed() && !matches!(m.recipe, Some(splice_core::model::Recipe::Symbol(_))),
+            ),
+            _ => (false, false),
+        };
         let mut sections: Vec<AnyElement> = Vec::new();
         let symbol = project
             .media(clip.media)
@@ -788,7 +894,16 @@ impl Editor {
         }
         if visual {
             sections.push(self.place_section(id, &clip, cx).into_any_element());
+            sections.push(self.transition_section(id, &clip, cx).into_any_element());
             sections.push(self.motion_section(id, &clip, cx).into_any_element());
+            if graded {
+                sections.push(self.colour_section(id, &clip, cx).into_any_element());
+            }
+        }
+        if timed {
+            sections.push(self.speed_section(id, &clip, cx).into_any_element());
+        }
+        if visual {
             if media_clip {
                 sections.push(self.crop_section(id, &clip, cx).into_any_element());
                 sections.push(self.key_section(id, &clip, cx).into_any_element());
@@ -1082,13 +1197,429 @@ impl Editor {
                             .text_size(px(11.0))
                             .line_height(px(16.0))
                             .text_color(Theme::overlay())
-                            .child("Drag it on the stage, or its corners to resize."),
+                            .child("Drag it on the stage, or its corners to resize. ◆ keys a value at the playhead."),
                     ),
             )
-            .child(self.slider(id, clip, Field::Scale, cx))
-            .child(self.slider(id, clip, Field::Opacity, cx))
-            .child(self.slider(id, clip, Field::X, cx))
-            .child(self.slider(id, clip, Field::Y, cx))
+            .child(self.keyed_slider(id, clip, Field::Scale, cx))
+            .child(self.keyed_slider(id, clip, Field::Opacity, cx))
+            .child(self.keyed_slider(id, clip, Field::X, cx))
+            .child(self.keyed_slider(id, clip, Field::Y, cx))
+            .when(!clip.look.keys.is_empty(), |d| d.child(self.keyframe_bar(id, clip, cx)))
+            .when(
+                !clip.look.keys.is_empty() && (self.player.position < clip.start || self.player.position > clip.end()),
+                |d| {
+                    d.child(
+                        div()
+                            .text_size(px(10.5))
+                            .line_height(px(15.0))
+                            .text_color(Theme::overlay())
+                            .child(
+                                "The playhead is outside this clip: changes to animated values key its nearest end.",
+                            ),
+                    )
+                },
+            )
+    }
+
+    // Keyframes.
+
+    /// A slider with a keyframe button: filled when this value has a
+    /// keyframe at the playhead, hollow and bright when it is animated
+    /// elsewhere, faint when it is not animated.
+    fn keyed_slider(
+        &mut self,
+        id: ClipId,
+        clip: &Clip,
+        field: Field,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let prop = field.prop().expect("a keyed field");
+        let at = self.clip_time(clip);
+        let keys = clip.look.keys.of(prop);
+        let here = keys.iter().any(|k| (k.at - at).abs() <= KEY_NEAR);
+        let animated = !keys.is_empty();
+        // Keyframes go where the playhead is, so it has to be in the clip.
+        let inside = self.player.position >= clip.start && self.player.position <= clip.end();
+        let color = if !inside {
+            Theme::surface2()
+        } else if here || animated {
+            Theme::accent()
+        } else {
+            Theme::overlay()
+        };
+        let button = div()
+            .id(SharedString::from(format!("key-{}", prop.name())))
+            .size(px(18.0))
+            .flex_none()
+            .rounded(px(4.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|s| s.bg(Theme::lane()))
+            .tooltip(tip(
+                if !inside {
+                    "Move the playhead into this clip to keyframe it"
+                } else if here {
+                    "Take away this keyframe"
+                } else if animated {
+                    "Add a keyframe here"
+                } else {
+                    "Animate: keyframe this value here"
+                },
+                None,
+            ))
+            .child(icon(if here { "key-on" } else { "key" }, color).size(px(11.0)))
+            .when(inside, |d| {
+                d.on_click(cx.listener(move |this, _, _, cx| this.toggle_key(id, prop, cx)))
+            });
+        div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .child(button)
+            .child(div().flex_1().min_w_0().child(self.slider(id, clip, field, cx)))
+    }
+
+    /// Keyframes the value of `prop` at the playhead, or takes away the one there.
+    pub(super) fn toggle_key(&mut self, id: ClipId, prop: Prop, cx: &mut Context<Self>) {
+        let Some(clip) = self.doc.project.clip(id) else { return };
+        let at = self.clip_time(clip);
+        self.change(id, cx, |c| {
+            let value = c.look.value(prop, at);
+            if !c.look.keys.remove(prop, at) {
+                c.look.keys.set(prop, at, value, None);
+            } else if c.look.keys.of(prop).is_empty() {
+                // The last one gone, the value stays where it was.
+                c.look.set_value(prop, at, value);
+            }
+        });
+    }
+
+    /// Under the keyed sliders: step between keyframes, ease the one at the
+    /// playhead, or clear them all.
+    fn keyframe_bar(&mut self, id: ClipId, clip: &Clip, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let at = self.clip_time(clip);
+        let moments = clip.look.keys.moments();
+        let start = clip.start;
+        let previous = moments.iter().rev().find(|m| **m < at - KEY_NEAR).copied();
+        let next = moments.iter().find(|m| **m > at + KEY_NEAR).copied();
+        let here = clip.look.keys.has_at(at);
+        let step = |name: &'static str, glyph: &str, to: Option<Time>, cx: &mut Context<Self>| {
+            let on = to.is_some();
+            div()
+                .id(name)
+                .size(px(22.0))
+                .rounded(px(5.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(on, |d| d.cursor_pointer().hover(|s| s.bg(Theme::lane())))
+                .child(icon(glyph, if on { Theme::text() } else { Theme::surface2() }).size(px(13.0)))
+                .when_some(to, |d, to| {
+                    d.on_click(cx.listener(move |this, _, _, cx| this.seek(start + to, cx)))
+                })
+                .tooltip(tip(
+                    if name == "key-prev" {
+                        "Previous keyframe"
+                    } else {
+                        "Next keyframe"
+                    },
+                    None,
+                ))
+                .into_any_element()
+        };
+        let ease_now = Prop::ALL
+            .iter()
+            .flat_map(|p| clip.look.keys.of(*p).iter())
+            .find(|k| (k.at - at).abs() <= KEY_NEAR)
+            .map(|k| k.ease);
+        let eases: Vec<AnyElement> = [
+            (Ease::Linear, "Linear"),
+            (Ease::InOut, "Smooth"),
+            (Ease::In, "In"),
+            (Ease::Out, "Out"),
+            (Ease::Hold, "Hold"),
+        ]
+        .into_iter()
+        .map(|(ease, label)| {
+            self.chip(
+                format!("ease-{}", ease.name()),
+                label,
+                ease_now == Some(ease),
+                cx,
+                move |this, cx| {
+                    let Some(clip) = this.doc.project.clip(id) else { return };
+                    let at = this.clip_time(clip);
+                    this.change(id, cx, |c| {
+                        for p in Prop::ALL {
+                            for k in c.look.keys.of_mut(p) {
+                                if (k.at - at).abs() <= KEY_NEAR {
+                                    k.ease = ease;
+                                }
+                            }
+                        }
+                    });
+                },
+            )
+            .flex_1()
+            .px(px(4.0))
+            .into_any_element()
+        })
+        .collect();
+        let count = moments.len();
+        div()
+            .pt(px(4.0))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(step("key-prev", "chevron-left", previous, cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(11.0))
+                            .text_color(Theme::subtext())
+                            .child(if here {
+                                format!("Keyframe at {}", seconds(at))
+                            } else {
+                                format!("{count} keyframe{}", if count == 1 { "" } else { "s" })
+                            }),
+                    )
+                    .child(step("key-next", "chevron-right", next, cx))
+                    .child(self.chip("keys-clear", "Clear", false, cx, move |this, cx| {
+                        let Some(clip) = this.doc.project.clip(id) else { return };
+                        let at = this.clip_time(clip);
+                        this.change(id, cx, |c| {
+                            // Each value stays as it is at the playhead.
+                            for p in Prop::ALL {
+                                let v = c.look.value(p, at);
+                                c.look.keys.of_mut(p).clear();
+                                c.look.set_value(p, at, v);
+                            }
+                        });
+                    })),
+            )
+            .when(here, |d| {
+                d.child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(Theme::overlay())
+                        .child("From this keyframe to the next:"),
+                )
+                .child(div().flex().gap(px(4.0)).children(eases))
+            })
+    }
+
+    // Transitions.
+
+    fn transition_section(&mut self, id: ClipId, clip: &Clip, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let current = clip.transition;
+        let from_before = self.doc.project.clip_before(id).is_some();
+        let summary = match current {
+            Some(t) => format!("{} · {}", t.kind.label(), seconds(t.duration)),
+            None => "None".into(),
+        };
+        let (section, open) = self.fold(id, "Transition", current.is_some(), summary, cx);
+        let mut chips: Vec<AnyElement> = vec![
+            self.chip("transition-none", "None", current.is_none(), cx, move |this, cx| {
+                this.edit(cx, |p| p.set_transition(&[id], None));
+            })
+            .into_any_element(),
+        ];
+        chips.extend(TransitionKind::ALL.into_iter().map(|kind| {
+            let on = current.is_some_and(|t| t.kind == kind);
+            self.chip(
+                format!("transition-{}", kind.name()),
+                kind.label(),
+                on,
+                cx,
+                move |this, cx| {
+                    let length = this
+                        .doc
+                        .project
+                        .clip(id)
+                        .and_then(|c| c.transition)
+                        .map_or(Transition::DEFAULT_LENGTH, |t| t.duration);
+                    this.edit(cx, |p| {
+                        p.set_transition(&[id], Some(Transition { kind, duration: length }));
+                    });
+                },
+            )
+            .into_any_element()
+        }));
+        section.when(open, |d| {
+            d.child(div().flex().flex_wrap().gap(px(5.0)).children(chips))
+                .when(current.is_some(), |d| {
+                    d.child(self.slider(id, clip, Field::TransitionLength, cx))
+                })
+                .child(
+                    div()
+                        .text_size(px(10.5))
+                        .line_height(px(15.0))
+                        .text_color(Theme::overlay())
+                        .child(if from_before {
+                            "From the clip before, centred on the cut. Frames past either clip's ends hold still."
+                        } else {
+                            "No clip ends right here, so it comes in over what is beneath."
+                        }),
+                )
+        })
+    }
+
+    // Colour.
+
+    fn colour_section(&mut self, id: ClipId, clip: &Clip, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let grade = clip.look.grade;
+        let (section, open) = self.fold(id, "Colour", !grade.is_none(), grade.summary(), cx);
+        let looks: Vec<AnyElement> = Preset::ALL
+            .into_iter()
+            .map(|preset| {
+                self.chip(
+                    format!("look-{}", preset.name()),
+                    preset.label(),
+                    grade.preset == preset,
+                    cx,
+                    move |this, cx| this.change(id, cx, |c| c.look.grade.preset = preset),
+                )
+                .into_any_element()
+            })
+            .collect();
+        section.when(open, |d| {
+            d.child(div().flex().flex_wrap().gap(px(5.0)).children(looks))
+                .child(self.slider(id, clip, Field::Exposure, cx))
+                .child(self.slider(id, clip, Field::Contrast, cx))
+                .child(self.slider(id, clip, Field::Saturation, cx))
+                .child(self.slider(id, clip, Field::Warmth, cx))
+                .child(self.slider(id, clip, Field::Tint, cx))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(5.0))
+                        .when(!grade.is_none(), |d| {
+                            d.child(self.chip("grade-reset", "Reset", false, cx, move |this, cx| {
+                                this.change(id, cx, |c| c.look.grade = Default::default());
+                            }))
+                        })
+                        .child(
+                            self.chip("grade-all", "Use on every clip", false, cx, move |this, cx| {
+                                this.grade_everything_like(id, cx);
+                            })
+                            .tooltip(tip("Give every video and picture this colour", None)),
+                        ),
+                )
+        })
+    }
+
+    /// Gives every video and picture clip the colour of clip `id`.
+    fn grade_everything_like(&mut self, id: ClipId, cx: &mut Context<Self>) {
+        let Some(grade) = self.doc.project.clip(id).map(|c| c.look.grade) else {
+            return;
+        };
+        let count = self.edit(cx, |p| {
+            let ids: Vec<ClipId> = p
+                .clips()
+                .filter(|(_, c)| c.generator.is_none())
+                .filter(|(_, c)| p.media(c.media).is_some_and(|m| m.is_visual()))
+                .map(|(_, c)| c.id)
+                .collect();
+            for clip in &ids {
+                p.set_look(*clip, |l| l.grade = grade);
+            }
+            ids.len()
+        });
+        self.say(format!("Every picture has this colour now ({count} clips)"));
+    }
+
+    // Speed.
+
+    fn speed_section(&mut self, id: ClipId, clip: &Clip, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        if clip.frozen {
+            let (section, open) = self.fold(id, "Speed", true, "Held frame".into(), cx);
+            return section
+                .when(open, |d| {
+                    d.child(
+                        div()
+                            .text_size(px(11.0))
+                            .line_height(px(16.0))
+                            .text_color(Theme::overlay())
+                            .child("One frame, held. Drag its end on the timeline to hold it longer."),
+                    )
+                })
+                .into_any_element();
+        }
+        let video = self
+            .doc
+            .project
+            .media(clip.media)
+            .is_some_and(|m| m.kind == MediaKind::Video);
+        let speed = clip.speed;
+        let mut said = Vec::new();
+        if speed != 1.0 {
+            said.push(format!("{}×", crate::timeline::speed_label(speed)));
+        }
+        if clip.reverse {
+            said.push("Backwards".to_string());
+        }
+        let summary = if said.is_empty() {
+            "Normal".to_string()
+        } else {
+            said.join(" · ")
+        };
+        let (section, open) = self.fold(id, "Speed", !said.is_empty(), summary, cx);
+        let presets: Vec<AnyElement> = [0.25, 0.5, 1.0, 1.5, 2.0, 4.0]
+            .into_iter()
+            .map(|v: f64| {
+                self.chip(
+                    format!("speed-{v}"),
+                    &format!("{}×", crate::timeline::speed_label(v)),
+                    (speed - v).abs() < 1e-6,
+                    cx,
+                    move |this, cx| this.edit(cx, |p| p.set_speed(&[id], v)),
+                )
+                .flex_1()
+                .px(px(2.0))
+                .into_any_element()
+            })
+            .collect();
+        let inside = clip.contains(self.player.position);
+        section
+            .when(open, |d| {
+                d.child(div().flex().gap(px(4.0)).children(presets))
+                    .child(self.slider(id, clip, Field::Speed, cx))
+                    .child(
+                        self.toggle("reverse", "Play backwards", clip.reverse, cx, move |this, cx| {
+                            let back = this.doc.project.clip(id).is_some_and(|c| !c.reverse);
+                            this.edit(cx, |p| p.set_reverse(&[id], back));
+                        }),
+                    )
+                    .when(video, |d| {
+                        d.child(
+                            div().flex().child(
+                                self.chip("freeze", "Freeze frame at the playhead", false, cx, move |this, cx| {
+                                    this.freeze_frame_at_playhead(cx);
+                                })
+                                .when(!inside, |c| c.opacity(0.5))
+                                .tooltip(tip(
+                                    "Holds this frame for two seconds; what follows moves along",
+                                    Some("⌥F"),
+                                )),
+                            ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .line_height(px(15.0))
+                            .text_color(Theme::overlay())
+                            .child("Faster clips get shorter and what follows moves up; sound keeps its pitch."),
+                    )
+            })
+            .into_any_element()
     }
 
     fn motion_section(&mut self, id: ClipId, clip: &Clip, cx: &mut Context<Self>) -> impl IntoElement + use<> {

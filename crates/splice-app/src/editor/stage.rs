@@ -3,7 +3,8 @@
 
 use super::*;
 use gpui::{Hsla, Stateful};
-use splice_core::look::Pose;
+use splice_core::look::{Pose, Prop};
+use splice_core::model::Clip;
 use splice_core::model::{Recipe, Source};
 
 /// Something held with the mouse until it is let go. Changes land in the
@@ -53,6 +54,19 @@ pub struct Layer {
     /// The part of the picture its mask lets through: left, top, right,
     /// bottom, as fractions of its frame.
     pub visible: [f32; 4],
+    /// The part a wipe shows now, the same way.
+    pub shows: [f32; 4],
+}
+
+/// What the stage paints, bottom first: pictures, and the colour of a dip.
+pub enum Paint {
+    Picture(Layer),
+    /// A colour: over the whole canvas, or over one clip's picture.
+    Fill {
+        color: u32,
+        opacity: f32,
+        over: Option<ClipId>,
+    },
 }
 
 /// What a mask lets through of a picture's frame.
@@ -109,14 +123,31 @@ fn corners(rect: Bounds<Pixels>) -> [Point<Pixels>; 4] {
 }
 
 impl Editor {
-    /// The pictures under the playhead, bottom first.
-    pub(super) fn layers(&mut self) -> Vec<Layer> {
+    /// Where the playhead is in `clip`, from its start, kept inside it.
+    pub(super) fn clip_time(&self, clip: &Clip) -> Time {
+        (self.player.position - clip.start).clamp(0, clip.duration)
+    }
+
+    /// What is drawn at the playhead, bottom first, placed as export places it.
+    pub(super) fn layers(&mut self) -> Vec<Paint> {
+        use splice_core::compose::Shown;
         let project = &self.doc.project;
         let canvas = (project.settings.width, project.settings.height);
         let t = self.player.position;
         let mut layers = Vec::new();
-        for (clip, source) in project.visual_stack(t) {
-            let pose = clip.look.pose(clip.duration, t - clip.start);
+        for shown in project.picture(t) {
+            let (drawn, pose, part) = match shown {
+                Shown::Clip { drawn, pose, part } => (*drawn, pose, part),
+                Shown::Fill { color, opacity, over } => {
+                    layers.push(Paint::Fill {
+                        color,
+                        opacity: opacity as f32,
+                        over,
+                    });
+                    continue;
+                }
+            };
+            let (clip, source) = (drawn.clip, drawn.source);
             let (image, rendered) = match source {
                 Source::Media(media) => {
                     let filters = clip.look.pixel_filters();
@@ -144,7 +175,7 @@ impl Editor {
                 }
                 Source::Generated(_) => (natural, pose),
             };
-            layers.push(Layer {
+            layers.push(Paint::Picture(Layer {
                 clip: clip.id,
                 image,
                 natural,
@@ -162,7 +193,8 @@ impl Editor {
                     }
                     v
                 },
-            });
+                shows: part,
+            }));
         }
         layers
     }
@@ -242,9 +274,36 @@ impl Editor {
         .inset_0();
 
         // One element per picture, so each carries its own opacity.
-        let pictures = layers.into_iter().map(|layer| {
+        let pictures = layers.into_iter().map(|paint| {
             let cell = self.stage_bounds.clone();
             let placed = placed.clone();
+            let layer = match paint {
+                Paint::Fill { color, opacity, over } => {
+                    return div().absolute().inset_0().opacity(opacity.clamp(0.0, 1.0)).child(
+                        canvas(
+                            |_, _, _| {},
+                            move |_, _, window, _| {
+                                let stage = cell.get();
+                                // Over one picture: where it was just placed.
+                                let area = match over {
+                                    Some(id) => placed
+                                        .borrow()
+                                        .iter()
+                                        .rev()
+                                        .find(|(c, _, _)| *c == id)
+                                        .map(|(_, r, _)| r.intersect(&stage)),
+                                    None => Some(stage),
+                                };
+                                if let Some(area) = area {
+                                    window.paint_quad(gpui::fill(area, gpui::rgb(color)));
+                                }
+                            },
+                        )
+                        .size_full(),
+                    );
+                }
+                Paint::Picture(layer) => layer,
+            };
             let opacity = layer.pose.opacity.clamp(0.0, 1.0) as f32;
             div().absolute().inset_0().opacity(opacity).child(
                 canvas(
@@ -252,10 +311,12 @@ impl Editor {
                     move |_, _, window, _| {
                         let stage = cell.get();
                         let rect = layer_rect(stage, canvas_size, layer.natural, &layer.pose);
-                        placed
-                            .borrow_mut()
-                            .push((layer.clip, sub_rect(rect, layer.visible), rect.center()));
-                        window.with_content_mask(Some(gpui::ContentMask { bounds: stage }), |window| {
+                        // Picked by what shows of it: inside its mask and any wipe.
+                        let shows = sub_rect(rect, layer.shows);
+                        let picked = sub_rect(rect, layer.visible).intersect(&shows);
+                        placed.borrow_mut().push((layer.clip, picked, rect.center()));
+                        let clip_to = stage.intersect(&shows);
+                        window.with_content_mask(Some(gpui::ContentMask { bounds: clip_to }), |window| {
                             let _ = window.paint_image(rect, Corners::default(), layer.image, 0, false);
                         });
                     },
@@ -366,11 +427,12 @@ impl Editor {
             if near && let Some(clip) = self.doc.project.clip(selected) {
                 let center = *center;
                 let from = f32::from((p.x - center.x).abs().max((p.y - center.y).abs())).max(1.0);
+                let at = self.clip_time(clip);
                 self.grab = Some(Grab::Scale {
                     clip: selected,
                     center,
                     from,
-                    start: clip.look.scale,
+                    start: clip.look.value(Prop::Scale, at),
                     before: self.doc.project.clone(),
                 });
                 return cx.notify();
@@ -412,10 +474,11 @@ impl Editor {
                     window.prevent_default();
                     return cx.notify();
                 }
+                let at = self.clip_time(clip);
                 self.grab = Some(Grab::Move {
                     clip: id,
                     from: p,
-                    start: (clip.look.x, clip.look.y),
+                    start: (clip.look.value(Prop::X, at), clip.look.value(Prop::Y, at)),
                     stage: (sw.max(1.0), sh.max(1.0)),
                     before: self.doc.project.clone(),
                 });
@@ -445,9 +508,10 @@ impl Editor {
                     y = 0.0;
                 }
                 let clip = *clip;
+                let at = self.doc.project.clip(clip).map_or(0, |c| self.clip_time(c));
                 self.doc.project.set_look(clip, |look| {
-                    look.x = x;
-                    look.y = y;
+                    look.set_value(Prop::X, at, x);
+                    look.set_value(Prop::Y, at, y);
                 });
             }
             Some(Grab::Scale {
@@ -460,7 +524,10 @@ impl Editor {
                 let reach = f32::from((at.x - center.x).abs().max((at.y - center.y).abs()));
                 let scale = (start * reach / from).clamp(0.05, 8.0);
                 let clip = *clip;
-                self.doc.project.set_look(clip, |look| look.scale = scale);
+                let at = self.doc.project.clip(clip).map_or(0, |c| self.clip_time(c));
+                self.doc
+                    .project
+                    .set_look(clip, |look| look.set_value(Prop::Scale, at, scale));
             }
             Some(Grab::Slider { field, .. }) => {
                 let field = *field;
