@@ -283,12 +283,6 @@ fn build(
                     Source::Generated(_) => (natural, (0.0, 0.0)),
                 };
                 let pose = look.pose_expr(clip.duration);
-                // Local time inside the clip, in each filter's own clock.
-                let local = if offset > 0 {
-                    format!("(t+{})", fmt(offset))
-                } else {
-                    "t".into()
-                };
                 let mut chain = vec![format!("fps={fps}")];
                 if matches!(source, Source::Media(_))
                     && let Some(pixels) = look.pixel_filters()
@@ -304,13 +298,21 @@ fn build(
                 if opacity < 1.0 {
                     chain.push(format!("colorchannelmixer=aa={:.4}", opacity.max(0.0)));
                 }
+                let animated =
+                    pose.x.constant().is_none() || pose.y.constant().is_none() || pose.scale.constant().is_none();
+                // A moving picture keeps one size and is placed anew each
+                // frame to a fraction of a pixel. Resizing it every frame
+                // rounded its size to whole pixels and moved its centre with
+                // the rounding, so a slow zoom or slide jittered.
+                let (pw, ph) = (even(nw.round()), even(nh.round()));
+                let (fw, fh) = (pw.max(w), ph.max(h));
                 match pose.scale.constant() {
-                    Some(k) => chain.push(format!("scale={}:{}", even((nw * k).round()), even((nh * k).round()))),
-                    None => {
-                        let k = pose.scale.ffmpeg(&local);
-                        chain.push(format!(
-                            "scale=w='max(2,trunc({nw:.3}*{k}/2)*2)':h='max(2,trunc({nh:.3}*{k}/2)*2)':eval=frame"
-                        ));
+                    Some(k) if !animated => {
+                        chain.push(format!("scale={}:{}", even((nw * k).round()), even((nh * k).round())))
+                    }
+                    _ => {
+                        chain.push(format!("scale={pw}:{ph}"));
+                        chain.push(format!("pad={fw}:{fh}:(ow-iw)/2:(oh-ih)/2:color=black@0"));
                     }
                 }
                 for (motion, inward) in [(look.enter, true), (look.exit, false)] {
@@ -322,6 +324,32 @@ fn build(
                     chain.push(format!(
                         "fade=t={}:st={st:.6}:d={fd:.6}:alpha=1",
                         if inward { "in" } else { "out" }
+                    ));
+                }
+                if animated {
+                    // perspective has no clock of its own; its frame count is one.
+                    let t = if offset > 0 {
+                        format!("(in/{fps}+{})", fmt(offset))
+                    } else {
+                        format!("(in/{fps})")
+                    };
+                    let k = format!("max(0.0001,{})", pose.scale.ffmpeg(&t));
+                    let along = |by: f64| {
+                        if by.abs() < 1e-6 {
+                            String::new()
+                        } else {
+                            format!("+{by:.3}*{k}")
+                        }
+                    };
+                    // The picture's centre, in the frame it moves in.
+                    let cx_at = format!("({fw}/2+{}*{w}{})", pose.x.ffmpeg(&t), along(cx));
+                    let cy_at = format!("({fh}/2+{}*{h}{})", pose.y.ffmpeg(&t), along(cy));
+                    let (hx, hy) = (format!("{}*{k}", fw as f64 / 2.0), format!("{}*{k}", fh as f64 / 2.0));
+                    chain.push("format=yuva444p".into());
+                    chain.push(format!(
+                        "perspective=sense=destination:interpolation=cubic:eval=frame:\
+                         x0='{cx_at}-{hx}':y0='{cy_at}-{hy}':x1='{cx_at}+{hx}':y1='{cy_at}-{hy}':\
+                         x2='{cx_at}-{hx}':y2='{cy_at}+{hy}':x3='{cx_at}+{hx}':y3='{cy_at}+{hy}'"
                     ));
                 }
                 // Over a see-through canvas the overlay negotiates its format
@@ -344,8 +372,6 @@ fn build(
                 } else {
                     since
                 };
-                let animated =
-                    pose.x.constant().is_none() || pose.y.constant().is_none() || pose.scale.constant().is_none();
                 // A cropped picture's remains stay where they were, scaled with it.
                 let shift = |by: f64| {
                     if by.abs() < 1e-6 {
@@ -354,12 +380,18 @@ fn build(
                         format!("+{by:.3}*{}", pose.scale.ffmpeg(&since))
                     }
                 };
-                let x = format!("(W-w)/2+{}*W{}", pose.x.ffmpeg(&since), shift(cx));
-                let y = format!("(H-h)/2+{}*H{}", pose.y.ffmpeg(&since), shift(cy));
+                // A moving picture has already been placed in its frame.
+                let (x, y) = if animated {
+                    (format!("-{}", (fw - w) / 2), format!("-{}", (fh - h) / 2))
+                } else {
+                    (
+                        format!("(W-w)/2+{}*W{}", pose.x.ffmpeg(&since), shift(cx)),
+                        format!("(H-h)/2+{}*H{}", pose.y.ffmpeg(&since), shift(cy)),
+                    )
+                };
                 filters.push(format!(
-                    "[{picture}][v{tag}]overlay=x='{x}':y='{y}':{}{}eof_action=pass:\
+                    "[{picture}][v{tag}]overlay=x='{x}':y='{y}':{}eof_action=pass:\
                      enable='between(t,{start},{end})'[p{tag}]",
-                    if animated { "eval=frame:" } else { "" },
                     // Over a see-through canvas, keep what is see-through.
                     if layer { "format=auto:" } else { "" }
                 ));
@@ -483,7 +515,7 @@ fn strings(items: &[&str]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::look::{Key, Mask};
+    use crate::look::{Drift, Key, Mask};
     use crate::model::{Generator, MediaId, Title};
     use crate::time::SECOND;
 
@@ -582,6 +614,25 @@ mod tests {
         assert!(graph.contains("fade=t=in:st=0.000000:d=0.500000:alpha=1"));
         assert!(graph.contains("fade=t=out:st=1.500000:d=0.500000:alpha=1"));
         assert_eq!(graph.matches("amix=inputs=2").count(), 1, "titles make no sound");
+    }
+
+    #[test]
+    fn a_moving_picture_is_placed_to_a_fraction_of_a_pixel() {
+        let mut p = Project::default();
+        let v = video(&mut p, "a", 4);
+        let clip = p.append_clip(v).unwrap();
+        p.set_look(clip, |look| {
+            look.drift = Drift::ZoomIn;
+            look.x = 0.1;
+        });
+        let plan = plan(&p, &Fake, Path::new("/o.mp4"), Quality::Draft).unwrap();
+        let graph = graph(&plan);
+        // Resizing every frame rounds to whole pixels, and a slow zoom jitters.
+        assert!(!graph.contains("trunc("), "no per-frame resize: {graph}");
+        assert!(graph.contains("scale=1920:1080,pad=1920:1080:"), "{graph}");
+        assert!(graph.contains("perspective=sense=destination:interpolation=cubic:eval=frame"));
+        assert!(graph.contains("(in/30)"), "the zoom follows the frame count");
+        assert!(graph.contains("overlay=x='-0':y='-0'"), "{graph}");
     }
 
     #[test]
