@@ -31,6 +31,13 @@ pub struct Look {
     pub enter: Motion,
     pub exit: Motion,
     pub drift: Drift,
+    /// Colour: a look, and exposure, contrast, saturation, warmth and tint.
+    #[serde(skip_serializing_if = "Grade::is_none")]
+    pub grade: Grade,
+    /// Keyframes: place, size and opacity set at moments in the clip, eased
+    /// between. A property with keyframes follows them instead of its value above.
+    #[serde(skip_serializing_if = "Keys::is_empty")]
+    pub keys: Keys,
 }
 
 impl Default for Look {
@@ -46,8 +53,498 @@ impl Default for Look {
             enter: Motion::default(),
             exit: Motion::default(),
             drift: Drift::None,
+            grade: Grade::default(),
+            keys: Keys::default(),
         }
     }
+}
+
+/// A ready-made look, under the grade's own adjustments.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Preset {
+    #[default]
+    None,
+    Warm,
+    Cool,
+    Vivid,
+    Muted,
+    Faded,
+    Film,
+    TealOrange,
+    Mono,
+    Noir,
+}
+
+impl Preset {
+    pub const ALL: [Preset; 10] = [
+        Preset::None,
+        Preset::Warm,
+        Preset::Cool,
+        Preset::Vivid,
+        Preset::Muted,
+        Preset::Faded,
+        Preset::Film,
+        Preset::TealOrange,
+        Preset::Mono,
+        Preset::Noir,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Preset::None => "none",
+            Preset::Warm => "warm",
+            Preset::Cool => "cool",
+            Preset::Vivid => "vivid",
+            Preset::Muted => "muted",
+            Preset::Faded => "faded",
+            Preset::Film => "film",
+            Preset::TealOrange => "teal-orange",
+            Preset::Mono => "mono",
+            Preset::Noir => "noir",
+        }
+    }
+
+    /// As the inspector says it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Preset::None => "None",
+            Preset::Warm => "Warm",
+            Preset::Cool => "Cool",
+            Preset::Vivid => "Vivid",
+            Preset::Muted => "Muted",
+            Preset::Faded => "Faded",
+            Preset::Film => "Film",
+            Preset::TealOrange => "Teal & orange",
+            Preset::Mono => "Black & white",
+            Preset::Noir => "Noir",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Preset> {
+        let name = name.trim().to_lowercase().replace([' ', '_'], "-").replace('&', "");
+        let name = match name.as_str() {
+            "teal--orange" | "teal-and-orange" | "orange-teal" => "teal-orange",
+            "black-white" | "black--white" | "black-and-white" | "bw" | "b-w" | "grey" | "gray" => "mono",
+            other => other,
+        }
+        .to_string();
+        Preset::ALL.into_iter().find(|p| p.name() == name)
+    }
+
+    /// Its ffmpeg filters.
+    fn ffmpeg(self) -> Option<&'static str> {
+        Some(match self {
+            Preset::None => return None,
+            Preset::Warm => "colorchannelmixer=rr=1.08:gg=1.01:bb=0.88,eq=saturation=1.06",
+            Preset::Cool => "colorchannelmixer=rr=0.9:gg=0.99:bb=1.1,eq=saturation=0.96",
+            Preset::Vivid => "eq=contrast=1.08:saturation=1.38",
+            Preset::Muted => "eq=contrast=0.96:saturation=0.66",
+            Preset::Faded => "curves=all='0/0.09 0.5/0.52 1/0.9',eq=saturation=0.78",
+            Preset::Film => {
+                "curves=preset=medium_contrast,colorbalance=rs=-0.04:bs=0.05:rh=0.05:bh=-0.05,eq=saturation=0.9"
+            }
+            Preset::TealOrange => "colorbalance=rs=-0.12:gs=0.02:bs=0.12:rh=0.1:gh=0.02:bh=-0.1,eq=saturation=1.1",
+            Preset::Mono => "hue=s=0",
+            Preset::Noir => "hue=s=0,curves=preset=strong_contrast",
+        })
+    }
+}
+
+/// How a clip's colour is changed. Every adjustment is 0 when untouched.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Grade {
+    pub preset: Preset,
+    /// Stops brighter (up to 1) or darker (down to −1).
+    pub exposure: f32,
+    /// −1 to 1: flatter to punchier.
+    pub contrast: f32,
+    /// −1 (grey) to 1.
+    pub saturation: f32,
+    /// −1 (cooler, bluer) to 1 (warmer, more orange).
+    pub temperature: f32,
+    /// −1 (greener) to 1 (more magenta).
+    pub tint: f32,
+}
+
+impl Grade {
+    pub fn is_none(&self) -> bool {
+        *self == Grade::default()
+    }
+
+    /// Every adjustment in range.
+    pub fn clamped(self) -> Grade {
+        let unit = |v: f32| if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 };
+        Grade {
+            preset: self.preset,
+            exposure: unit(self.exposure),
+            contrast: unit(self.contrast),
+            saturation: unit(self.saturation),
+            temperature: unit(self.temperature),
+            tint: unit(self.tint),
+        }
+    }
+
+    /// Its ffmpeg filters: the look first, then the adjustments over it.
+    pub fn ffmpeg(&self) -> Option<String> {
+        let g = self.clamped();
+        let mut filters: Vec<String> = g.preset.ffmpeg().map(String::from).into_iter().collect();
+        let near = |v: f32| v.abs() < 0.005;
+        // Exposure as a gain, warmth and tint as a lean of the channels.
+        if !(near(g.exposure) && near(g.temperature) && near(g.tint)) {
+            let k = 2f32.powf(g.exposure);
+            let (r, gr, b) = (
+                k * (1.0 + 0.14 * g.temperature),
+                k * (1.0 - 0.1 * g.tint),
+                k * (1.0 - 0.14 * g.temperature),
+            );
+            filters.push(format!(
+                "colorchannelmixer=rr={:.4}:gg={:.4}:bb={:.4}",
+                r.clamp(0.0, 2.0),
+                gr.clamp(0.0, 2.0),
+                b.clamp(0.0, 2.0)
+            ));
+        }
+        if !(near(g.contrast) && near(g.saturation)) {
+            // Contrast eases off below the middle, so −1 is flat, not grey.
+            let contrast = if g.contrast >= 0.0 {
+                1.0 + 0.8 * g.contrast
+            } else {
+                1.0 + 0.6 * g.contrast
+            };
+            filters.push(format!(
+                "eq=contrast={contrast:.4}:saturation={:.4}",
+                (1.0 + g.saturation).clamp(0.0, 3.0)
+            ));
+        }
+        (!filters.is_empty()).then(|| filters.join(","))
+    }
+
+    /// What it does, in a few words: "Film · warmer · +0.5 stop".
+    pub fn summary(&self) -> String {
+        let g = self.clamped();
+        let mut said = Vec::new();
+        if g.preset != Preset::None {
+            said.push(g.preset.label().to_string());
+        }
+        if g.exposure.abs() >= 0.05 {
+            said.push(format!("{:+.1} stop", g.exposure));
+        }
+        let lean = |v: f32, up: &str, down: &str| {
+            if v >= 0.05 {
+                Some(up.to_string())
+            } else if v <= -0.05 {
+                Some(down.to_string())
+            } else {
+                None
+            }
+        };
+        said.extend(lean(g.contrast, "more contrast", "less contrast"));
+        said.extend(lean(g.saturation, "richer", "paler"));
+        said.extend(lean(g.temperature, "warmer", "cooler"));
+        said.extend(lean(g.tint, "magenta", "green"));
+        if said.is_empty() {
+            "Off".into()
+        } else {
+            said.join(" · ")
+        }
+    }
+}
+
+/// How a keyframed value leaves a keyframe for the next one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Ease {
+    Linear,
+    /// Starts slowly.
+    In,
+    /// Arrives slowly.
+    Out,
+    /// Starts and arrives slowly.
+    #[default]
+    InOut,
+    /// Stays put, then jumps at the next keyframe.
+    Hold,
+}
+
+impl Ease {
+    pub const ALL: [Ease; 5] = [Ease::Linear, Ease::In, Ease::Out, Ease::InOut, Ease::Hold];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Ease::Linear => "linear",
+            Ease::In => "in",
+            Ease::Out => "out",
+            Ease::InOut => "in-out",
+            Ease::Hold => "hold",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Ease> {
+        let name = name.trim().to_lowercase();
+        let name = match name.as_str() {
+            "ease-in" | "ease in" => "in",
+            "ease-out" | "ease out" => "out",
+            "ease" | "smooth" | "ease-in-out" | "inout" => "in-out",
+            "step" | "none" => "hold",
+            other => other,
+        };
+        Ease::ALL.into_iter().find(|e| e.name() == name)
+    }
+
+    /// Progress `p` (0 to 1, already clipped) eased.
+    fn expr(self, p: Expr) -> Expr {
+        match self {
+            Ease::Linear => p,
+            Ease::In => pow(p, 3.0),
+            Ease::Out => sub(C(1.0), pow(sub(C(1.0), p), 3.0)),
+            // Smoothstep: 3p² − 2p³.
+            Ease::InOut => mul(mul(p.clone(), p.clone()), sub(C(3.0), mul(C(2.0), p))),
+            Ease::Hold => C(0.0),
+        }
+    }
+}
+
+/// What keyframes can animate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Prop {
+    X,
+    Y,
+    Scale,
+    Opacity,
+}
+
+impl Prop {
+    pub const ALL: [Prop; 4] = [Prop::X, Prop::Y, Prop::Scale, Prop::Opacity];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Prop::X => "x",
+            Prop::Y => "y",
+            Prop::Scale => "scale",
+            Prop::Opacity => "opacity",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Prop> {
+        match name.trim().to_lowercase().as_str() {
+            "x" | "across" => Some(Prop::X),
+            "y" | "down" => Some(Prop::Y),
+            "scale" | "size" => Some(Prop::Scale),
+            "opacity" => Some(Prop::Opacity),
+            _ => None,
+        }
+    }
+
+    /// The look's own value for it.
+    pub fn of(self, look: &Look) -> f32 {
+        match self {
+            Prop::X => look.x,
+            Prop::Y => look.y,
+            Prop::Scale => look.scale,
+            Prop::Opacity => look.opacity,
+        }
+    }
+
+    /// Its value kept in range.
+    pub fn clamp(self, v: f32) -> f32 {
+        let v = if v.is_finite() { v } else { 0.0 };
+        match self {
+            Prop::X | Prop::Y => v.clamp(-4.0, 4.0),
+            Prop::Scale => v.clamp(0.01, 20.0),
+            Prop::Opacity => v.clamp(0.0, 1.0),
+        }
+    }
+}
+
+/// A value at a moment of the clip (clip time, from its start).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Keyframe {
+    pub at: Time,
+    pub value: f32,
+    #[serde(default)]
+    pub ease: Ease,
+}
+
+/// Keyframes per property, each list in time order.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Keys {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub x: Vec<Keyframe>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub y: Vec<Keyframe>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scale: Vec<Keyframe>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub opacity: Vec<Keyframe>,
+}
+
+/// Keyframes closer than this are the same one.
+pub const KEY_NEAR: Time = SECOND / 100;
+
+impl Keys {
+    pub fn is_empty(&self) -> bool {
+        Prop::ALL.iter().all(|p| self.of(*p).is_empty())
+    }
+
+    pub fn of(&self, prop: Prop) -> &[Keyframe] {
+        match prop {
+            Prop::X => &self.x,
+            Prop::Y => &self.y,
+            Prop::Scale => &self.scale,
+            Prop::Opacity => &self.opacity,
+        }
+    }
+
+    pub fn of_mut(&mut self, prop: Prop) -> &mut Vec<Keyframe> {
+        match prop {
+            Prop::X => &mut self.x,
+            Prop::Y => &mut self.y,
+            Prop::Scale => &mut self.scale,
+            Prop::Opacity => &mut self.opacity,
+        }
+    }
+
+    /// Sets `prop` to `value` at `at`, replacing a keyframe there. A new
+    /// keyframe takes the ease of the one before it.
+    pub fn set(&mut self, prop: Prop, at: Time, value: f32, ease: Option<Ease>) {
+        let value = prop.clamp(value);
+        let keys = self.of_mut(prop);
+        if let Some(k) = keys.iter_mut().find(|k| (k.at - at).abs() <= KEY_NEAR) {
+            k.value = value;
+            if let Some(e) = ease {
+                k.ease = e;
+            }
+            return;
+        }
+        let i = keys.partition_point(|k| k.at < at);
+        let ease = ease.unwrap_or_else(|| i.checked_sub(1).map_or(Ease::default(), |b| keys[b].ease));
+        keys.insert(i, Keyframe { at, value, ease });
+    }
+
+    /// Takes away the keyframe at `at`; whether there was one.
+    pub fn remove(&mut self, prop: Prop, at: Time) -> bool {
+        let keys = self.of_mut(prop);
+        let before = keys.len();
+        keys.retain(|k| (k.at - at).abs() > KEY_NEAR);
+        keys.len() != before
+    }
+
+    /// Every moment with a keyframe, in order.
+    pub fn moments(&self) -> Vec<Time> {
+        let mut at: Vec<Time> = Prop::ALL
+            .iter()
+            .flat_map(|p| self.of(*p).iter().map(|k| k.at))
+            .collect();
+        at.sort_unstable();
+        at.dedup_by(|a, b| (*a - *b).abs() <= KEY_NEAR);
+        at
+    }
+
+    /// Whether any property has a keyframe at `at`.
+    pub fn has_at(&self, at: Time) -> bool {
+        Prop::ALL
+            .iter()
+            .any(|p| self.of(*p).iter().any(|k| (k.at - at).abs() <= KEY_NEAR))
+    }
+
+    /// The value `prop` follows at clip time `t`, or None without keyframes.
+    pub fn value(&self, prop: Prop, t: Time) -> Option<f32> {
+        let keys = self.of(prop);
+        (!keys.is_empty()).then(|| keyed(keys, C(0.0)).eval(secs(t)) as f32)
+    }
+
+    /// Moves every keyframe by `dt`. Those that leave the clip are kept, so
+    /// trimming back out finds them again.
+    pub fn shift(&mut self, dt: Time) {
+        for prop in Prop::ALL {
+            for k in self.of_mut(prop) {
+                k.at += dt;
+            }
+        }
+    }
+
+    /// Stretches keyframe times by `k` (a clip played at another speed).
+    pub fn scale_time(&mut self, k: f64) {
+        for prop in Prop::ALL {
+            for key in self.of_mut(prop) {
+                key.at = (key.at as f64 * k).round() as Time;
+            }
+        }
+    }
+
+    /// The keyframes of the part of a clip from `from` to `to` (clip time),
+    /// rebased to start there. Each animated property keeps its value at both
+    /// ends, so the part moves exactly as it did.
+    pub fn part(&self, from: Time, to: Time) -> Keys {
+        let mut out = Keys::default();
+        for prop in Prop::ALL {
+            let keys = self.of(prop);
+            if keys.is_empty() {
+                continue;
+            }
+            let at = |t: Time| keyed(keys, C(0.0)).eval(secs(t)) as f32;
+            let mut part: Vec<Keyframe> = keys
+                .iter()
+                .filter(|k| k.at > from + KEY_NEAR && k.at < to - KEY_NEAR)
+                .map(|k| Keyframe { at: k.at - from, ..*k })
+                .collect();
+            // Each end takes the ease of the stretch it is in.
+            let ease_at = |t: Time| {
+                keys.iter()
+                    .rev()
+                    .find(|k| k.at <= t + KEY_NEAR)
+                    .map_or(keys[0].ease, |k| k.ease)
+            };
+            part.insert(
+                0,
+                Keyframe {
+                    at: 0,
+                    value: at(from),
+                    ease: ease_at(from),
+                },
+            );
+            part.push(Keyframe {
+                at: to - from,
+                value: at(to),
+                ease: ease_at(to),
+            });
+            *out.of_mut(prop) = part;
+        }
+        out
+    }
+}
+
+/// The value keyframes give over clip time `t` (seconds), as an expression:
+/// the first value, plus each step to the next eased across its stretch.
+/// `t` is the expression for clip time; keyframes are in clip time.
+fn keyed(keys: &[Keyframe], t: Expr) -> Expr {
+    let t = if t == C(0.0) { Expr::T } else { t };
+    let Some(first) = keys.first() else {
+        return C(0.0);
+    };
+    let mut value = C(first.value as f64);
+    for pair in keys.windows(2) {
+        let (a, z) = (pair[0], pair[1]);
+        let step = (z.value - a.value) as f64;
+        if step == 0.0 {
+            continue;
+        }
+        let progress = if a.ease == Ease::Hold || z.at <= a.at {
+            // Jumps once the next keyframe is reached.
+            clip01(Expr::Div(b(add(sub(t.clone(), C(secs(z.at))), C(1e-4))), b(C(1e-4))))
+        } else {
+            a.ease.expr(clip01(Expr::Div(
+                b(sub(t.clone(), C(secs(a.at)))),
+                b(C(secs(z.at - a.at))),
+            )))
+        };
+        value = add(value, mul(C(step), progress));
+    }
+    value
 }
 
 /// Green (or blue, or any colour) screen: pixels near `color` turn clear.
@@ -367,19 +864,97 @@ impl Expr {
 }
 
 /// The clip's pose over its local time, as expressions.
+#[derive(Clone, Debug, PartialEq)]
 pub struct PoseExpr {
     pub x: Expr,
     pub y: Expr,
     pub scale: Expr,
+    pub opacity: Expr,
+}
+
+impl PoseExpr {
+    /// The pose `t` seconds into the clip.
+    pub fn at(&self, t: f64) -> Pose {
+        Pose {
+            x: self.x.eval(t),
+            y: self.y.eval(t),
+            scale: self.scale.eval(t).max(0.0),
+            opacity: self.opacity.eval(t).clamp(0.0, 1.0),
+        }
+    }
+
+    /// Whether where it is or how big changes over time.
+    pub fn moves(&self) -> bool {
+        self.x.constant().is_none() || self.y.constant().is_none() || self.scale.constant().is_none()
+    }
+}
+
+/// Builders for expressions, for other modules that animate clips.
+pub mod build {
+    use super::Expr;
+    pub use super::Expr::{C, T};
+
+    pub fn add(a: Expr, z: Expr) -> Expr {
+        super::add(a, z)
+    }
+    pub fn sub(a: Expr, z: Expr) -> Expr {
+        super::sub(a, z)
+    }
+    pub fn mul(a: Expr, z: Expr) -> Expr {
+        super::mul(a, z)
+    }
+    pub fn div(a: Expr, z: Expr) -> Expr {
+        match (&a, &z) {
+            (Expr::C(x), Expr::C(y)) if *y != 0.0 => Expr::C(x / y),
+            _ => Expr::Div(Box::new(a), Box::new(z)),
+        }
+    }
+    pub fn clip01(a: Expr) -> Expr {
+        super::clip01(a)
+    }
+    /// Starts and arrives slowly: 3p² − 2p³.
+    pub fn smooth(p: Expr) -> Expr {
+        super::Ease::InOut.expr(p)
+    }
 }
 
 impl Look {
+    /// The value `prop` has at clip time `t`: its keyframes', or its own.
+    pub fn value(&self, prop: Prop, t: Time) -> f32 {
+        self.keys.value(prop, t).unwrap_or_else(|| prop.of(self))
+    }
+
+    /// Sets `prop` at clip time `at`: a keyframe there when it is animated,
+    /// otherwise its value throughout.
+    pub fn set_value(&mut self, prop: Prop, at: Time, v: f32) {
+        if !self.keys.of(prop).is_empty() {
+            self.keys.set(prop, at, v, None);
+            return;
+        }
+        let v = prop.clamp(v);
+        match prop {
+            Prop::X => self.x = v,
+            Prop::Y => self.y = v,
+            Prop::Scale => self.scale = v,
+            Prop::Opacity => self.opacity = v,
+        }
+    }
+
+    /// `prop` over clip time, as an expression.
+    fn prop_expr(&self, prop: Prop) -> Expr {
+        match self.keys.of(prop) {
+            [] => C(prop.of(self) as f64),
+            keys => keyed(keys, Expr::T),
+        }
+    }
+
     /// How the clip moves over a clip of `duration`.
     pub fn pose_expr(&self, duration: Time) -> PoseExpr {
         let d = secs(duration).max(1e-3);
-        let mut x = C(self.x as f64);
-        let mut y = C(self.y as f64);
-        let mut scale = C(self.scale as f64);
+        let mut x = self.prop_expr(Prop::X);
+        let mut y = self.prop_expr(Prop::Y);
+        let mut scale = self.prop_expr(Prop::Scale);
+        let mut opacity = self.prop_expr(Prop::Opacity);
         // Progress into the clip (enter) and out of it (exit), 0 to 1.
         let ends = [
             (
@@ -395,6 +970,10 @@ impl Look {
             ),
         ];
         for (motion, p) in ends {
+            // Every motion fades as it moves.
+            if motion.kind != MotionKind::None {
+                opacity = mul(opacity, p.clone());
+            }
             let eased = sub(C(1.0), pow(sub(C(1.0), p.clone()), 3.0));
             let rest = sub(C(1.0), eased.clone());
             match motion.kind {
@@ -421,42 +1000,32 @@ impl Look {
             Drift::ZoomIn => scale = mul(scale, add(C(1.0), mul(C(DRIFT), progress))),
             Drift::ZoomOut => scale = mul(scale, sub(C(1.0 + DRIFT), mul(C(DRIFT), progress))),
         }
-        PoseExpr { x, y, scale }
+        PoseExpr { x, y, scale, opacity }
     }
 
     /// Where the clip is `local` into a clip of `duration`.
     pub fn pose(&self, duration: Time, local: Time) -> Pose {
-        let e = self.pose_expr(duration);
-        let t = secs(local);
-        let d = secs(duration);
-        let fade = |m: Motion, p: f64| {
-            if m.kind == MotionKind::None {
-                1.0
-            } else {
-                (p / secs(m.duration).max(1e-3)).clamp(0.0, 1.0)
-            }
-        };
-        Pose {
-            x: e.x.eval(t),
-            y: e.y.eval(t),
-            scale: e.scale.eval(t).max(0.0),
-            opacity: self.opacity as f64 * fade(self.enter, t) * fade(self.exit, d - t),
-        }
+        self.pose_expr(duration).at(secs(local))
     }
 
     /// Whether anything about the clip changes over time.
     pub fn is_animated(&self) -> bool {
-        self.enter.kind != MotionKind::None || self.exit.kind != MotionKind::None || self.drift != Drift::None
+        self.enter.kind != MotionKind::None
+            || self.exit.kind != MotionKind::None
+            || self.drift != Drift::None
+            || !self.keys.is_empty()
     }
 
-    /// Filters that change the clip's own pixels (key and mask), shared by
-    /// the viewer's decoder and export. They leave an RGBA frame.
+    /// Filters that change the clip's own pixels (crop, colour, key and
+    /// mask), shared by the viewer's decoder and export. They leave an RGBA frame.
     pub fn pixel_filters(&self) -> Option<String> {
         let mut filters = Vec::new();
         // Cut first, so a key and a mask work on what remains.
         if let Some(crop) = self.crop.filter(|c| !c.is_none()) {
             filters.push(crop.ffmpeg());
         }
+        // Colour before the key would change what counts as green: key first.
+        let graded = self.grade.ffmpeg();
         if let Some(key) = self.key {
             filters.push(format!(
                 "chromakey=0x{:06x}:{:.4}:{:.4}",
@@ -472,6 +1041,9 @@ impl Look {
                     filters.push("despill=type=blue".into());
                 }
             }
+        }
+        if let Some(grade) = graded {
+            filters.push(grade);
         }
         if let Some(mask) = self.mask {
             filters.push("format=rgba".into());

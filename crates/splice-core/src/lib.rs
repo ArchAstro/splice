@@ -4,6 +4,7 @@
 
 pub mod bible;
 pub mod brief;
+pub mod compose;
 pub mod export;
 pub mod history;
 pub mod look;
@@ -14,3 +15,4 @@ pub mod store;
 pub mod story;
 pub mod symbol;
 pub mod time;
+pub mod transition;

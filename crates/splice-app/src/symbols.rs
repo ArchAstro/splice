@@ -435,6 +435,11 @@ pub fn render(
     let project = symbol.rendered(host);
     let partial = out.with_extension("partial.mov");
     let plan = export::plan_layer(&project, &resolver(project.settings), &partial).map_err(anyhow::Error::msg)?;
+    let prepared = ffmpeg::prepare(&plan, || true);
+    if prepared.is_err() {
+        ffmpeg::tidy(&plan);
+    }
+    prepared?;
     let mut child = ffmpeg::export_command()?
         .args(&plan.args)
         .stdout(Stdio::piped())
@@ -456,7 +461,9 @@ pub fn render(
             progress((t as f32 / duration as f32).clamp(0.0, 1.0));
         }
     }
-    let status = child.wait()?;
+    let status = child.wait();
+    ffmpeg::tidy(&plan);
+    let status = status?;
     let errors = errors.join().unwrap_or_default();
     if !status.success() {
         bail!("{}", errors.lines().last().unwrap_or("ffmpeg failed"));

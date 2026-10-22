@@ -4,7 +4,6 @@
 //! placeholders (clips marked with a tag) filled in for that use: other
 //! words for a title, another colour, another picture or sound.
 
-use crate::look::Look;
 use crate::model::{Clip, ClipId, Generator, Media, MediaId, MediaKind, Project, Settings, Track, TrackId};
 use crate::time::Time;
 use serde::{Deserialize, Serialize};
@@ -577,17 +576,7 @@ impl Project {
             t.clips.retain(|c| !clips.contains(&c.id));
         }
         let id = ClipId(self.alloc());
-        let clip = Clip {
-            id,
-            media,
-            start,
-            source_in: 0,
-            duration,
-            volume: 1.0,
-            look: Look::default(),
-            generator: None,
-            placeholder: None,
-        };
+        let clip = Clip::new(id, media, start, 0, duration);
         let end = start + duration;
         let free = (low..=high).find(|&i| self.tracks[i].clips.iter().all(|c| c.end() <= start || c.start >= end));
         let index = match free {

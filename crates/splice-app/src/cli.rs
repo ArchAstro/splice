@@ -150,6 +150,11 @@ fn export_project(path: &Path, out: &Path, quality: Quality) -> anyhow::Result<(
         canvas: (project.settings.width, project.settings.height),
     };
     let plan = export::plan(&project, &resolver, out, quality).map_err(|e| anyhow::anyhow!(e))?;
+    let prepared = ffmpeg::prepare(&plan, || true);
+    if prepared.is_err() {
+        ffmpeg::tidy(&plan);
+    }
+    prepared?;
     let mut child = ffmpeg::export_command()?
         .args(&plan.args)
         .stdout(Stdio::piped())
@@ -163,7 +168,9 @@ fn export_project(path: &Path, out: &Path, quality: Quality) -> anyhow::Result<(
             let _ = std::io::stdout().flush();
         }
     }
-    let status = child.wait()?;
+    let status = child.wait();
+    ffmpeg::tidy(&plan);
+    let status = status?;
     println!();
     if !status.success() {
         anyhow::bail!("ffmpeg failed");

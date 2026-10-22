@@ -120,6 +120,8 @@ splice ctl look --clip 7 --mask ellipse --feather 0.15             # a soft roun
 splice ctl look --clip 7 --crop-left 0.2 --crop-bottom 0.1         # cut edges away (--crop none)
 splice ctl look --clip 9 --key green --similarity 0.18             # green screen (blue, #rrggbb too)
 splice ctl look --clip 3 --drift zoom-in --enter fade --enter-for 1
+splice ctl look --clip 3 --grade film --warmth 0.3 --contrast 0.2  # colour (--grade none to clear)
+splice ctl look --all --grade teal-orange                          # every video and picture alike
 ```
 
 - A title's `--size` is the letter height in canvas pixels. Text uses real
@@ -133,6 +135,41 @@ splice ctl look --clip 3 --drift zoom-in --enter fade --enter-for 1
   the whole clip.
 - Keys and masks are for video and pictures; masks work on titles and
   colours too. Mask numbers are fractions of the clip's own frame.
+- Colour is for video and pictures: `--grade` is none, warm, cool, vivid,
+  muted, faded, film, teal-orange, mono or noir; `--exposure` (stops),
+  `--contrast`, `--saturation`, `--warmth` and `--tint` run from −1 to 1, 0
+  untouched. Grade the whole movie alike (`look --all`) rather than clip by
+  clip unless a shot needs matching.
+
+### Transitions, speed and keyframes
+
+```sh
+splice ctl transition --clip 8 --kind dissolve --for 0.8   # into clip 8 from the clip before it
+splice ctl transition --all --kind dip-black --track 1     # every cut on the bottom track
+splice ctl transition --clip 8 --none
+splice ctl speed --clip 5 --rate 2                         # twice as fast: half as long
+splice ctl speed --clip 5 --rate 0.5 --reverse             # slow and backwards (--forwards undoes)
+splice ctl freeze --clip 5 --at 12.4 --for 2               # hold that frame for 2s
+splice ctl keyframe --clip 7 --at 10 --scale 1 --x 0       # keyframes at timeline times
+splice ctl keyframe --clip 7 --at 14 --scale 1.4 --x 0.1 --ease in-out
+splice ctl keyframe --clip 7 --at 14 --drop                # or --clear for all of them
+```
+
+- A transition belongs to the clip coming in. With a clip ending exactly
+  where it starts on the same track, it is centred on that cut and both
+  clips play on for half of it (frames beyond the media hold still). With a
+  gap before, it plays over what is beneath as the clip begins. Kinds:
+  dissolve, dip-black, dip-white, wipe-left/right/up/down,
+  push-left/right/up/down, zoom. Use them sparingly: a dissolve for time
+  passing, a dip to black between sections, cuts everywhere else.
+- `speed` keeps the stretch of source and changes the clip's length; later
+  clips on the same track move to match, other tracks do not, so check that
+  music and titles above still line up (`read`). Sound keeps its pitch.
+  A held frame (`freeze`) is silent and stretches like a picture.
+- Keyframes animate x, y, scale and opacity; a value with keyframes ignores
+  its plain `look` value. Each keyframe's `--ease` shapes the glide to the
+  next one. Animate the picture, not the frame: a slow push in of 1 to 1.15
+  over a shot reads as life; big moves read as effects.
 - Text and colour clips are on the timeline like any other clip: move,
   trim, split and delete them the same way. `read` shows their `text` and
   `look`.

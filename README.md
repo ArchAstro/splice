@@ -112,8 +112,22 @@ make install-app   # Splice.app in /Applications
   - **Place:** drag a picture on the stage, or its corners to resize. It snaps
     to the centre lines. There's a nine-point grid, plus size, opacity and
     position sliders.
+  - **Keyframes:** the ◆ beside size, opacity and position keys that value at
+    the playhead; set another somewhere else and it glides between them
+    (linear, smooth, ease in, ease out, or hold). Dragging a keyframed picture
+    on the stage keys it where the playhead is. ⌥K keys place and size at once.
+  - **Transition:** the way into a clip from the one before it: dissolve, dip
+    to black or white, wipe or push four ways, or zoom, centred on the cut,
+    with a length. A tab on the timeline marks each one. ⇧⌘T adds a dissolve
+    at the nearest cut.
   - **Animate:** in and out with fade, slide (four ways), zoom or pop, with a
     length you choose. A slow zoom can run across the whole clip.
+  - **Colour:** a look (warm, cool, vivid, muted, faded, film, teal & orange,
+    black & white, noir) with exposure, contrast, saturation, warmth and tint
+    over it. *Use on every clip* grades the whole movie the same.
+  - **Speed:** 0.25× to 4× (0.1× to 16× from the assistant), or backwards.
+    A faster clip gets shorter and what follows on its track moves up; sound
+    keeps its pitch. *Freeze frame* (⌥F) holds the frame at the playhead.
   - **Green screen:** key out green or blue, with strength, softness and fringe
     clean-up.
   - **Crop:** cut any edge away. The picture keeps its scale, and what
@@ -124,8 +138,8 @@ make install-app   # Splice.app in /Applications
 The viewer and export share one renderer, so what you see is what you get.
 Titles are drawn once in Rust (cosmic-text) and that same picture is overlaid
 on export. Keys and masks are ffmpeg filters that the viewer's decoder runs
-too. Animation is one expression, evaluated for the viewer and printed into
-ffmpeg for export.
+too, and so is colour. Animation, keyframes and transitions are one set of
+expressions, evaluated for the viewer and printed into ffmpeg for export.
 
 ## Scores and scenes
 
@@ -298,7 +312,10 @@ with `make install-skill`) teaches Claude Code to use it.
 | `splice ctl add / move / trim / split / delete / duplicate / volume` | timeline edits, each one undo step |
 | `splice ctl track`, `canvas`, `undo`, `redo` | layers, canvas shape, history |
 | `splice ctl text`, `color`, `style`, `fonts` | titles in system fonts, colour cards and tints |
-| `splice ctl look` | position, size, opacity, animation, green screen, mask |
+| `splice ctl look` | position, size, opacity, animation, green screen, mask, crop, colour |
+| `splice ctl transition` | dissolves, dips, wipes, pushes and zooms at cuts |
+| `splice ctl speed`, `freeze` | faster, slower, backwards; hold a frame |
+| `splice ctl keyframe` | animate position, size and opacity between moments |
 | `splice ctl score new / read / write / instruments` | compose music: a score as JSON |
 | `splice ctl scene new / read / write / help` | animations and diagrams, described as JSON |
 | `splice ctl scene sheet / frame / patch / add / remove / check` | see a scene's motion as a contact sheet; edit layers by name; validate first |
