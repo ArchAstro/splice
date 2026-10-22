@@ -77,7 +77,10 @@ pub struct Heard {
 pub fn transcribe(path: &Path, from: Time, length: Time) -> Result<Vec<Heard>> {
     let whisper = whisper().context(INSTALL)?;
     let model = fetch_model()?;
-    let work = std::env::temp_dir().join(format!("splice-speech-{}-{}", std::process::id(), from));
+    // Its own folder: two clips can be heard at once.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let run = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let work = std::env::temp_dir().join(format!("splice-speech-{}-{run}", std::process::id()));
     std::fs::create_dir_all(&work)?;
     let wav = work.join("speech.wav");
     // 16 kHz mono, as whisper hears.

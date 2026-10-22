@@ -295,6 +295,22 @@ fn window_bounds(id: u32) -> Option<(f64, f64, f64, f64)> {
     None
 }
 
+/// screencapture starts recording about this long after it is started.
+const LATE: f64 = 0.2;
+
+/// Clicks in the recording's own time, without the click that stopped it
+/// (the Stop button, or Splice in the Dock) in its last half second.
+fn settle(clicks: Vec<Click>, ended: f64) -> Vec<Click> {
+    clicks
+        .into_iter()
+        .filter(|c| c.t < ended - 0.5)
+        .map(|c| Click {
+            t: (c.t - LATE).max(0.0),
+            ..c
+        })
+        .collect()
+}
+
 /// Watches for clicks inside `area` until `stop`, from `started`.
 fn watch(area: (f64, f64, f64, f64), started: Instant, stop: Arc<AtomicBool>) -> Vec<Click> {
     let (ax, ay, aw, ah) = area;
@@ -340,8 +356,10 @@ impl Recording {
             }
         }
         if let Some((stop, watcher)) = self.clicks.take() {
+            let ended = self.started.elapsed().as_secs_f64();
             stop.store(true, Ordering::Relaxed);
             if let Ok(clicks) = watcher.join()
+                && let clicks = settle(clicks, ended)
                 && !clicks.is_empty()
             {
                 let _ = std::fs::write(
@@ -446,6 +464,21 @@ pub fn start(source: Source, options: &Options) -> Result<Recording> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_click_that_stops_a_recording_is_not_kept() {
+        let clicks = vec![
+            Click { t: 1.0, x: 0.5, y: 0.5 },
+            Click {
+                t: 9.8,
+                x: 0.9,
+                y: 0.99,
+            },
+        ];
+        let kept = settle(clicks, 10.0);
+        assert_eq!(kept.len(), 1);
+        assert!((kept[0].t - 0.8).abs() < 1e-9, "in the recording's own time");
+    }
 
     #[test]
     fn lists_displays_and_windows() {

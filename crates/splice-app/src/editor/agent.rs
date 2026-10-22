@@ -496,6 +496,17 @@ impl Editor {
                     if look.key.is_some() && clip.generator.is_some() {
                         return Some(fail("a green-screen key is for video and pictures, not text or colour"));
                     }
+                    let pictures_only = look.backdrop != clip.look.backdrop
+                        || look.redact != clip.look.redact
+                        || look.fx.blur != clip.look.fx.blur
+                        || look.fx.vignette != clip.look.fx.vignette
+                        || look.fx.grain != clip.look.fx.grain;
+                    if pictures_only && clip.generator.is_some() {
+                        return Some(fail(
+                            "blur, vignette, grain, --backdrop and --redact are for video and pictures; a title or colour \
+                             takes --shake, --glitch and the rest",
+                        ));
+                    }
                     if look.grade != clip.look.grade && clip.generator.is_some() {
                         return Some(fail(
                             "colour (--grade, --exposure…) is for video and pictures; a title or colour clip takes its own --color",

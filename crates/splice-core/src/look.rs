@@ -1215,9 +1215,19 @@ impl Look {
             || self.fx.glitch > 0.0
     }
 
+    /// The same look with no crop or hidden box: for frames those were
+    /// already applied to.
+    pub fn clone_without_hiding(&self) -> Look {
+        Look {
+            crop: None,
+            redact: None,
+            ..self.clone()
+        }
+    }
+
     /// Whether anything changes the clip's own pixels (see `pixel_filters`).
     pub fn has_pixel_filters(&self) -> bool {
-        self.pixel_filters((64, 64), "x").is_some()
+        self.pixel_filters((64, 64), 1.0, "x").is_some()
     }
 
     /// Filters that change the clip's own pixels (crop, a hidden box, blur,
@@ -1225,7 +1235,19 @@ impl Look {
     /// viewer's decoder and export, for frames of `size` arriving. They leave
     /// an RGBA frame. Some branch and join again inside; their labels start
     /// with `prefix`, so several clips' filters can share one graph.
-    pub fn pixel_filters(&self, size: (u32, u32), prefix: &str) -> Option<String> {
+    pub fn pixel_filters(&self, size: (u32, u32), scale: f32, prefix: &str) -> Option<String> {
+        let (mut filters, size) = self.hiding_filters(size, prefix);
+        filters.extend(self.finishing_filters(size, scale, prefix));
+        (!filters.is_empty()).then(|| {
+            filters.push("format=rgba".into());
+            filters.join(",")
+        })
+    }
+
+    /// The filters that cut a picture down and hide part of it (its crop
+    /// and hidden box), and the size it is then. A backdrop is made from
+    /// what these leave, so nothing hidden shows behind the picture.
+    pub fn hiding_filters(&self, size: (u32, u32), prefix: &str) -> (Vec<String>, (u32, u32)) {
         let mut filters = Vec::new();
         let mut size = size;
         // Cut first, so a key and a mask work on what remains.
@@ -1236,7 +1258,13 @@ impl Look {
         }
         if let Some(redact) = self.redact {
             let (x, y, w, h) = redact.pixels(size);
-            filters.push(match redact.style {
+            // Too small to blur or pixelate (as at a tiny preview): blacked out.
+            let style = if w.min(h) < 16 {
+                RedactStyle::Black
+            } else {
+                redact.style
+            };
+            filters.push(match style {
                 RedactStyle::Black => format!("drawbox=x={x}:y={y}:w={w}:h={h}:color=black:t=fill"),
                 style => {
                     let hide = match style {
@@ -1245,7 +1273,7 @@ impl Look {
                             format!("pixelize=w={block}:h={block}")
                         }
                         _ => {
-                            let r = (w.min(h) / 5).max(2).min(w.min(h) / 2 - 1);
+                            let r = (w.min(h) / 5).clamp(2, w.min(h) / 4);
                             format!("boxblur=lr={r}:lp=3:cr={}:cp=3", (r / 2).max(1))
                         }
                     };
@@ -1256,6 +1284,14 @@ impl Look {
                 }
             });
         }
+        (filters, size)
+    }
+
+    /// The rest: blur, key, colour, vignette, grain, fringes and mask, on a
+    /// frame of `size`; `scale` is that size over the media's own (grain is
+    /// finer on a smaller frame, so it looks the same once scaled).
+    fn finishing_filters(&self, size: (u32, u32), scale: f32, prefix: &str) -> Vec<String> {
+        let mut filters = Vec::new();
         let fx = self.fx.clamped();
         if fx.blur > 0.0 {
             let r = blur_radius(fx.blur, size);
@@ -1293,7 +1329,7 @@ impl Look {
             ));
         }
         if fx.grain > 0.0 {
-            let amount = (6.0 + 34.0 * fx.grain).round();
+            let amount = ((6.0 + 34.0 * fx.grain) * scale.clamp(0.05, 1.0)).round().max(1.0);
             filters.push(format!(
                 "format=rgba,noise=c0s={amount}:c1s={amount}:c2s={amount}:allf=t"
             ));
@@ -1309,10 +1345,7 @@ impl Look {
                 mask.ffmpeg()
             ));
         }
-        (!filters.is_empty()).then(|| {
-            filters.push("format=rgba".into());
-            filters.join(",")
-        })
+        filters
     }
 }
 
@@ -1380,7 +1413,7 @@ mod tests {
             crop: Some(crop),
             ..Look::default()
         };
-        assert!(look.pixel_filters((400, 200), "t").unwrap().starts_with("crop="));
+        assert!(look.pixel_filters((400, 200), 1.0, "t").unwrap().starts_with("crop="));
     }
 
     #[test]
@@ -1442,8 +1475,8 @@ mod tests {
             mask: Some(m),
             ..Look::default()
         };
-        let f = look.pixel_filters((640, 360), "t").unwrap();
+        let f = look.pixel_filters((640, 360), 1.0, "t").unwrap();
         assert!(f.starts_with("chromakey=0x00ff00:") && f.contains("despill=type=green") && f.contains("geq="));
-        assert!(Look::default().pixel_filters((640, 360), "t").is_none());
+        assert!(Look::default().pixel_filters((640, 360), 1.0, "t").is_none());
     }
 }

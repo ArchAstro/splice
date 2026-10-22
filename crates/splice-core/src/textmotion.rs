@@ -152,8 +152,17 @@ const ARRIVE: f64 = 0.4;
 /// When each word starts, from the clip's start: as said (`timing`, one
 /// per word) when there is a time for every word, else spread over `over`.
 fn word_starts(motion: &TextMotion, words: usize, pieces: usize, timing: &[Time]) -> Option<Vec<f64>> {
-    (timing.len() >= words && words > 0)
-        .then(|| timing.iter().map(|t| secs(*t)).collect())
+    (!timing.is_empty() && words > 0)
+        .then(|| {
+            if timing.len() == words {
+                return timing.iter().map(|t| secs(*t)).collect();
+            }
+            // The words changed since they were timed (a caption edited):
+            // spread them over the same stretch, first to last.
+            let (a, z) = (secs(timing[0]), secs(*timing.last().expect("not empty")));
+            let step = if words > 1 { (z - a) / (words - 1) as f64 } else { 0.0 };
+            (0..words).map(|i| a + i as f64 * step).collect()
+        })
         .or_else(|| {
             let step = secs(motion.over) / pieces.max(2).saturating_sub(1).max(1) as f64;
             (pieces > 0).then(|| (0..pieces).map(|i| i as f64 * step).collect())
@@ -176,7 +185,7 @@ pub fn pieces(
     let list = units.of(motion.by);
     let words = units.words.len();
     // Pieces' starts: by word when timed (a letter or line takes its word's).
-    let timed = timing.len() >= words && words > 0;
+    let timed = !timing.is_empty() && words > 0;
     let starts = match word_starts(motion, words, if timed { words } else { list.len() }, timing) {
         Some(s) => s,
         None => return Vec::new(),
@@ -295,6 +304,10 @@ mod tests {
         assert!(o(1, 0.5) < 0.5 && o(1, 1.2) > 0.99, "word two lights at 1s");
         let rest = pieces[1].pose.at(2.5).y;
         assert!(pieces[1].pose.at(1.5).y < rest, "and stands up while said");
+        // A word added since: the times spread over the same stretch.
+        let fewer = [0, 2 * SECOND];
+        let spread = super::pieces(&motion, &units(), &fewer, (280.0, 60.0), (1920.0, 1080.0), 0.08, &pose);
+        assert!(spread[1].pose.at(0.9).opacity < 0.5 && spread[1].pose.at(1.1).opacity > 0.99);
     }
 
     #[test]

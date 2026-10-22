@@ -72,6 +72,19 @@ struct Wanted {
     size: (u32, u32),
 }
 
+/// How big frames decoded at `size` are against the media's own.
+fn scale_of(size: (u32, u32), media: &Media) -> f32 {
+    size.0 as f32 / media.width.max(1) as f32
+}
+
+/// A backdrop's filters: what the clip hides stays hidden, then the blur.
+fn backdrop_filters(clip: &Clip, size: (u32, u32)) -> String {
+    let (mut filters, after) = clip.look.hiding_filters(size, "b");
+    filters.push(clip.look.backdrop.unwrap_or_default().ffmpeg(after));
+    filters.push("format=rgba".into());
+    filters.join(",")
+}
+
 /// A backdrop's decoded size: small, since it is blurred and scaled up anyway.
 pub fn backdrop_size(full: (u32, u32)) -> (u32, u32) {
     ((full.0 / 4).max(16) & !1, (full.1 / 4).max(16) & !1)
@@ -253,7 +266,7 @@ impl Player {
                     Source::Media(m) => {
                         let clip = drawn.clip;
                         let size = self.decode_size((m.width, m.height));
-                        let filters = clip.look.pixel_filters(size, "p");
+                        let filters = clip.look.pixel_filters(size, scale_of(size, m), "p");
                         let video = m.kind == MediaKind::Video;
                         (video || filters.is_some()).then(|| Wanted {
                             clip: clip.clone(),
@@ -273,14 +286,13 @@ impl Player {
                     ..
                 } => {
                     let size = backdrop_size(self.decode_size((m.width, m.height)));
-                    let backdrop = clip.look.backdrop.unwrap_or_default();
                     Some(Wanted {
                         clip: Clip {
                             id: compose::backdrop_id(clip.id),
                             ..clip.clone()
                         },
                         media: m.clone(),
-                        filters: Some(format!("{},format=rgba", backdrop.ffmpeg(size))),
+                        filters: Some(backdrop_filters(clip, size)),
                         source: shown_at(clip, m),
                         size,
                     })
@@ -349,9 +361,20 @@ impl Player {
                     };
                     keep_streams.insert(clip.id);
                     let size = self.decode_size((media.width, media.height));
-                    let filters = clip.look.pixel_filters(size, "p");
+                    let filters = clip.look.pixel_filters(size, scale_of(size, media), "p");
                     let source = clip.source_at(drawn.from).clamp(0, (media.duration - frame).max(0));
                     self.ensure_stream(clip, media, &filters, path, source, fps, size);
+                    // Its backdrop too, so a cut into it is not black at the sides.
+                    if clip.look.backdrop.is_some() {
+                        let small = backdrop_size(size);
+                        let backdrop = Clip {
+                            id: compose::backdrop_id(clip.id),
+                            ..clip.clone()
+                        };
+                        keep_streams.insert(backdrop.id);
+                        let filters = Some(backdrop_filters(clip, small));
+                        self.ensure_stream(&backdrop, media, &filters, path, source, fps, small);
+                    }
                 }
             }
         }

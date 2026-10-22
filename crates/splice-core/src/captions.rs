@@ -45,6 +45,7 @@ const SHORTEST: Time = SECOND * 7 / 10;
 /// split into as few lines as fit `layout.words` words and `layout.chars`
 /// characters, its words shared evenly, so no line is left with one word.
 pub fn lines(words: &[Word], layout: &Layout) -> Vec<Vec<Word>> {
+    let words = tidy(words);
     // Phrases first: a sentence ends, or the speaker pauses.
     let mut phrases: Vec<Vec<Word>> = Vec::new();
     let mut phrase: Vec<Word> = Vec::new();
@@ -66,7 +67,11 @@ pub fn lines(words: &[Word], layout: &Layout) -> Vec<Vec<Word>> {
     }
     let mut out = Vec::new();
     for phrase in phrases {
-        let chars: usize = phrase.iter().map(|w| w.text.chars().count() + 1).sum();
+        // Unspaced writing (Chinese, Japanese) runs about twice as wide a character.
+        let chars: usize = phrase
+            .iter()
+            .map(|w| w.text.chars().map(|c| if unspaced(c) { 2 } else { 1 }).sum::<usize>() + 1)
+            .sum();
         let count = phrase
             .len()
             .div_ceil(layout.words.max(1))
@@ -81,6 +86,61 @@ pub fn lines(words: &[Word], layout: &Layout) -> Vec<Vec<Word>> {
         }
     }
     out
+}
+
+/// Whether a character is written without spaces between words (Chinese,
+/// Japanese, Thai): a line of it is cut by characters instead.
+fn unspaced(c: char) -> bool {
+    matches!(c as u32, 0x3040..=0x30ff | 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff | 0x0e00..=0x0e7f | 0xac00..=0xd7af)
+}
+
+/// Words in order, each starting after the last and ending after it
+/// starts; a long run of unspaced writing (heard as one "word") cut into
+/// pieces of a few characters, its time shared out.
+fn tidy(words: &[Word]) -> Vec<Word> {
+    let mut sorted: Vec<Word> = words.iter().filter(|w| !w.text.trim().is_empty()).cloned().collect();
+    sorted.sort_by_key(|w| w.start);
+    let mut out: Vec<Word> = Vec::new();
+    for word in sorted {
+        let text = word.text.trim().to_string();
+        let chars: Vec<char> = text.chars().collect();
+        if chars.len() > 8 && chars.iter().filter(|c| unspaced(**c)).count() * 2 > chars.len() {
+            let n = chars.len().div_ceil(6);
+            let span = (word.end - word.start).max(0);
+            for (i, piece) in chars.chunks(chars.len().div_ceil(n)).enumerate() {
+                let k = piece.len() as Time;
+                let at = word.start + span * (i as Time * 6).min(chars.len() as Time) / chars.len().max(1) as Time;
+                out.push(Word {
+                    text: piece.iter().collect(),
+                    start: at,
+                    end: at + span * k / chars.len().max(1) as Time,
+                });
+            }
+        } else {
+            out.push(Word { text, ..word });
+        }
+    }
+    // Starts that never run backwards or tie, ends after starts.
+    let mut last = Time::MIN;
+    for w in &mut out {
+        w.start = w.start.max(last + 1);
+        w.end = w.end.max(w.start + 1);
+        last = w.start;
+    }
+    out
+}
+
+/// Words joined as written: spaced, except within unspaced writing.
+fn join(line: &[Word]) -> String {
+    let mut text = String::new();
+    for w in line {
+        let glued = text.chars().last().is_some_and(unspaced) && w.text.chars().next().is_some_and(unspaced);
+        if !text.is_empty() && !glued {
+            text.push(' ');
+        }
+        text.push_str(&w.text);
+    }
+    text
 }
 
 /// The title a caption line becomes, and where it sits: big, light, on a
@@ -112,10 +172,30 @@ impl Project {
     /// Lays captions over the movie, on a new track on top: each line a
     /// title from its first word to just before the next line. Returns them.
     pub fn add_captions(&mut self, words: &[Word], layout: &Layout) -> Vec<ClipId> {
-        let lines = lines(words, layout);
         let (base, look) = style((self.settings.width, self.settings.height));
-        let track = self.tracks.len();
+        // No longer than fits across the canvas at the caption's size (a
+        // bold letter is about 0.6 of its size wide), with a margin.
+        let (w, h) = (self.settings.width as f32, self.settings.height as f32);
+        let fits = ((w * 0.86) / (base.size * h * 0.6)).floor().max(8.0) as usize;
+        let layout = Layout {
+            chars: layout.chars.min(fits),
+            words: layout.words.min((fits / 5).max(2)),
+            ..*layout
+        };
+        let mut lines = lines(words, &layout);
+        // A line starting within two frames of the one before joins it, so
+        // none is too short to show (or would have to go on another track).
         let frame = self.frame();
+        let mut kept: Vec<Vec<Word>> = Vec::new();
+        for line in lines.drain(..) {
+            match kept.last_mut() {
+                Some(before) if line[0].start - before[0].start < 2 * frame => before.extend(line),
+                _ => kept.push(line),
+            }
+        }
+        let lines = kept;
+        let layout = &layout;
+        let track = self.tracks.len();
         let mut ids = Vec::new();
         for (i, line) in lines.iter().enumerate() {
             let start = line[0].start.max(0);
@@ -129,7 +209,7 @@ impl Project {
             };
             let end = end.max(start + SHORTEST).min(next).max(start + frame);
             let title = Title {
-                text: line.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" "),
+                text: join(line),
                 animate: layout.karaoke.then_some(TextMotion {
                     style: Style::Karaoke,
                     by: By::Word,
@@ -206,10 +286,12 @@ impl Project {
     /// on top, each line appearing whole. Returns them.
     pub fn add_subtitles(&mut self, cues: &[(Time, Time, String)]) -> Vec<ClipId> {
         let (base, look) = style((self.settings.width, self.settings.height));
+        let mut cues = cues.to_vec();
+        cues.sort_by_key(|c| c.0);
         let track = self.tracks.len();
         let mut ids = Vec::new();
         let mut last_end = 0;
-        for (a, z, words) in cues {
+        for (a, z, words) in &cues {
             let start = (*a).max(last_end);
             if *z <= start {
                 continue;
@@ -295,6 +377,65 @@ mod tests {
         assert_eq!(title.timing, vec![0, 500_000, SECOND]);
         assert!(title.animate.is_some_and(|m| m.style == Style::Karaoke));
         assert_eq!(p.slot(ids[1]).unwrap().track, p.slot(ids[0]).unwrap().track);
+    }
+
+    #[test]
+    fn captions_fit_the_canvas_and_never_stack() {
+        let mut p = Project::default();
+        (p.settings.width, p.settings.height) = (1080, 1920);
+        let long: Vec<Word> = "one two three four five six seven eight nine ten eleven twelve"
+            .split(' ')
+            .enumerate()
+            .map(|(i, w)| Word {
+                text: w.into(),
+                start: i as Time * 200_000,
+                end: i as Time * 200_000 + 150_000,
+            })
+            .collect();
+        let ids = p.add_captions(&long, &Layout::default());
+        for id in &ids {
+            let Some(Generator::Text(t)) = &p.clip(*id).unwrap().generator else {
+                panic!()
+            };
+            assert!(t.text.chars().count() <= 24, "fits a portrait canvas: {}", t.text);
+        }
+        // Words heard at one moment (whisper does this) do not stack captions.
+        let mut q = Project::default();
+        let tied = vec![
+            Word {
+                text: "Yes.".into(),
+                start: SECOND,
+                end: SECOND,
+            },
+            Word {
+                text: "And".into(),
+                start: SECOND,
+                end: SECOND,
+            },
+            Word {
+                text: "here".into(),
+                start: SECOND,
+                end: SECOND,
+            },
+        ];
+        let ids = q.add_captions(&tied, &Layout::default());
+        assert!(
+            ids.iter()
+                .all(|id| q.slot(*id).unwrap().track == q.slot(ids[0]).unwrap().track)
+        );
+        // Chinese heard as one long "word" is cut into lines.
+        let mut r = Project::default();
+        let heard = vec![Word {
+            text: "我們今天討論人工智能的發展和未來的挑戰".into(),
+            start: 0,
+            end: 4 * SECOND,
+        }];
+        let ids = r.add_captions(&heard, &Layout::default());
+        assert!(ids.len() >= 2, "{}", ids.len());
+        let Some(Generator::Text(t)) = &r.clip(ids[0]).unwrap().generator else {
+            panic!()
+        };
+        assert!(!t.text.contains(' '), "written without spaces: {}", t.text);
     }
 
     #[test]

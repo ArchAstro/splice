@@ -91,6 +91,9 @@ struct Part {
     offset: (f64, f64),
     pose: crate::look::PoseExpr,
     tag: String,
+    /// A piece of a title's letters: where it is in the title's picture,
+    /// and that picture's size. It is placed as a small picture of its own.
+    piece: Option<([u32; 4], (f64, f64))>,
 }
 
 fn source_generator<'a>(source: Source<'a>) -> &'a Generator {
@@ -279,23 +282,37 @@ fn build(
                 let look = &clip.look;
                 // Where the picture's frames come from, ready at the frame rate
                 // and covering every moment it is drawn, starting at `drawn.from`.
+                // A title coming in a piece at a time is drawn in parts below.
+                let title_parts = match source {
+                    Source::Generated(crate::model::Generator::Text(title)) if title.animate.is_some() => resolve
+                        .generated(clip, source_generator(source))
+                        .filter(|r| r.parts.is_some()),
+                    _ => None,
+                };
                 let Frames {
                     label: frames,
                     rendered,
                     shared,
-                } = clip_frames(
-                    &mut args,
-                    &mut prepare,
-                    &mut filters,
-                    &mut next_input,
-                    project,
-                    resolve,
-                    clip,
-                    drawn,
-                    source,
-                    still_at,
-                    &tag,
-                )?;
+                } = match &title_parts {
+                    Some(r) => Frames {
+                        label: String::new(),
+                        rendered: Some((r.width, r.height)),
+                        shared: None,
+                    },
+                    None => clip_frames(
+                        &mut args,
+                        &mut prepare,
+                        &mut filters,
+                        &mut next_input,
+                        project,
+                        resolve,
+                        clip,
+                        drawn,
+                        source,
+                        still_at,
+                        &tag,
+                    )?,
+                };
                 let natural = natural_size(source, rendered, w, h);
                 // Only media is cropped; titles and colours are drawn to size.
                 let ((nw, nh), (cx, cy)) = match source {
@@ -317,6 +334,20 @@ fn build(
                 let size = match source {
                     Source::Media(m) => (m.width.max(2), m.height.max(2)),
                     Source::Generated(_) => (w, h),
+                };
+                // With a backdrop, what is cut away or hidden goes first, so
+                // the copy behind shows none of it.
+                let (frames, size, hidden) = match (look.backdrop, source) {
+                    (Some(_), Source::Media(_)) => {
+                        let (hiding, after) = look.hiding_filters(size, &format!("h{tag}"));
+                        if hiding.is_empty() {
+                            (frames, size, false)
+                        } else {
+                            filters.push(format!("[{frames}]{}[{frames}h]", hiding.join(",")));
+                            (format!("{frames}h"), after, true)
+                        }
+                    }
+                    _ => (frames, size, false),
                 };
                 let frames = match (look.backdrop, source) {
                     (Some(backdrop), Source::Media(_)) => {
@@ -359,13 +390,12 @@ fn build(
                     offset: (cx, cy),
                     pose: drawn.pose.clone(),
                     tag: tag.clone(),
+                    piece: None,
                 }];
                 if let Source::Generated(crate::model::Generator::Text(title)) = source
                     && let Some(motion) = &title.animate
-                    && let Some(split) = resolve.generated(clip, source_generator(source)).and_then(|r| r.parts)
+                    && let Some(split) = title_parts.and_then(|r| r.parts)
                 {
-                    // The whole title's picture is not drawn as one.
-                    filters.push(format!("[{frames}]nullsink"));
                     parts.clear();
                     let length = fmt(if still_at.is_some() {
                         frame
@@ -396,6 +426,7 @@ fn build(
                             offset: (0.0, 0.0),
                             pose: drawn.pose.clone(),
                             tag: format!("{tag}k"),
+                            piece: None,
                         });
                     }
                     let pieces = crate::textmotion::pieces(
@@ -423,6 +454,7 @@ fn build(
                                 offset: (0.0, 0.0),
                                 pose: piece.pose,
                                 tag: format!("{tag}u{k}"),
+                                piece: Some((piece.rect, (nw, nh))),
                             });
                         }
                     }
@@ -433,14 +465,99 @@ fn build(
                     offset: (cx, cy),
                     pose,
                     tag,
+                    piece,
                 } in parts
                 {
                     let pose = &pose;
+                    // A piece of a title: a small picture placed by position
+                    // expressions, sized afresh only when its size moves.
+                    if let Some((rect, title_size)) = piece {
+                        let mut chain = vec!["format=rgba".to_string()];
+                        let masks: Vec<String> = [&drawn.reveal, &drawn.conceal]
+                            .into_iter()
+                            .flatten()
+                            .map(|r| r.ffmpeg_within(&local("N"), rect, title_size))
+                            .collect();
+                        if !masks.is_empty() {
+                            chain.push(format!(
+                                "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*{}'",
+                                masks.join("*")
+                            ));
+                        }
+                        opacity(&mut chain, &mut prepare, drawn, pose, still_at, fps, &tag);
+                        let placed_at = if still_at.is_some() { 0 } else { drawn.from };
+                        let start = fmt(placed_at);
+                        let constant = match still_at {
+                            Some(t) => Some(pose.at(secs(t - clip.start)).scale),
+                            None => pose.scale.constant(),
+                        };
+                        match constant {
+                            Some(k) => {
+                                chain.push(format!("scale={}:{}", even((nw * k).round()), even((nh * k).round())))
+                            }
+                            None => {
+                                // The largest it gets, drawn once; smaller is a
+                                // perspective within its own small frame.
+                                let count = ((drawn.to - drawn.from) as f64 * fps as f64 / SECOND as f64).ceil() as i64;
+                                let head = secs(drawn.head());
+                                let most = (0..count.max(1))
+                                    .map(|n| pose.scale.eval(n as f64 / fps as f64 - head))
+                                    .fold(0.0001f64, f64::max);
+                                let (pw, ph) = (even((nw * most).round()), even((nh * most).round()));
+                                let (fw, fh) = (pw + 2 * BORDER, ph + 2 * BORDER);
+                                chain.push(format!("scale={pw}:{ph}"));
+                                chain.push(format!("pad={fw}:{fh}:(ow-iw)/2:(oh-ih)/2:color=black@0"));
+                                let t = local("in");
+                                let k = format!("(max(0.0001,{})/{most:.6})", pose.scale.ffmpeg(&t));
+                                let (hx, hy) = (format!("{}*{k}", fw as f64 / 2.0), format!("{}*{k}", fh as f64 / 2.0));
+                                let (cx_at, cy_at) = (format!("{}", fw as f64 / 2.0), format!("{}", fh as f64 / 2.0));
+                                chain.push("format=yuva444p".into());
+                                chain.push(format!(
+                                    "perspective=sense=destination:interpolation=cubic:eval=frame:\
+                                     x0='{cx_at}-{hx}':y0='{cy_at}-{hy}':x1='{cx_at}+{hx}':y1='{cy_at}-{hy}':\
+                                     x2='{cx_at}-{hx}':y2='{cy_at}+{hy}':x3='{cx_at}+{hx}':y3='{cy_at}+{hy}'"
+                                ));
+                            }
+                        }
+                        chain.push(format!(
+                            "format={},setpts=PTS-STARTPTS+{start}/TB",
+                            if layer { "rgba" } else { "yuva420p" }
+                        ));
+                        filters.push(format!("[{frames}]{}[v{tag}]", chain.join(",")));
+                        // Its centre, as the overlay's clock runs (timeline seconds).
+                        let (x, y) = match still_at {
+                            Some(t) => {
+                                let p = pose.at(secs(t - clip.start));
+                                (format!("W/2+{:.4}*W-w/2", p.x), format!("H/2+{:.4}*H-h/2", p.y))
+                            }
+                            None => {
+                                let since = format!("(t-{})", fmt(clip.start));
+                                (
+                                    format!("W/2+{}*W-w/2", pose.x.ffmpeg(&since)),
+                                    format!("H/2+{}*H-h/2", pose.y.ffmpeg(&since)),
+                                )
+                            }
+                        };
+                        let end = fmt(if still_at.is_some() { frame } else { drawn.to });
+                        filters.push(format!(
+                            "[{picture}][v{tag}]overlay=x='{x}':y='{y}':{}eof_action=pass:\
+                             enable='between(t,{start},{end})'[p{tag}]",
+                            if layer { "format=auto:" } else { "" }
+                        ));
+                        picture = format!("p{tag}");
+                        continue;
+                    }
                     let mut chain = Vec::new();
-                    if matches!(source, Source::Media(_))
-                        && let Some(pixels) = look.pixel_filters(size, &format!("x{tag}"))
-                    {
-                        chain.push(pixels);
+                    if matches!(source, Source::Media(_)) {
+                        let pixels = if hidden {
+                            let rest = look.clone_without_hiding();
+                            rest.pixel_filters(size, 1.0, &format!("x{tag}"))
+                        } else {
+                            look.pixel_filters(size, 1.0, &format!("x{tag}"))
+                        };
+                        if let Some(pixels) = pixels {
+                            chain.push(pixels);
+                        }
                     }
                     chain.push("format=rgba".into());
                     // Coming up out of a colour.
@@ -681,7 +798,17 @@ fn build(
         None => (duration, d),
     };
 
-    args.extend(strings(&["-filter_complex", &filters.join(";")]));
+    // A long graph (many captions) goes in a file: the command line has a limit.
+    let graph = filters.join(";");
+    if graph.len() > 64 * 1024 {
+        let file = prepare.dir.join("graph.txt");
+        prepare.files.push((file.clone(), graph));
+        prepare.used = true;
+        args.push("-/filter_complex".into());
+        args.push(file.to_string_lossy().to_string());
+    } else {
+        args.extend(strings(&["-filter_complex", &graph]));
+    }
     let Some(out) = out else {
         args.extend(strings(&["-map", "[vout]", "-frames:v", "1", "-update", "1"]));
         args.push(output.to_string_lossy().to_string());

@@ -54,12 +54,24 @@ impl Reveal {
     /// How much of the pixel at (`X`, `Y`) shows, for ffmpeg's `geq`, with
     /// clip time written as `t`.
     pub fn ffmpeg(&self, t: &str) -> String {
+        self.mask(t, "((X+0.5)/W)", "((Y+0.5)/H)")
+    }
+
+    /// The same for a piece of a picture: `rect` (left, top, width, height
+    /// in pixels) of a picture `size` big, so the wipe crosses the whole.
+    pub fn ffmpeg_within(&self, t: &str, rect: [u32; 4], size: (f64, f64)) -> String {
+        let across = format!("((X+{}+0.5)/{:.3})", rect[0], size.0.max(1.0));
+        let down = format!("((Y+{}+0.5)/{:.3})", rect[1], size.1.max(1.0));
+        self.mask(t, &across, &down)
+    }
+
+    fn mask(&self, t: &str, across: &str, down: &str) -> String {
         let e = format!("({}*{:.6}+{:.6})", self.progress.ffmpeg(t), 1.0 + WIPE_SOFT, self.lead);
         let (along, grows_back) = match self.from {
-            Edge::Left => ("((X+0.5)/W)", false),
-            Edge::Right => ("((X+0.5)/W)", true),
-            Edge::Top => ("((Y+0.5)/H)", false),
-            Edge::Bottom => ("((Y+0.5)/H)", true),
+            Edge::Left => (across, false),
+            Edge::Right => (across, true),
+            Edge::Top => (down, false),
+            Edge::Bottom => (down, true),
         };
         if grows_back {
             format!("clip(({along}-1+{e})/{WIPE_SOFT:.6},0,1)")

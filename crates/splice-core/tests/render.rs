@@ -566,6 +566,33 @@ fn effects_reach_the_file() {
     let filled = render(&q, &dir, "backdrop");
     assert!(brightness_at(&filled, 1.0, side) > 30.0, "filled beside it");
 
+    // Nothing hidden shows in the fill behind it.
+    q.set_look(portrait, |l| {
+        l.redact = Some(Redact {
+            style: RedactStyle::Black,
+            x: 0.5,
+            y: 0.5,
+            width: 1.0,
+            height: 1.0,
+        })
+    });
+    let private = render(&q, &dir, "backdrop-redacted");
+    assert!(
+        brightness_at(&private, 1.0, side) < 20.0,
+        "the hidden picture stays hidden behind it"
+    );
+    q.set_look(portrait, |l| l.redact = None);
+    // A box too small to blur at this size still exports.
+    p.set_look(clip, |l| {
+        l.fx = Default::default();
+        l.redact = Some(Redact {
+            style: RedactStyle::Blur,
+            width: 0.02,
+            height: 0.02,
+            ..Redact::default()
+        })
+    });
+    render(&p, &dir, "tiny-redact");
     // Letterbox bars over everything.
     q.letterbox = Some(2.39);
     let boxed = render(&q, &dir, "letterbox");

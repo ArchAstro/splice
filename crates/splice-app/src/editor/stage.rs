@@ -230,11 +230,12 @@ impl Editor {
                             ..p
                         },
                         visible: [0.0, 0.0, 1.0, 1.0],
+                        // Its part of the title, inside what a wipe shows of the whole.
                         shows: [
-                            (x / natural.0) as f32,
-                            (y / natural.1) as f32,
-                            ((x + w) / natural.0) as f32,
-                            ((y + h) / natural.1) as f32,
+                            ((x / natural.0) as f32).max(part[0]),
+                            ((y / natural.1) as f32).max(part[1]),
+                            (((x + w) / natural.0) as f32).min(part[2]),
+                            (((y + h) / natural.1) as f32).min(part[3]),
                         ],
                         pick: false,
                         paint: true,

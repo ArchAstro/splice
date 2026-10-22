@@ -200,6 +200,8 @@ pub struct Editor {
     /// The sound of clips played at another speed or backwards, by
     /// `retimed_key`; None while it is decoded.
     retimed_sound: Arc<Mutex<HashMap<String, Option<Arc<ffmpeg::Pcm>>>>>,
+    /// Clips being heard for captions.
+    captioning: std::collections::HashSet<ClipId>,
     selection: Vec<ClipId>,
     bin_selection: Option<MediaId>,
     view: View,
@@ -368,6 +370,7 @@ impl Editor {
             player: Player::new(),
             audio: AudioOut::open(),
             retimed_sound: Default::default(),
+            captioning: Default::default(),
             selection: Vec::new(),
             bin_selection: None,
             view: View::default(),
