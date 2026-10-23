@@ -2,7 +2,7 @@
 //! beyond the inspector's own controls.
 
 use super::*;
-use crate::actions::{AddKeyframe, AddTransition, FreezeFrame, ReverseClip};
+use crate::actions::{AddCaptions, AddKeyframe, AddTransition, FreezeFrame, ReverseClip};
 use splice_core::look::{Ease, Prop};
 use splice_core::model::Clip;
 use splice_core::transition::{Kind, Transition};
@@ -386,7 +386,205 @@ impl Editor {
                 });
                 reply(self, &[id])
             }
+            "zoom" => {
+                let [id] = named[..] else {
+                    return fail("name one screen recording clip with --clip");
+                };
+                if flag("none") {
+                    self.edit(cx, |p| p.clear_zoom(id));
+                    return reply(self, &[id]);
+                }
+                let zoom = number("to").unwrap_or(2.0) as f32;
+                match self.edit(cx, |p| p.zoom_to_clicks(id, zoom)) {
+                    0 => fail(
+                        "no clicks noted in the stretch of recording this clip plays (record with Splice to note them)",
+                    ),
+                    _ => reply(self, &[id]),
+                }
+            }
+            "leak" => {
+                let names: Vec<&str> = splice_core::leaks::LEAKS.iter().map(|l| l.name).collect();
+                let Some(leak) = text("kind").and_then(splice_core::leaks::find) else {
+                    return fail(format!("say which with --kind: {}", names.join(", ")));
+                };
+                let at = match self.time(request, "at") {
+                    Ok(t) => t,
+                    Err(e) => return fail(e),
+                };
+                match self.add_leak(leak, at, cx) {
+                    Some(clip) => reply(self, &[clip]),
+                    None => fail("the light leak could not be placed"),
+                }
+            }
             _ => fail(format!("unknown command {cmd}")),
+        }
+    }
+}
+
+impl Editor {
+    /// Hears what is said in clip `id` and lays captions over it, on a new
+    /// track: in the background, downloading the speech model first if it
+    /// is not here. `reply` (a `splice ctl … --wait`) hears how it went.
+    pub(super) fn caption_clip(
+        &mut self,
+        id: ClipId,
+        layout: splice_core::captions::Layout,
+        reply: Option<std::sync::mpsc::Sender<String>>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let project = &self.doc.project;
+        let clip = project.clip(id).ok_or("there is no such clip")?.clone();
+        let media = project
+            .media(clip.media)
+            .filter(|m| m.has_audio && clip.generator.is_none())
+            .ok_or("that clip has no sound to caption")?;
+        if clip.reverse || clip.frozen {
+            return Err("a clip playing backwards or held still has no speech to caption".into());
+        }
+        if crate::speech::whisper().is_none() {
+            return Err(crate::speech::INSTALL.into());
+        }
+        let path = self
+            .library
+            .path(&media.hash)
+            .ok_or("its media is not ready yet")?
+            .to_path_buf();
+        let (from, span) = (clip.source_in, clip.span());
+        if !self.captioning.insert(id) {
+            return Err("that clip is being captioned already".into());
+        }
+        self.say(if crate::speech::has_model() {
+            "Listening for words…".to_string()
+        } else {
+            format!(
+                "Downloading the speech model ({} MB, once), then listening…",
+                crate::speech::MODEL_SIZE_MB
+            )
+        });
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let heard = cx
+                .background_spawn(async move { crate::speech::transcribe(&path, from, span) })
+                .await;
+            this.update(cx, |editor, cx| {
+                editor.captioning.remove(&id);
+                // Where the clip is now: it may have moved while it was heard.
+                let now = editor.doc.project.clip(id).cloned();
+                let heard: anyhow::Result<(Vec<crate::speech::Heard>, Time, f64)> = match (heard, now) {
+                    (Err(e), _) => Err(e),
+                    (Ok(_), None) => Err(anyhow::anyhow!("the clip was removed while it was heard")),
+                    (Ok(_), Some(c)) if c.source_in != from || c.speed != clip.speed || c.reverse => Err(
+                        anyhow::anyhow!("the clip was trimmed or retimed while it was heard; caption it again"),
+                    ),
+                    (Ok(h), Some(c)) => Ok((h, c.start, c.speed)),
+                };
+                let answer = match heard {
+                    Ok((heard, _, _)) if heard.is_empty() => {
+                        editor.say_error("No speech heard in that clip");
+                        serde_json::json!({ "ok": false, "error": "no speech heard" })
+                    }
+                    Ok((heard, start, speed)) => {
+                        // From source time to timeline time, at the clip's speed.
+                        let at = |t: Time| start + (t as f64 / speed).round() as Time;
+                        let words: Vec<splice_core::captions::Word> = heard
+                            .into_iter()
+                            .map(|w| splice_core::captions::Word {
+                                text: w.text,
+                                start: at(w.start),
+                                end: at(w.end),
+                            })
+                            .collect();
+                        let ids = editor.edit(cx, |p| p.add_captions(&words, &layout));
+                        editor.selection = ids.clone();
+                        editor.say(format!(
+                            "{} captions from {} words; each is a title you can edit",
+                            ids.len(),
+                            words.len()
+                        ));
+                        let clips: Vec<_> = ids.iter().map(|id| editor.clip_json(*id)).collect();
+                        editor.edited_with(serde_json::json!({ "clips": clips, "words": words.len() }))
+                    }
+                    Err(e) => {
+                        editor.say_error(format!("Captions: {e}"));
+                        serde_json::json!({ "ok": false, "error": e.to_string() })
+                    }
+                };
+                if let Some(reply) = reply {
+                    let _ = reply.send(answer.to_string());
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        Ok(())
+    }
+
+    /// Captions the selected clip (or the first with sound under the playhead).
+    pub(super) fn add_captions_action(&mut self, _: &AddCaptions, _: &mut Window, cx: &mut Context<Self>) {
+        let project = &self.doc.project;
+        let sounds = |c: &Clip| c.generator.is_none() && project.media(c.media).is_some_and(|m| m.has_audio);
+        let t = self.player.position;
+        let target = self
+            .selection
+            .iter()
+            .filter_map(|id| project.clip(*id))
+            .find(|c| sounds(c))
+            .or_else(|| project.clips().map(|(_, c)| c).find(|c| c.contains(t) && sounds(c)))
+            .map(|c| c.id);
+        let Some(id) = target else {
+            return self.say_error("Select a clip with speech in it to caption");
+        };
+        if let Err(e) = self.caption_clip(id, Default::default(), None, cx) {
+            self.say_error(e);
+        }
+    }
+}
+
+impl Editor {
+    /// `splice ctl captions`: from speech (`--clip`, answered when heard with
+    /// `--wait`) or from a subtitle file (`--file`).
+    pub(super) fn ctl_captions(
+        &mut self,
+        request: &serde_json::Value,
+        reply: std::sync::mpsc::Sender<String>,
+        cx: &mut Context<Self>,
+    ) -> Option<serde_json::Value> {
+        use crate::ctl::fail;
+        use serde_json::{Value, json};
+        if let Some(text) = request.get("content").and_then(Value::as_str) {
+            let cues = splice_core::captions::parse_subtitles(text);
+            if cues.is_empty() {
+                return Some(fail("no captions found: give an .srt or .vtt file"));
+            }
+            let ids = self.edit(cx, |p| p.add_subtitles(&cues));
+            self.selection = ids.clone();
+            let clips: Vec<Value> = ids.iter().map(|id| self.clip_json(*id)).collect();
+            return Some(self.edited_with(json!({ "clips": clips })));
+        }
+        let ids = match self.clips_of(request) {
+            Ok(ids) => ids,
+            Err(e) => return Some(fail(e)),
+        };
+        let [id] = ids[..] else {
+            return Some(fail(
+                "name one clip with speech in it (--clip), or give --file captions.srt",
+            ));
+        };
+        let mut layout = splice_core::captions::Layout::default();
+        if let Some(n) = request.get("words").and_then(Value::as_f64) {
+            layout.words = (n as usize).clamp(1, 20);
+        }
+        if request.get("plain").and_then(Value::as_bool) == Some(true) {
+            layout.karaoke = false;
+        }
+        let wait = request.get("wait").and_then(Value::as_bool) == Some(true);
+        match self.caption_clip(id, layout, wait.then_some(reply), cx) {
+            Err(e) => Some(fail(e)),
+            Ok(()) if wait => None,
+            Ok(()) => {
+                Some(json!({ "ok": true, "listening": true, "note": "captions arrive when heard; --wait waits" }))
+            }
         }
     }
 }

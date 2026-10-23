@@ -378,6 +378,7 @@ mod tests {
             source: source.clone(),
             recipe: None,
             content: None,
+            clicks: Vec::new(),
         });
         project.append_clip(media);
 

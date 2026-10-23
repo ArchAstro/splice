@@ -56,6 +56,10 @@ pub struct Layer {
     pub visible: [f32; 4],
     /// The part a wipe shows now, the same way.
     pub shows: [f32; 4],
+    /// Whether clicking it picks its clip (one piece of a title does not:
+    /// the whole title does), and whether it is drawn at all.
+    pub pick: bool,
+    pub paint: bool,
 }
 
 /// What the stage paints, bottom first: pictures, and the colour of a dip.
@@ -138,6 +142,38 @@ impl Editor {
         for shown in project.picture(t) {
             let (drawn, pose, part) = match shown {
                 Shown::Clip { drawn, pose, part } => (*drawn, pose, part),
+                // The blurred fill behind a clip: covering the canvas, never picked.
+                Shown::Backdrop {
+                    clip,
+                    source: Source::Media(media),
+                    opacity,
+                } => {
+                    let Some(image) =
+                        self.player
+                            .frame(splice_core::compose::backdrop_id(clip.id), media, true, &self.library)
+                    else {
+                        continue;
+                    };
+                    let (mw, mh) = (media.width.max(1) as f64, media.height.max(1) as f64);
+                    let cover = (canvas.0 as f64 / mw).max(canvas.1 as f64 / mh);
+                    layers.push(Paint::Picture(Layer {
+                        clip: splice_core::compose::backdrop_id(clip.id),
+                        image: image.clone(),
+                        natural: (mw * cover, mh * cover),
+                        pose: Pose {
+                            x: 0.0,
+                            y: 0.0,
+                            scale: 1.0,
+                            opacity,
+                        },
+                        visible: [0.0, 0.0, 0.0, 0.0],
+                        shows: [0.0, 0.0, 1.0, 1.0],
+                        pick: false,
+                        paint: true,
+                    }));
+                    continue;
+                }
+                Shown::Backdrop { .. } => continue,
                 Shown::Fill { color, opacity, over } => {
                     layers.push(Paint::Fill {
                         color,
@@ -148,10 +184,69 @@ impl Editor {
                 }
             };
             let (clip, source) = (drawn.clip, drawn.source);
+            // A title coming in a piece at a time: its box, then each piece,
+            // and the whole of it (unseen) to pick it by.
+            if let Source::Generated(Generator::Text(title)) = source
+                && let Some(motion) = &title.animate
+                && let Some(parts) = self.drawings.parts(title, clip.look.mask.as_ref(), canvas)
+            {
+                let natural = (parts.size.0 as f64, parts.size.1 as f64);
+                let whole = |image: Arc<RenderImage>, pick: bool, paint: bool| Layer {
+                    clip: clip.id,
+                    image,
+                    natural,
+                    pose,
+                    visible: visible_part(clip.look.mask.as_ref()),
+                    shows: part,
+                    pick,
+                    paint,
+                };
+                layers.push(Paint::Picture(whole(parts.text.clone(), true, false)));
+                if let Some(back) = &parts.back {
+                    layers.push(Paint::Picture(whole(back.clone(), false, true)));
+                }
+                let local = splice_core::time::secs(t - clip.start);
+                let (cw, ch) = (canvas.0 as f64, canvas.1 as f64);
+                for piece in splice_core::textmotion::pieces(
+                    motion,
+                    &parts.units,
+                    &title.timing,
+                    natural,
+                    (cw, ch),
+                    title.size as f64,
+                    &drawn.pose,
+                ) {
+                    let p = piece.pose.at(local);
+                    let [x, y, w, h] = piece.rect.map(|v| v as f64);
+                    // The whole picture placed so this piece lands where it goes.
+                    let (dx, dy) = (x + w / 2.0 - natural.0 / 2.0, y + h / 2.0 - natural.1 / 2.0);
+                    layers.push(Paint::Picture(Layer {
+                        clip: clip.id,
+                        image: parts.text.clone(),
+                        natural,
+                        pose: Pose {
+                            x: p.x - dx * p.scale / cw,
+                            y: p.y - dy * p.scale / ch,
+                            ..p
+                        },
+                        visible: [0.0, 0.0, 1.0, 1.0],
+                        // Its part of the title, inside what a wipe shows of the whole.
+                        shows: [
+                            ((x / natural.0) as f32).max(part[0]),
+                            ((y / natural.1) as f32).max(part[1]),
+                            (((x + w) / natural.0) as f32).min(part[2]),
+                            (((y + h) / natural.1) as f32).min(part[3]),
+                        ],
+                        pick: false,
+                        paint: true,
+                    }));
+                }
+                continue;
+            }
             let (image, rendered) = match source {
                 Source::Media(media) => {
-                    let filters = clip.look.pixel_filters();
-                    let Some(image) = self.player.frame(clip.id, media, filters.as_deref(), &self.library) else {
+                    let filtered = clip.look.has_pixel_filters();
+                    let Some(image) = self.player.frame(clip.id, media, filtered, &self.library) else {
                         continue;
                     };
                     (image.clone(), None)
@@ -194,6 +289,8 @@ impl Editor {
                     v
                 },
                 shows: part,
+                pick: true,
+                paint: true,
             }));
         }
         layers
@@ -313,12 +410,16 @@ impl Editor {
                         let rect = layer_rect(stage, canvas_size, layer.natural, &layer.pose);
                         // Picked by what shows of it: inside its mask and any wipe.
                         let shows = sub_rect(rect, layer.shows);
-                        let picked = sub_rect(rect, layer.visible).intersect(&shows);
-                        placed.borrow_mut().push((layer.clip, picked, rect.center()));
-                        let clip_to = stage.intersect(&shows);
-                        window.with_content_mask(Some(gpui::ContentMask { bounds: clip_to }), |window| {
-                            let _ = window.paint_image(rect, Corners::default(), layer.image, 0, false);
-                        });
+                        if layer.pick {
+                            let picked = sub_rect(rect, layer.visible).intersect(&shows);
+                            placed.borrow_mut().push((layer.clip, picked, rect.center()));
+                        }
+                        if layer.paint {
+                            let clip_to = stage.intersect(&shows);
+                            window.with_content_mask(Some(gpui::ContentMask { bounds: clip_to }), |window| {
+                                let _ = window.paint_image(rect, Corners::default(), layer.image, 0, false);
+                            });
+                        }
                     },
                 )
                 .size_full(),
@@ -399,6 +500,31 @@ impl Editor {
         .absolute()
         .inset_0();
 
+        // Letterbox bars, over every picture as export draws them.
+        let bars = self.doc.project.letterbox_bars().map(|(tb, lr)| {
+            let cell = self.stage_bounds.clone();
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    let stage = cell.get();
+                    let k = f32::from(stage.size.width) / canvas_size.0.max(1) as f32;
+                    let (tb, lr) = (px(tb as f32 * k), px(lr as f32 * k));
+                    for bar in [
+                        Bounds::new(stage.origin, size(stage.size.width, tb)),
+                        Bounds::new(point(stage.left(), stage.bottom() - tb), size(stage.size.width, tb)),
+                        Bounds::new(stage.origin, size(lr, stage.size.height)),
+                        Bounds::new(point(stage.right() - lr, stage.top()), size(lr, stage.size.height)),
+                    ] {
+                        if bar.size.width > px(0.0) && bar.size.height > px(0.0) {
+                            window.paint_quad(gpui::fill(bar, gpui::black()));
+                        }
+                    }
+                },
+            )
+            .absolute()
+            .inset_0()
+        });
+
         div()
             .id("stage")
             .flex_1()
@@ -406,6 +532,7 @@ impl Editor {
             .relative()
             .child(ground)
             .children(pictures)
+            .children(bars)
             .child(overlay)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::stage_down))
     }

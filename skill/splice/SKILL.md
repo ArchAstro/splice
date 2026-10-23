@@ -166,6 +166,34 @@ splice ctl keyframe --clip 7 --at 14 --drop                # or --clear for all 
   clips on the same track move to match, other tracks do not, so check that
   music and titles above still line up (`read`). Sound keeps its pitch.
   A held frame (`freeze`) is silent and stretches like a picture.
+- Effects (`look`): `--blur`, `--vignette`, `--grain`, `--shake`, `--glitch`,
+  each 0 to 1. `--backdrop on` fills the canvas behind a picture with a
+  blurred copy (a phone video on a wide canvas). `--redact blur|pixelate|black`
+  hides a box (`--redact-x/-y` centre, `--redact-width/-height`, fractions of
+  the frame) for faces, screens and plates. `canvas --letterbox 2.39` frames
+  the whole movie with bars; `--letterbox none` removes them.
+- `splice ctl leak --kind warm|sun|cool --at T` lays a 4 s light leak (a
+  see-through scene) over a shot; use one at a time, on a cut or a turn.
+
+### Captions and words that move
+
+```sh
+splice ctl captions --clip 3 --wait        # hear what is said; captions on a new track
+splice ctl captions --clip 3 --words 4 --plain --wait   # shorter lines, appearing whole
+splice ctl captions --file talk.srt        # or from a subtitle file (.srt, .vtt)
+splice ctl text --text "Three things" --animate rise --by word --over 1.2
+splice ctl style --clip 12 --animate pop --by letter     # --animate none: all at once
+```
+
+- Captions are heard on this Mac with whisper.cpp; if it is missing the
+  reply says to `brew install whisper-cpp`. The first time, a 148 MB speech
+  model downloads (the person sees a note). Read the captions back (`read`)
+  and fix misheard words with `style --clip C --text …`; a caption's word
+  timings stay with it as long as the number of words does not change.
+- Each caption line lights its words up as they are said (karaoke). Lines
+  break at sentences and pauses, a few words each, shared evenly.
+- `--animate` styles: fade, rise, pop, type, karaoke; `--by` word, letter or
+  line; `--over` the seconds until the last piece starts.
 - Keyframes animate x, y, scale and opacity; a value with keyframes ignores
   its plain `look` value. Each keyframe's `--ease` shapes the glide to the
   next one. Animate the picture, not the frame: a slow push in of 1 to 1.15
@@ -459,6 +487,10 @@ splice ctl record stop --wait                          # answers once the take i
 - The first recording needs Screen Recording permission. If a take comes out
   empty, say so and ask the person to grant it in System Settings → Privacy &
   Security.
+- Splice notes where and when the mouse is clicked while it records (no
+  extra permission). `splice ctl zoom --clip C --to 2` then zooms the take in
+  towards each burst of clicks and back out between them, as keyframes on
+  place and size; `--none` takes it away. `read` shows a clip's `clicks`.
 
 ## 7. Playback, the window, versions, export
 

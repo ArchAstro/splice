@@ -107,6 +107,7 @@ fn new(path: &Path, media: &[String]) -> anyhow::Result<()> {
             source: std::fs::canonicalize(&file).unwrap_or(file.clone()),
             recipe: None,
             content: None,
+            clicks: Vec::new(),
         });
         project.append_clip(id);
     }

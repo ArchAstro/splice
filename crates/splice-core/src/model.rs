@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 /// Version of the project JSON. Bump it and add a step to `migrate` when the
 /// shape changes.
-pub const SCHEMA: u32 = 6;
+pub const SCHEMA: u32 = 7;
 
 /// How long a still image runs when it is first placed.
 pub const IMAGE_DURATION: Time = 5 * SECOND;
@@ -62,6 +62,18 @@ pub struct Media {
     /// (x, y, width, height), so it is picked and outlined by what it shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<[f32; 4]>,
+    /// For a screen recording: where and when the mouse was clicked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clicks: Vec<Click>,
+}
+
+/// A mouse click in a screen recording: when (source time), and where, as
+/// fractions of the frame from its top left.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Click {
+    pub at: Time,
+    pub x: f32,
+    pub y: f32,
 }
 
 /// What made media is made from.
@@ -265,6 +277,13 @@ pub struct Title {
     pub background: Option<u32>,
     /// A soft shadow under the letters.
     pub shadow: bool,
+    /// Coming in a piece at a time: word by word, letter by letter, line by line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub animate: Option<crate::textmotion::TextMotion>,
+    /// When each word is said, from the clip's start (captions); words
+    /// come in (or light up) then.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub timing: Vec<Time>,
 }
 
 impl Default for Title {
@@ -279,6 +298,8 @@ impl Default for Title {
             align: Align::Center,
             background: None,
             shadow: true,
+            animate: None,
+            timing: Vec::new(),
         }
     }
 }
@@ -442,6 +463,10 @@ pub struct Project {
     /// keeps its timing. None stretches all of it evenly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold: Option<(Time, Time)>,
+    /// Black bars that frame the whole movie to a wider (or narrower)
+    /// shape: 2.39 for a cinema look. Drawn over everything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub letterbox: Option<f32>,
     next_id: u64,
 }
 
@@ -460,6 +485,7 @@ impl Default for Project {
             story: crate::story::Story::default(),
             bible: crate::bible::Bible::default(),
             hold: None,
+            letterbox: None,
             next_id: 2,
         }
     }
@@ -1115,6 +1141,28 @@ impl Project {
         points
     }
 
+    /// The bars a letterbox draws, in canvas pixels: (top and bottom bar
+    /// height, left and right bar width); one of them is 0.
+    pub fn letterbox_bars(&self) -> Option<(u32, u32)> {
+        let aspect = self.letterbox.filter(|a| a.is_finite() && *a > 0.1)? as f64;
+        let (w, h) = (self.settings.width as f64, self.settings.height as f64);
+        let shape = w / h.max(1.0);
+        if (aspect - shape).abs() < 0.01 {
+            return None;
+        }
+        Some(if aspect > shape {
+            (
+                (((h - w / aspect) / 2.0).round() as u32).min(self.settings.height / 2),
+                0,
+            )
+        } else {
+            (
+                0,
+                (((w - h * aspect) / 2.0).round() as u32).min(self.settings.width / 2),
+            )
+        })
+    }
+
     /// Visible picture layers at `t`, bottom first.
     pub fn visual_stack(&self, t: Time) -> Vec<(&Clip, Source<'_>)> {
         self.tracks
@@ -1155,7 +1203,10 @@ fn migrate(value: &mut serde_json::Value) -> anyhow::Result<()> {
     // Schema 2 added `look` and `generator` to clips, schema 3 `recipe` to
     // media, schema 4 `story` to the project, schema 5 symbols (a recipe) and
     // `placeholder` on clips, schema 6 speed, reverse, freeze, transitions,
-    // colour and keyframes on clips; all default, so older projects need nothing.
+    // colour and keyframes on clips, schema 7 effects, backdrops, hidden boxes,
+    // letterboxes, titles that come in a piece at a time (and captions'
+    // word timings) and recordings' clicks; all default, so older projects
+    // need nothing.
     value["schema"] = SCHEMA.into();
     Ok(())
 }
@@ -1178,6 +1229,7 @@ mod tests {
             source: PathBuf::new(),
             recipe: None,
             content: None,
+            clicks: Vec::new(),
         }
     }
 

@@ -6,11 +6,22 @@ use super::render::{caps, icon, tip};
 use super::stage::Grab;
 use super::*;
 use gpui::{Hsla, Stateful};
-use splice_core::look::{Drift, Ease, KEY_NEAR, Key, Mask, MotionKind, Preset, Prop, Shape};
+use splice_core::look::{
+    Backdrop, Drift, Ease, KEY_NEAR, Key, Mask, MotionKind, Preset, Prop, Redact, RedactStyle, Shape,
+};
 use splice_core::model::{Align, Clip, Source, Title};
 use splice_core::transition::{Kind as TransitionKind, Transition};
 
 pub const INSPECTOR_WIDTH: f32 = 292.0;
+
+/// Letterbox shapes offered: name, and width over height (None: no bars).
+pub const LETTERBOXES: &[(&str, Option<f32>)] = &[
+    ("None", None),
+    ("2.39 Cinema", Some(2.39)),
+    ("2:1", Some(2.0)),
+    ("1.85", Some(1.85)),
+    ("4:3", Some(4.0 / 3.0)),
+];
 
 /// A number the inspector edits with a slider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -41,6 +52,18 @@ pub enum Field {
     Tint,
     Speed,
     TransitionLength,
+    Blur,
+    Vignette,
+    Grain,
+    Shake,
+    Glitch,
+    BackdropBlur,
+    BackdropDim,
+    RedactX,
+    RedactY,
+    RedactWidth,
+    RedactHeight,
+    TextOver,
 }
 
 impl Field {
@@ -72,6 +95,17 @@ impl Field {
             Field::Exposure | Field::Contrast | Field::Saturation | Field::Warmth | Field::Tint => (-1.0, 1.0),
             Field::Speed => (0.1, 4.0),
             Field::TransitionLength => (0.1, 3.0),
+            Field::Blur
+            | Field::Vignette
+            | Field::Grain
+            | Field::Shake
+            | Field::Glitch
+            | Field::BackdropBlur
+            | Field::BackdropDim
+            | Field::RedactX
+            | Field::RedactY => (0.0, 1.0),
+            Field::RedactWidth | Field::RedactHeight => (0.02, 1.0),
+            Field::TextOver => (0.1, 5.0),
         }
     }
 
@@ -91,6 +125,14 @@ impl Field {
             Field::Exposure | Field::Contrast | Field::Saturation | Field::Warmth | Field::Tint => 0.0,
             Field::Speed => 1.0,
             Field::TransitionLength => secs(Transition::DEFAULT_LENGTH) as f32,
+            Field::Blur | Field::Vignette | Field::Grain | Field::Shake | Field::Glitch => 0.0,
+            Field::BackdropBlur => Backdrop::default().blur,
+            Field::BackdropDim => Backdrop::default().dim,
+            Field::RedactX => Redact::default().x,
+            Field::RedactY => Redact::default().y,
+            Field::RedactWidth => Redact::default().width,
+            Field::RedactHeight => Redact::default().height,
+            Field::TextOver => 1.0,
         }
     }
 
@@ -120,6 +162,17 @@ impl Field {
             Field::Warmth => "Warmth",
             Field::Tint => "Tint",
             Field::Speed => "Speed",
+            Field::Blur | Field::BackdropBlur => "Blur",
+            Field::Vignette => "Vignette",
+            Field::Grain => "Grain",
+            Field::Shake => "Shake",
+            Field::Glitch => "Glitch",
+            Field::BackdropDim => "Darken",
+            Field::RedactX => "Across",
+            Field::RedactY => "Down",
+            Field::RedactWidth => "Width",
+            Field::RedactHeight => "Height",
+            Field::TextOver => "Over",
         }
     }
 
@@ -135,13 +188,15 @@ impl Field {
                 }
             }
             Field::TextSize => format!("{:.0} px", v * canvas_height as f32),
-            Field::EnterDuration | Field::ExitDuration | Field::TransitionLength => format!("{v:.1}s"),
+            Field::EnterDuration | Field::ExitDuration | Field::TransitionLength | Field::TextOver => {
+                format!("{v:.1}s")
+            }
             Field::Exposure => format!("{v:+.1}"),
             Field::Contrast | Field::Saturation | Field::Warmth | Field::Tint => format!("{:+.0}", v * 100.0),
             Field::Speed => format!("{}×", crate::timeline::speed_label(v as f64)),
             Field::X | Field::Y => format!("{:+.0}%", v * 100.0),
             // Mask places count from the middle of the picture, like X and Y.
-            Field::MaskX | Field::MaskY => format!("{:+.0}%", (v - 0.5) * 100.0),
+            Field::MaskX | Field::MaskY | Field::RedactX | Field::RedactY => format!("{:+.0}%", (v - 0.5) * 100.0),
             _ => format!("{:.0}%", v * 100.0),
         }
     }
@@ -182,6 +237,21 @@ impl Field {
             Field::Tint => look.grade.tint,
             Field::Speed => clip.speed as f32,
             Field::TransitionLength => clip.transition.map_or(0.6, |t| secs(t.duration) as f32),
+            Field::Blur => look.fx.blur,
+            Field::Vignette => look.fx.vignette,
+            Field::Grain => look.fx.grain,
+            Field::Shake => look.fx.shake,
+            Field::Glitch => look.fx.glitch,
+            Field::BackdropBlur => look.backdrop.unwrap_or_default().blur,
+            Field::BackdropDim => look.backdrop.unwrap_or_default().dim,
+            Field::RedactX => look.redact.unwrap_or_default().x,
+            Field::RedactY => look.redact.unwrap_or_default().y,
+            Field::RedactWidth => look.redact.unwrap_or_default().width,
+            Field::RedactHeight => look.redact.unwrap_or_default().height,
+            Field::TextOver => match &clip.generator {
+                Some(Generator::Text(t)) => t.animate.map_or(1.0, |m| secs(m.over) as f32),
+                _ => 1.0,
+            },
         }
     }
 
@@ -196,6 +266,37 @@ impl Field {
         match self {
             Field::X | Field::Y | Field::Scale | Field::Opacity => {}
             Field::Speed | Field::TransitionLength => {}
+            Field::TextOver => {
+                if let Some(Generator::Text(t)) = &mut clip.generator
+                    && let Some(m) = &mut t.animate
+                {
+                    m.over = splice_core::time::from_secs(v as f64);
+                }
+            }
+            Field::Blur => look.fx.blur = v,
+            Field::Vignette => look.fx.vignette = v,
+            Field::Grain => look.fx.grain = v,
+            Field::Shake => look.fx.shake = v,
+            Field::Glitch => look.fx.glitch = v,
+            Field::BackdropBlur | Field::BackdropDim => {
+                if let Some(b) = &mut look.backdrop {
+                    if self == Field::BackdropBlur {
+                        b.blur = v;
+                    } else {
+                        b.dim = v;
+                    }
+                }
+            }
+            Field::RedactX | Field::RedactY | Field::RedactWidth | Field::RedactHeight => {
+                if let Some(r) = &mut look.redact {
+                    match self {
+                        Field::RedactX => r.x = v,
+                        Field::RedactY => r.y = v,
+                        Field::RedactWidth => r.width = v,
+                        _ => r.height = v,
+                    }
+                }
+            }
             Field::Exposure => look.grade.exposure = v,
             Field::Contrast => look.grade.contrast = v,
             Field::Saturation => look.grade.saturation = v,
@@ -751,6 +852,7 @@ impl Editor {
                 self.section("Shape")
                     .child(div().flex().flex_wrap().gap(px(6.0)).children(chips)),
             )
+            .child(self.letterbox_section(cx))
             .when_some(self.hold_section(cx), |d, hold| d.child(hold))
             .child(
                 div()
@@ -760,6 +862,35 @@ impl Editor {
                     .line_height(px(17.0))
                     .text_color(Theme::overlay())
                     .child("Select a clip to place it, animate it, key out a green screen or mask it."),
+            )
+    }
+
+    /// Bars that frame the movie to another shape.
+    fn letterbox_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let current = self.doc.project.letterbox;
+        let chips: Vec<AnyElement> = LETTERBOXES
+            .iter()
+            .map(|(label, aspect)| {
+                let aspect = *aspect;
+                let on = match (current, aspect) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => (a - b).abs() < 0.005,
+                    _ => false,
+                };
+                self.chip(format!("letterbox-{label}"), label, on, cx, move |this, cx| {
+                    this.edit(cx, |p| p.letterbox = aspect);
+                })
+                .into_any_element()
+            })
+            .collect();
+        self.section("Letterbox")
+            .child(div().flex().flex_wrap().gap(px(6.0)).children(chips))
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .line_height(px(15.0))
+                    .text_color(Theme::overlay())
+                    .child("Black bars over the whole movie, framing it to a wider shape."),
             )
     }
 
@@ -898,10 +1029,25 @@ impl Editor {
             sections.push(self.motion_section(id, &clip, cx).into_any_element());
             if graded {
                 sections.push(self.colour_section(id, &clip, cx).into_any_element());
+                sections.push(self.effects_section(id, &clip, cx).into_any_element());
+                sections.push(self.backdrop_section(id, &clip, cx).into_any_element());
+                sections.push(self.redact_section(id, &clip, cx).into_any_element());
+            } else {
+                sections.push(self.effects_section(id, &clip, cx).into_any_element());
             }
         }
         if timed {
             sections.push(self.speed_section(id, &clip, cx).into_any_element());
+        }
+        // A screen recording with its clicks noted.
+        let clicks = self
+            .doc
+            .project
+            .media(clip.media)
+            .filter(|_| clip.generator.is_none())
+            .map_or(0, |m| m.clicks.len());
+        if clicks > 0 {
+            sections.push(self.zoom_section(id, clicks, cx).into_any_element());
         }
         if visual {
             if media_clip {
@@ -911,9 +1057,22 @@ impl Editor {
             sections.push(self.mask_section(id, &clip, cx).into_any_element());
         }
         if audio {
+            let speech = clip.generator.is_none() && !clip.reverse && !clip.frozen;
             sections.push(
                 self.section("Sound")
                     .child(self.slider(id, &clip, Field::Volume, cx))
+                    .when(speech, |d| {
+                        d.child(
+                            div().flex().child(
+                                self.chip("captions", "Add captions from speech", false, cx, move |this, cx| {
+                                    if let Err(e) = this.caption_clip(id, Default::default(), None, cx) {
+                                        this.say_error(e);
+                                    }
+                                })
+                                .tooltip(tip("Hears what is said, on this Mac, and lays captions over it", None)),
+                            ),
+                        )
+                    })
                     .into_any_element(),
             );
         }
@@ -1135,6 +1294,83 @@ impl Editor {
             .child(self.toggle("shadow", "Shadow", title.shadow, cx, move |this, cx| {
                 this.change_title(id, cx, |t| t.shadow = !t.shadow);
             }))
+            .child(self.words_in(id, clip, &title, cx))
+    }
+
+    /// How a title's words come in: one at a time, and how.
+    fn words_in(&mut self, id: ClipId, clip: &Clip, title: &Title, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        use splice_core::textmotion::{By, Style, TextMotion};
+        let motion = title.animate;
+        let timed = !title.timing.is_empty();
+        let mut styles: Vec<AnyElement> = vec![
+            self.chip("words-none", "All at once", motion.is_none(), cx, move |this, cx| {
+                this.change_title(id, cx, |t| t.animate = None);
+            })
+            .into_any_element(),
+        ];
+        styles.extend(Style::ALL.into_iter().map(|style| {
+            let on = motion.is_some_and(|m| m.style == style);
+            self.chip(
+                format!("words-{}", style.name()),
+                style.label(),
+                on,
+                cx,
+                move |this, cx| {
+                    this.change_title(id, cx, |t| {
+                        t.animate = Some(TextMotion {
+                            style,
+                            ..t.animate.unwrap_or_default()
+                        });
+                    });
+                },
+            )
+            .into_any_element()
+        }));
+        let units: Vec<AnyElement> = By::ALL
+            .into_iter()
+            .map(|by| {
+                let on = motion.is_some_and(|m| m.by == by);
+                let label = match by {
+                    By::Word => "Words",
+                    By::Letter => "Letters",
+                    By::Line => "Lines",
+                };
+                self.chip(format!("words-by-{}", by.name()), label, on, cx, move |this, cx| {
+                    this.change_title(id, cx, |t| {
+                        if let Some(m) = &mut t.animate {
+                            m.by = by;
+                        }
+                    });
+                })
+                .flex_1()
+                .into_any_element()
+            })
+            .collect();
+        div()
+            .pt(px(6.0))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(Theme::overlay())
+                    .child("Words come in"),
+            )
+            .child(div().flex().flex_wrap().gap(px(5.0)).children(styles))
+            .when(motion.is_some(), |d| {
+                d.child(div().flex().gap(px(5.0)).children(units))
+                    .when(!timed, |d| d.child(self.slider(id, clip, Field::TextOver, cx)))
+                    .when(timed, |d| {
+                        d.child(
+                            div()
+                                .text_size(px(10.5))
+                                .line_height(px(15.0))
+                                .text_color(Theme::overlay())
+                                .child("Timed to the words as they are said."),
+                        )
+                    })
+            })
     }
 
     fn place_section(&mut self, id: ClipId, clip: &Clip, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1533,6 +1769,158 @@ impl Editor {
             ids.len()
         });
         self.say(format!("Every picture has this colour now ({count} clips)"));
+    }
+
+    // Effects.
+
+    fn effects_section(&mut self, id: ClipId, clip: &Clip, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let fx = clip.look.fx;
+        // Titles and colours shake and glitch; what blurs and grains is media.
+        let media = clip.generator.is_none();
+        let (section, open) = self.fold(id, "Effects", !fx.is_none(), fx.summary(), cx);
+        section.when(open, |d| {
+            d.when(media, |d| {
+                d.child(self.slider(id, clip, Field::Blur, cx))
+                    .child(self.slider(id, clip, Field::Vignette, cx))
+                    .child(self.slider(id, clip, Field::Grain, cx))
+            })
+            .child(self.slider(id, clip, Field::Shake, cx))
+            .child(self.slider(id, clip, Field::Glitch, cx))
+            .when(!fx.is_none(), |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .child(self.chip("fx-reset", "Reset effects", false, cx, move |this, cx| {
+                            this.change(id, cx, |c| c.look.fx = Default::default());
+                        })),
+                )
+            })
+        })
+    }
+
+    /// A blurred copy of the picture filling the canvas behind it.
+    fn backdrop_section(&mut self, id: ClipId, clip: &Clip, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let on = clip.look.backdrop.is_some();
+        let (section, open) = self.fold(id, "Background", on, if on { "Blurred fill" } else { "Off" }.into(), cx);
+        section.when(open, |d| {
+            d.child(self.toggle(
+                "backdrop-on",
+                "Fill the canvas behind it, blurred",
+                on,
+                cx,
+                move |this, cx| {
+                    this.change(id, cx, |c| {
+                        c.look.backdrop = if c.look.backdrop.is_some() {
+                            None
+                        } else {
+                            Some(Backdrop::default())
+                        };
+                    });
+                },
+            ))
+            .when(on, |d| {
+                d.child(self.slider(id, clip, Field::BackdropBlur, cx))
+                    .child(self.slider(id, clip, Field::BackdropDim, cx))
+            })
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .line_height(px(15.0))
+                    .text_color(Theme::overlay())
+                    .child("For a picture that doesn't fill the frame: a phone video on a wide canvas."),
+            )
+        })
+    }
+
+    /// Hiding part of the picture: a face, a screen, a number plate.
+    fn redact_section(&mut self, id: ClipId, clip: &Clip, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let redact = clip.look.redact;
+        let styles: Vec<AnyElement> = std::iter::once(None)
+            .chain(RedactStyle::ALL.into_iter().map(Some))
+            .map(|style| {
+                let label = match style {
+                    None => "Off",
+                    Some(RedactStyle::Blur) => "Blur",
+                    Some(RedactStyle::Pixelate) => "Pixelate",
+                    Some(RedactStyle::Black) => "Black box",
+                };
+                let on = redact.map(|r| r.style) == style;
+                self.chip(format!("redact-{label}"), label, on, cx, move |this, cx| {
+                    this.change(id, cx, |c| {
+                        c.look.redact = style.map(|style| Redact {
+                            style,
+                            ..c.look.redact.unwrap_or_default()
+                        });
+                    });
+                })
+                .flex_1()
+                .px(px(4.0))
+                .into_any_element()
+            })
+            .collect();
+        let summary = match redact.map(|r| r.style) {
+            None => "Off",
+            Some(RedactStyle::Blur) => "Blurred box",
+            Some(RedactStyle::Pixelate) => "Pixelated box",
+            Some(RedactStyle::Black) => "Black box",
+        };
+        let (section, open) = self.fold(id, "Hide part", redact.is_some(), summary.into(), cx);
+        section.when(open, |d| {
+            d.child(div().flex().gap(px(4.0)).children(styles))
+                .when(redact.is_some(), |d| {
+                    d.child(self.slider(id, clip, Field::RedactWidth, cx))
+                        .child(self.slider(id, clip, Field::RedactHeight, cx))
+                        .child(self.slider(id, clip, Field::RedactX, cx))
+                        .child(self.slider(id, clip, Field::RedactY, cx))
+                })
+        })
+    }
+
+    /// Zooming in where a screen recording was clicked.
+    fn zoom_section(&mut self, id: ClipId, clicks: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let zooms: Vec<AnyElement> = [1.5f32, 2.0, 2.5]
+            .into_iter()
+            .map(|zoom| {
+                self.chip(
+                    format!("zoom-{zoom}"),
+                    &format!("{zoom}×"),
+                    false,
+                    cx,
+                    move |this, cx| {
+                        let made = this.edit(cx, |p| p.zoom_to_clicks(id, zoom));
+                        if made == 0 {
+                            this.say_error("No clicks in the part of the recording this clip plays");
+                        } else {
+                            this.say(format!(
+                                "Zooms in {made} time{}; they are keyframes, so drag or ease them as you like",
+                                if made == 1 { "" } else { "s" }
+                            ));
+                        }
+                    },
+                )
+                .flex_1()
+                .into_any_element()
+            })
+            .collect();
+        self.section("Zoom to clicks")
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .line_height(px(16.0))
+                    .text_color(Theme::overlay())
+                    .child(format!(
+                        "{clicks} click{} noted while recording. Zoom in towards each burst of them:",
+                        if clicks == 1 { "" } else { "s" }
+                    )),
+            )
+            .child(div().flex().gap(px(5.0)).children(zooms))
+            .child(
+                div()
+                    .flex()
+                    .child(self.chip("zoom-off", "Remove zoom", false, cx, move |this, cx| {
+                        this.edit(cx, |p| p.clear_zoom(id));
+                    })),
+            )
     }
 
     // Speed.

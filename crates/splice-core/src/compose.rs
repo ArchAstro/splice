@@ -54,12 +54,24 @@ impl Reveal {
     /// How much of the pixel at (`X`, `Y`) shows, for ffmpeg's `geq`, with
     /// clip time written as `t`.
     pub fn ffmpeg(&self, t: &str) -> String {
+        self.mask(t, "((X+0.5)/W)", "((Y+0.5)/H)")
+    }
+
+    /// The same for a piece of a picture: `rect` (left, top, width, height
+    /// in pixels) of a picture `size` big, so the wipe crosses the whole.
+    pub fn ffmpeg_within(&self, t: &str, rect: [u32; 4], size: (f64, f64)) -> String {
+        let across = format!("((X+{}+0.5)/{:.3})", rect[0], size.0.max(1.0));
+        let down = format!("((Y+{}+0.5)/{:.3})", rect[1], size.1.max(1.0));
+        self.mask(t, &across, &down)
+    }
+
+    fn mask(&self, t: &str, across: &str, down: &str) -> String {
         let e = format!("({}*{:.6}+{:.6})", self.progress.ffmpeg(t), 1.0 + WIPE_SOFT, self.lead);
         let (along, grows_back) = match self.from {
-            Edge::Left => ("((X+0.5)/W)", false),
-            Edge::Right => ("((X+0.5)/W)", true),
-            Edge::Top => ("((Y+0.5)/H)", false),
-            Edge::Bottom => ("((Y+0.5)/H)", true),
+            Edge::Left => (across, false),
+            Edge::Right => (across, true),
+            Edge::Top => (down, false),
+            Edge::Bottom => (down, true),
         };
         if grows_back {
             format!("clip(({along}-1+{e})/{WIPE_SOFT:.6},0,1)")
@@ -168,6 +180,11 @@ impl Sound {
     }
 }
 
+/// The id the viewer gives a clip's backdrop, which it decodes on its own.
+pub fn backdrop_id(id: crate::model::ClipId) -> crate::model::ClipId {
+    crate::model::ClipId(id.0 | 1 << 62)
+}
+
 /// What the viewer draws at a moment, bottom first.
 #[derive(Clone, Debug)]
 pub enum Shown<'a> {
@@ -176,6 +193,13 @@ pub enum Shown<'a> {
         pose: Pose,
         /// The part of its frame that shows.
         part: [f32; 4],
+    },
+    /// The blurred fill behind a clip (its `look.backdrop`), covering the
+    /// canvas, showing as much as the clip does.
+    Backdrop {
+        clip: &'a Clip,
+        source: Source<'a>,
+        opacity: f64,
     },
     Fill {
         color: u32,
@@ -426,6 +450,13 @@ impl Project {
                     let pose = drawn.pose_at(t);
                     let part = drawn.shows(t);
                     let tint = drawn.tint.filter(|(_, a, z)| t >= *a && t < *z);
+                    if clip.look.backdrop.is_some() && matches!(drawn.source, Source::Media(_)) {
+                        out.push(Shown::Backdrop {
+                            clip,
+                            source: drawn.source,
+                            opacity: pose.opacity,
+                        });
+                    }
                     out.push(Shown::Clip {
                         drawn: Box::new(drawn),
                         pose,
@@ -477,6 +508,7 @@ mod tests {
             source: PathBuf::new(),
             recipe: None,
             content: None,
+            clicks: Vec::new(),
         })
     }
 
@@ -493,7 +525,7 @@ mod tests {
             .iter()
             .map(|s| match s {
                 Shown::Clip { pose, .. } => pose.opacity,
-                Shown::Fill { .. } => -1.0,
+                _ => -1.0,
             })
             .collect();
         assert_eq!(opacities[0], 1.0, "a solid picture stays solid under the dissolve");

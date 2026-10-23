@@ -106,8 +106,17 @@ make install-app   # Splice.app in /Applications
 - **Text** (⌘T, or the Text shelf): titles in any installed font, with size,
   bold, italic, alignment, colour, a box behind and a soft shadow. Type in the
   inspector, or double-click a title on the stage.
-- **Colour** shelf: full-frame colours for backgrounds and title cards, and a
-  half-black tint.
+- **Words come in** one at a time: by word, letter or line, fading,
+  rising, popping or typed; set it in the Text section.
+- **Captions** (Edit → Add Captions from Speech, or the clip's Sound
+  section): Splice hears what is said, on your Mac (whisper.cpp,
+  `brew install whisper-cpp`; a 148 MB speech model downloads once), and lays
+  captions over it, each word lighting up as it is said. Each caption is a
+  title you can edit. `.srt` and `.vtt` files load too.
+- **Colour** shelf: full-frame colours for backgrounds and title cards, a
+  half-black tint, and light leaks that wash warm or cool light over a shot.
+- **Letterbox** (the canvas inspector, with nothing selected): bars that
+  frame the whole movie to 2.39, 2:1, 1.85 or 4:3.
 - **Inspector** (⌘2), for the selected clip:
   - **Place:** drag a picture on the stage, or its corners to resize. It snaps
     to the centre lines. There's a nine-point grid, plus size, opacity and
@@ -125,6 +134,12 @@ make install-app   # Splice.app in /Applications
   - **Colour:** a look (warm, cool, vivid, muted, faded, film, teal & orange,
     black & white, noir) with exposure, contrast, saturation, warmth and tint
     over it. *Use on every clip* grades the whole movie the same.
+  - **Effects:** blur, vignette, film grain, a handheld shake and a glitch,
+    each a slider.
+  - **Background:** fill the canvas behind a picture with a blurred, darkened
+    copy of it: a phone video on a wide canvas.
+  - **Hide part:** blur, pixelate or black out a box of the picture (a
+    face, a screen, a number plate).
   - **Speed:** 0.25× to 4× (0.1× to 16× from the assistant), or backwards.
     A faster clip gets shorter and what follows on its track moves up; sound
     keeps its pitch. *Freeze frame* (⌥F) holds the frame at the playhead.
@@ -316,6 +331,9 @@ with `make install-skill`) teaches Claude Code to use it.
 | `splice ctl transition` | dissolves, dips, wipes, pushes and zooms at cuts |
 | `splice ctl speed`, `freeze` | faster, slower, backwards; hold a frame |
 | `splice ctl keyframe` | animate position, size and opacity between moments |
+| `splice ctl captions` | captions from speech (on this Mac) or a subtitle file |
+| `splice ctl zoom` | zoom a screen recording in where it was clicked |
+| `splice ctl leak` | light leaks over a shot |
 | `splice ctl score new / read / write / instruments` | compose music: a score as JSON |
 | `splice ctl scene new / read / write / help` | animations and diagrams, described as JSON |
 | `splice ctl scene sheet / frame / patch / add / remove / check` | see a scene's motion as a contact sheet; edit layers by name; validate first |

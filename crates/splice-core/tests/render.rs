@@ -90,6 +90,7 @@ fn ramp_with_sound(dir: &Path, hash: &str, colour: bool, sound: f64) -> Option<M
         source: path,
         recipe: None,
         content: None,
+        clicks: Vec::new(),
     })
 }
 
@@ -460,4 +461,144 @@ fn transitions_never_flash_more_than_their_clips() {
     let (_, sat) = measure_crop(&out, 2.05, corner);
     assert!(sat > 30.0, "the blue around it stays blue: {sat}");
     let _ = first;
+}
+
+/// A still pattern of colour bars, `w` x `h`, 4 seconds, silent.
+fn bars(dir: &Path, hash: &str, w: u32, h: u32) -> Option<Media> {
+    let ffmpeg = tool("ffmpeg")?;
+    let path = dir.join(format!("{hash}.mp4"));
+    let ok = Command::new(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i"])
+        .arg(format!("smptehdbars=s={w}x{h}:r=30:d=4"))
+        .args(["-c:v", "libx264", "-g", "1", "-pix_fmt", "yuv420p"])
+        .arg(&path)
+        .status()
+        .ok()?
+        .success();
+    ok.then(|| Media {
+        id: MediaId(0),
+        name: hash.into(),
+        hash: hash.into(),
+        ext: "mp4".into(),
+        kind: MediaKind::Video,
+        duration: 4 * SECOND,
+        width: w,
+        height: h,
+        has_audio: false,
+        source: path,
+        recipe: None,
+        content: None,
+        clicks: Vec::new(),
+    })
+}
+
+/// How busy a part of a frame is: the average of its edges.
+fn edges(path: &Path, t: f64, crop: &str) -> f64 {
+    measure_crop(path, t, &format!("{crop},edgedetect")).0
+}
+
+#[test]
+fn effects_reach_the_file() {
+    use splice_core::look::{Backdrop, Redact, RedactStyle};
+    let dir = scratch("effects");
+    let Some(media) = bars(&dir, "bars", 160, 90) else {
+        eprintln!("ffmpeg not found; skipped");
+        return;
+    };
+    let mut p = project();
+    let m = p.add_media(media);
+    let clip = p.append_clip(m).unwrap();
+    let plain = render(&p, &dir, "plain");
+    let whole = "crop=160:90:0:0";
+
+    p.set_look(clip, |l| l.fx.blur = 1.0);
+    let blurred = render(&p, &dir, "blur");
+    assert!(
+        edges(&blurred, 1.0, whole) < edges(&plain, 1.0, whole) * 0.85,
+        "blur softens edges"
+    );
+
+    p.set_look(clip, |l| {
+        l.fx.blur = 0.0;
+        l.fx.vignette = 1.0;
+    });
+    let vignetted = render(&p, &dir, "vignette");
+    let corner = "crop=16:16:0:0";
+    assert!(brightness_at(&vignetted, 1.0, corner) < brightness_at(&plain, 1.0, corner) - 15.0);
+
+    p.set_look(clip, |l| {
+        l.fx.vignette = 0.0;
+        l.redact = Some(Redact {
+            style: RedactStyle::Black,
+            ..Redact::default()
+        });
+    });
+    let hidden = render(&p, &dir, "redact");
+    assert!(
+        brightness_at(&hidden, 1.0, "crop=20:20:70:26") < 20.0,
+        "the box is black"
+    );
+    for style in [RedactStyle::Blur, RedactStyle::Pixelate] {
+        p.set_look(clip, |l| l.redact.as_mut().unwrap().style = style);
+        render(&p, &dir, style.name());
+    }
+
+    p.set_look(clip, |l| {
+        l.redact = None;
+        l.fx.shake = 1.0;
+        l.fx.glitch = 1.0;
+        l.fx.grain = 1.0;
+    });
+    let shaken = render(&p, &dir, "shake");
+    assert!(duration(&shaken) > 3.9);
+
+    // A portrait picture on a wide canvas: the sides fill with its blur.
+    let tall = bars(&dir, "tall", 90, 160).unwrap();
+    let mut q = project();
+    let t = q.add_media(tall);
+    let portrait = q.append_clip(t).unwrap();
+    // The first clip shapes the canvas; this movie is wide.
+    (q.settings.width, q.settings.height) = (160, 90);
+    let side = "crop=20:90:0:0";
+    let bare = render(&q, &dir, "portrait");
+    assert!(brightness_at(&bare, 1.0, side) < 20.0, "black beside it");
+    q.set_look(portrait, |l| l.backdrop = Some(Backdrop::default()));
+    let filled = render(&q, &dir, "backdrop");
+    assert!(brightness_at(&filled, 1.0, side) > 30.0, "filled beside it");
+
+    // Nothing hidden shows in the fill behind it.
+    q.set_look(portrait, |l| {
+        l.redact = Some(Redact {
+            style: RedactStyle::Black,
+            x: 0.5,
+            y: 0.5,
+            width: 1.0,
+            height: 1.0,
+        })
+    });
+    let private = render(&q, &dir, "backdrop-redacted");
+    assert!(
+        brightness_at(&private, 1.0, side) < 20.0,
+        "the hidden picture stays hidden behind it"
+    );
+    q.set_look(portrait, |l| l.redact = None);
+    // A box too small to blur at this size still exports.
+    p.set_look(clip, |l| {
+        l.fx = Default::default();
+        l.redact = Some(Redact {
+            style: RedactStyle::Blur,
+            width: 0.02,
+            height: 0.02,
+            ..Redact::default()
+        })
+    });
+    render(&p, &dir, "tiny-redact");
+    // Letterbox bars over everything.
+    q.letterbox = Some(2.39);
+    let boxed = render(&q, &dir, "letterbox");
+    assert!(brightness_at(&boxed, 1.0, "crop=160:8:0:0") < 20.0);
+}
+
+fn brightness_at(path: &Path, t: f64, crop: &str) -> f64 {
+    measure_crop(path, t, crop).0
 }

@@ -83,6 +83,7 @@ impl Editor {
             source: PathBuf::new(),
             recipe: Some(recipe),
             content: None,
+            clicks: Vec::new(),
         }
     }
 

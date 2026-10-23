@@ -15,6 +15,8 @@ use objc::{class, msg_send, sel, sel_impl};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 /// What to record.
@@ -154,6 +156,185 @@ pub struct Recording {
     pub path: PathBuf,
     pub started: Instant,
     pub source: Source,
+    /// Watching the mouse for clicks, until told to stop.
+    clicks: Option<(Arc<AtomicBool>, std::thread::JoinHandle<Vec<Click>>)>,
+}
+
+/// A click while recording: seconds in, and where, as fractions of what is
+/// recorded from its top left.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct Click {
+    pub t: f64,
+    pub x: f64,
+    pub y: f64,
+}
+
+/// The clicks noted beside a take, for its media.
+pub fn read_clicks(take: &std::path::Path) -> Vec<splice_core::model::Click> {
+    let Ok(text) = std::fs::read_to_string(clicks_file(take)) else {
+        return Vec::new();
+    };
+    let clicks: Vec<Click> = serde_json::from_str(&text).unwrap_or_default();
+    clicks
+        .into_iter()
+        .map(|c| splice_core::model::Click {
+            at: splice_core::time::from_secs(c.t),
+            x: c.x as f32,
+            y: c.y as f32,
+        })
+        .collect()
+}
+
+/// Where clicks of a take are kept: beside it.
+pub fn clicks_file(take: &std::path::Path) -> PathBuf {
+    take.with_extension("clicks.json")
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGEventSourceButtonState(state: u32, button: u32) -> bool;
+    fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn CGEventGetLocation(event: *mut std::ffi::c_void) -> Point;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFRelease(object: *const std::ffi::c_void);
+}
+
+/// Where the mouse is, in screen points from the main display's top left.
+fn mouse() -> Option<(f64, f64)> {
+    unsafe {
+        let event = CGEventCreate(std::ptr::null());
+        if event.is_null() {
+            return None;
+        }
+        let p = CGEventGetLocation(event);
+        CFRelease(event);
+        Some((p.x, p.y))
+    }
+}
+
+/// Whether the left button is down (no permission needed to ask).
+fn pressed() -> bool {
+    const COMBINED: u32 = 0;
+    const LEFT: u32 = 0;
+    unsafe { CGEventSourceButtonState(COMBINED, LEFT) }
+}
+
+/// The part of the screen `source` records, in screen points from the main
+/// display's top left: x, y, width, height.
+fn area(source: &Source) -> Option<(f64, f64, f64, f64)> {
+    match source {
+        Source::Region { x, y, width, height } => Some((*x as f64, *y as f64, *width as f64, *height as f64)),
+        Source::Display { number } => {
+            #[repr(C)]
+            #[derive(Clone, Copy)]
+            struct Rect {
+                x: f64,
+                y: f64,
+                w: f64,
+                h: f64,
+            }
+            unsafe {
+                let screens: *mut Object = msg_send![class!(NSScreen), screens];
+                let count: usize = msg_send![screens, count];
+                let index = (*number as usize).saturating_sub(1);
+                if count == 0 || index >= count {
+                    return None;
+                }
+                let main: *mut Object = msg_send![screens, objectAtIndex: 0usize];
+                let main: Rect = msg_send![main, frame];
+                let screen: *mut Object = msg_send![screens, objectAtIndex: index];
+                let f: Rect = msg_send![screen, frame];
+                // Cocoa counts up from the bottom; the mouse, down from the top.
+                Some((f.x, main.h - (f.y + f.h), f.w, f.h))
+            }
+        }
+        Source::Window { id } => window_bounds(*id),
+    }
+}
+
+/// A window's place on screen, in points from the main display's top left.
+fn window_bounds(id: u32) -> Option<(f64, f64, f64, f64)> {
+    const ON_SCREEN: u32 = 1;
+    let raw = unsafe { CGWindowListCopyWindowInfo(ON_SCREEN, 0) };
+    if raw.is_null() {
+        return None;
+    }
+    let list: CFArray<CFDictionary<CFString, CFType>> = unsafe { CFArray::wrap_under_create_rule(raw) };
+    for info in list.iter() {
+        let number = info
+            .find(CFString::new("kCGWindowNumber"))
+            .and_then(|v| v.downcast::<CFNumber>())
+            .and_then(|n| n.to_i64());
+        if number != Some(id as i64) {
+            continue;
+        }
+        let bounds = info
+            .find(CFString::new("kCGWindowBounds"))
+            .and_then(|v| v.downcast::<CFDictionary>())?;
+        let bounds: CFDictionary<CFString, CFType> =
+            unsafe { CFDictionary::wrap_under_get_rule(bounds.as_concrete_TypeRef()) };
+        let side = |k: &str| {
+            bounds
+                .find(CFString::new(k))
+                .and_then(|v| v.downcast::<CFNumber>())
+                .and_then(|n| n.to_f64())
+                .unwrap_or(0.0)
+        };
+        return Some((side("X"), side("Y"), side("Width"), side("Height")));
+    }
+    None
+}
+
+/// screencapture starts recording about this long after it is started.
+const LATE: f64 = 0.2;
+
+/// Clicks in the recording's own time, without the click that stopped it
+/// (the Stop button, or Splice in the Dock) in its last half second.
+fn settle(clicks: Vec<Click>, ended: f64) -> Vec<Click> {
+    clicks
+        .into_iter()
+        .filter(|c| c.t < ended - 0.5)
+        .map(|c| Click {
+            t: (c.t - LATE).max(0.0),
+            ..c
+        })
+        .collect()
+}
+
+/// Watches for clicks inside `area` until `stop`, from `started`.
+fn watch(area: (f64, f64, f64, f64), started: Instant, stop: Arc<AtomicBool>) -> Vec<Click> {
+    let (ax, ay, aw, ah) = area;
+    let mut clicks = Vec::new();
+    let mut was = pressed();
+    while !stop.load(Ordering::Relaxed) {
+        let now = pressed();
+        if now
+            && !was
+            && let Some((x, y)) = mouse()
+        {
+            let (u, v) = ((x - ax) / aw.max(1.0), (y - ay) / ah.max(1.0));
+            if (0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v) {
+                clicks.push(Click {
+                    t: started.elapsed().as_secs_f64(),
+                    x: u,
+                    y: v,
+                });
+            }
+        }
+        was = now;
+        std::thread::sleep(std::time::Duration::from_millis(8));
+    }
+    clicks
 }
 
 impl Recording {
@@ -166,11 +347,25 @@ impl Recording {
         matches!(self.child.try_wait(), Ok(Some(_)))
     }
 
-    /// Stops it and waits for the file to be finished. Blocking (a second or two).
+    /// Stops it and waits for the file to be finished, with its clicks
+    /// beside it. Blocking (a second or two).
     pub fn stop(mut self) -> Result<PathBuf> {
         if !self.finished() {
             unsafe {
                 libc_kill(self.child.id() as i32, 2);
+            }
+        }
+        if let Some((stop, watcher)) = self.clicks.take() {
+            let ended = self.started.elapsed().as_secs_f64();
+            stop.store(true, Ordering::Relaxed);
+            if let Ok(clicks) = watcher.join()
+                && let clicks = settle(clicks, ended)
+                && !clicks.is_empty()
+            {
+                let _ = std::fs::write(
+                    clicks_file(&self.path),
+                    serde_json::to_string(&clicks).unwrap_or_default(),
+                );
             }
         }
         let output = self.child.wait_with_output()?;
@@ -246,17 +441,44 @@ pub fn start(source: Source, options: &Options) -> Result<Recording> {
         .stderr(Stdio::piped())
         .spawn()
         .context("starting screencapture")?;
+    let started = Instant::now();
+    // Clicks are noted for zooming in on later.
+    let clicks = area(&source).and_then(|area| {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        std::thread::Builder::new()
+            .name("splice-clicks".into())
+            .spawn(move || watch(area, started, flag))
+            .ok()
+            .map(|watcher| (stop, watcher))
+    });
     Ok(Recording {
         child,
         path,
-        started: Instant::now(),
+        started,
         source,
+        clicks,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_click_that_stops_a_recording_is_not_kept() {
+        let clicks = vec![
+            Click { t: 1.0, x: 0.5, y: 0.5 },
+            Click {
+                t: 9.8,
+                x: 0.9,
+                y: 0.99,
+            },
+        ];
+        let kept = settle(clicks, 10.0);
+        assert_eq!(kept.len(), 1);
+        assert!((kept[0].t - 0.8).abs() < 1e-9, "in the recording's own time");
+    }
 
     #[test]
     fn lists_displays_and_windows() {

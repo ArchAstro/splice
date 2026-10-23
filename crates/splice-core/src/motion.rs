@@ -147,6 +147,13 @@ pub struct Gradient {
     /// Degrees: 0 runs left to right, 90 top to bottom.
     #[serde(default)]
     pub angle: f64,
+    /// From the shape's centre out to its edge, instead of across it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub radial: bool,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -810,7 +817,7 @@ anything not drawn stays see-through.
 Layer: { type: rect|ellipse|line|path|text|group, name?, x, y (its centre, canvas pixels or \"50%\"; inside a group, from \
 the group), width, height, radius (rect corners), from/to [x, y] (a line's ends, from its x, y), d (SVG path data), \
 text, font (any installed family), size (pixels), bold, italic, align (left|center|right: which end x names), \
-fill (\"#rrggbb[aa]\" or { stops: [[0, c], [1, c]], angle }), stroke (colour), strokeWidth, opacity, scale, \
+fill (\"#rrggbb[aa]\" or { stops: [[0, c], [1, c]], angle } or { stops, radial: true } from the centre out), stroke (colour), strokeWidth, opacity, scale, \
 rotate (degrees), shadow { blur, x, y, color }, children (a group's or a shape's, placed from its centre) }.
 Any number can change over time: keyframes [[seconds, value], [seconds, value, \"ease\"]].
 Eases: linear, in/out/inOut + Quad|Cubic|Quart|Expo|Sine|Back|Elastic|Bounce (e.g. outBack).

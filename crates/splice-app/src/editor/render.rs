@@ -332,6 +332,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::freeze_frame_action))
             .on_action(cx.listener(Self::reverse_action))
             .on_action(cx.listener(Self::add_keyframe_action))
+            .on_action(cx.listener(Self::add_captions_action))
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &ZoomWindow, window, _| window.zoom_window())
             .on_action(|_: &ToggleFullScreen, window, _| window.toggle_fullscreen())

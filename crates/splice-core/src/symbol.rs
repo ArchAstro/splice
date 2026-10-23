@@ -754,6 +754,7 @@ mod tests {
             source: Default::default(),
             recipe: None,
             content: None,
+            clicks: Vec::new(),
         }
     }
 

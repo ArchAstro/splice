@@ -698,6 +698,7 @@ mod tests {
             source: PathBuf::new(),
             recipe: None,
             content: None,
+            clicks: Vec::new(),
         });
         (p, m)
     }

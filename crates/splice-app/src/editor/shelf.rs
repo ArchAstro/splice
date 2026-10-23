@@ -126,6 +126,9 @@ fn presets() -> Vec<Preset> {
     ]
 }
 
+/// How long a light leak runs when laid down.
+const LEAK_LENGTH: Time = 4 * SECOND;
+
 const COLORS: &[(&str, u32)] = &[
     ("Black", 0x000000ff),
     ("White", 0xffffffff),
@@ -342,7 +345,13 @@ impl Editor {
                         )
                     })
                     .collect();
-                self.shelf_grid("Backgrounds and title cards. Tint darkens what is under it.", cards)
+                // Light leaks: washes of light over the footage.
+                let mut cards = cards;
+                cards.extend(splice_core::leaks::LEAKS.iter().map(|leak| self.leak_card(leak, cx)));
+                self.shelf_grid(
+                    "Backgrounds and title cards. Tint darkens what is under it; a leak washes light over it.",
+                    cards,
+                )
             }
             Shelf::Symbols => {
                 let cards: Vec<AnyElement> = self
@@ -440,6 +449,78 @@ impl Editor {
                 this.add_generated(generator.clone(), look.clone(), window, cx);
             }))
             .into_any_element()
+    }
+
+    /// A light leak's card: its colours as a glow; a click lays it over
+    /// what is at the playhead.
+    fn leak_card(&self, leak: &'static splice_core::leaks::Leak, cx: &mut Context<Self>) -> AnyElement {
+        let group: SharedString = format!("shelf-{}", leak.name).into();
+        let card = self.card_width;
+        let [a, b] = leak.colors;
+        let glow = |c: u32, alpha: f32| {
+            let mut h: gpui::Hsla = gpui::rgb(c).into();
+            h.a = alpha;
+            h
+        };
+        div()
+            .id(SharedString::from(format!("card-{}", leak.name)))
+            .group(group.clone())
+            .w(px(card))
+            .flex()
+            .flex_col()
+            .gap(px(5.0))
+            .cursor_pointer()
+            .child(
+                div()
+                    .w(px(card))
+                    .h(px(card * render::CARD_ASPECT))
+                    .rounded(px(7.0))
+                    .overflow_hidden()
+                    .bg(gpui::linear_gradient(
+                        115.0,
+                        gpui::linear_color_stop(glow(a, 0.9), 0.0),
+                        gpui::linear_color_stop(glow(b, 0.15), 1.0),
+                    ))
+                    .border_1()
+                    .border_color(Theme::edge())
+                    .group_hover(group.clone(), |s| s.border_color(Theme::surface2())),
+            )
+            .child(
+                div()
+                    .w(px(card))
+                    .px(px(1.0))
+                    .text_size(px(10.5))
+                    .text_color(Theme::muted())
+                    .truncate()
+                    .child(leak.name),
+            )
+            .tooltip(tip("Click to lay it over the playhead", None))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.add_leak(leak, None, cx);
+            }))
+            .into_any_element()
+    }
+
+    /// Lays a light leak over what is at `at` (default: the playhead), for
+    /// four seconds. Returns its clip.
+    pub(super) fn add_leak(
+        &mut self,
+        leak: &splice_core::leaks::Leak,
+        at: Option<Time>,
+        cx: &mut Context<Self>,
+    ) -> Option<ClipId> {
+        let at = at.unwrap_or(self.player.position);
+        let track = self.layer_above(at, LEAK_LENGTH);
+        let (_, clip) = self.add_scene(
+            leak.name.to_string(),
+            Some(leak.scene.to_string()),
+            LEAK_LENGTH,
+            true,
+            Some((at, track)),
+            cx,
+        );
+        self.say(format!("{} added; its scene can be edited like any other", leak.name));
+        clip
     }
 
     /// The layer just above everything under the playhead for `duration`.
