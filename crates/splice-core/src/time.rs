@@ -42,8 +42,12 @@ pub fn timecode(t: Time, fps: u32) -> String {
 
 /// A short label for ruler ticks: `0s`, `5s`, `1:05`.
 pub fn ruler_label(t: Time) -> String {
-    let total = t.max(0) / SECOND;
-    if total < 60 {
+    let t = t.max(0);
+    let total = t / SECOND;
+    let tenths = t % SECOND * 10 / SECOND;
+    if tenths != 0 && total < 60 {
+        format!("{total}.{tenths}s")
+    } else if total < 60 {
         format!("{total}s")
     } else {
         format!("{}:{:02}", total / 60, total % 60)
@@ -53,6 +57,13 @@ pub fn ruler_label(t: Time) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ruler_labels_show_parts_of_a_second() {
+        assert_eq!(ruler_label(SECOND / 2), "0.5s");
+        assert_eq!(ruler_label(3 * SECOND), "3s");
+        assert_eq!(ruler_label(90 * SECOND), "1:30");
+    }
 
     #[test]
     fn timecodes() {

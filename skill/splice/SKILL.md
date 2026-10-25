@@ -54,7 +54,8 @@ Running the installer again updates it. To remove it: delete
 ## 1. See what is open
 
 ```sh
-splice ctl status    # project, canvas, duration, playhead, selection, export progress
+splice ctl status    # project, canvas, duration, playhead, selection, export progress,
+                     # and how playback kept up (frames, how far behind at worst)
 splice ctl read      # everything: media and every track and clip, with ids and times
 ```
 
@@ -191,7 +192,9 @@ splice ctl style --clip 12 --animate pop --by letter     # --animate none: all a
   and fix misheard words with `style --clip C --text …`; a caption's word
   timings stay with it as long as the number of words does not change.
 - Each caption line lights its words up as they are said (karaoke). Lines
-  break at sentences and pauses, a few words each, shared evenly.
+  break at sentences and pauses, a few words each, shared evenly. Japanese and
+  Chinese are grouped into words; between them the text holds an invisible
+  break (U+200B) so each lights on its own; keep those when fixing a word.
 - `--animate` styles: fade, rise, pop, type, karaoke; `--by` word, letter or
   line; `--over` the seconds until the last piece starts.
 - Keyframes animate x, y, scale and opacity; a value with keyframes ignores

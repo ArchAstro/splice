@@ -612,6 +612,22 @@ impl Keys {
         at
     }
 
+    /// Moves the keyframes at `from` (every property's) to `to`, replacing
+    /// any already there.
+    pub fn move_moment(&mut self, from: Time, to: Time) {
+        for prop in Prop::ALL {
+            let keys = self.of_mut(prop);
+            let Some(i) = keys.iter().position(|k| (k.at - from).abs() <= KEY_NEAR) else {
+                continue;
+            };
+            let mut key = keys.remove(i);
+            key.at = to;
+            keys.retain(|k| (k.at - to).abs() > KEY_NEAR);
+            let i = keys.partition_point(|k| k.at < to);
+            keys.insert(i, key);
+        }
+    }
+
     /// Whether any property has a keyframe at `at`.
     pub fn has_at(&self, at: Time) -> bool {
         Prop::ALL
@@ -1389,6 +1405,22 @@ impl Mask {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_moment_of_keyframes_moves_together() {
+        let mut keys = Keys::default();
+        keys.set(Prop::Scale, 0, 1.0, None);
+        keys.set(Prop::Scale, SECOND, 2.0, None);
+        keys.set(Prop::Opacity, SECOND, 0.5, None);
+        keys.set(Prop::Scale, 3 * SECOND, 1.5, None);
+        keys.move_moment(SECOND, 4 * SECOND);
+        assert_eq!(keys.moments(), vec![0, 3 * SECOND, 4 * SECOND]);
+        assert_eq!(keys.of(Prop::Scale)[2].value, 2.0, "kept in order, with its value");
+        // Onto another: it takes that one's place.
+        keys.move_moment(4 * SECOND, 3 * SECOND);
+        assert_eq!(keys.of(Prop::Scale).len(), 2);
+        assert_eq!(keys.of(Prop::Scale)[1].value, 2.0);
+    }
 
     #[test]
     fn crops_keep_what_remains_in_place() {

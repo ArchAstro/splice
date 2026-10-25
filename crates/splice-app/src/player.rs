@@ -8,7 +8,7 @@ use crate::library::Library;
 use gpui::RenderImage;
 use splice_core::compose;
 use splice_core::model::{Clip, ClipId, Media, MediaId, MediaKind, Project, Source};
-use splice_core::time::{SECOND, Time, floor_to_frame};
+use splice_core::time::{self, SECOND, Time, floor_to_frame};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -90,6 +90,23 @@ pub fn backdrop_size(full: (u32, u32)) -> (u32, u32) {
     ((full.0 / 4).max(16) & !1, (full.1 / 4).max(16) & !1)
 }
 
+/// How playback has kept up since it last started: for `ctl status`, and for
+/// telling a heavy stack of effects from a smooth one.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct Keeping {
+    /// Seconds played.
+    pub seconds: f64,
+    /// New frames drawn, all clips together.
+    pub frames: u64,
+    /// Decoded frames passed over because a later one was already due.
+    pub skipped: u64,
+    /// Looks at the clock that found a clip's picture over two frames behind.
+    pub behind: u64,
+    pub looks: u64,
+    /// The furthest any clip's picture fell behind, in seconds.
+    pub worst: f64,
+}
+
 /// What the editor should do after a tick.
 #[derive(Default)]
 pub struct Tick {
@@ -112,6 +129,10 @@ pub struct Player {
     still_tx: Sender<StillResult>,
     still_rx: Receiver<StillResult>,
     retired: Vec<Arc<RenderImage>>,
+    /// Clips whose stream has given a frame since playback was asked for:
+    /// the clock waits for them, not for the stills shown while paused.
+    flowing: HashSet<ClipId>,
+    pub keeping: Keeping,
 }
 
 impl Player {
@@ -128,6 +149,8 @@ impl Player {
             still_tx,
             still_rx,
             retired: Vec::new(),
+            flowing: HashSet::new(),
+            keeping: Keeping::default(),
         }
     }
 
@@ -145,6 +168,8 @@ impl Player {
             self.position = 0;
         }
         self.state = State::Priming(Instant::now());
+        self.flowing.clear();
+        self.keeping = Keeping::default();
     }
 
     pub fn pause(&mut self) {
@@ -157,6 +182,7 @@ impl Player {
         self.position = t.max(0);
         if self.is_playing() {
             self.state = State::Priming(Instant::now());
+            self.flowing.clear();
         }
     }
 
@@ -325,6 +351,24 @@ impl Player {
                 let due = if clip.reverse { source - half } else { source + half };
                 if let Some((t, size, image)) = self.pull(clip.id, due) {
                     self.show(clip.id, media.id, filters.clone(), t, size, image);
+                    self.flowing.insert(clip.id);
+                    self.keeping.frames += 1;
+                }
+                if let State::Playing { from, .. } = self.state {
+                    self.keeping.seconds = time::secs(position - from);
+                    self.keeping.looks += 1;
+                    if let Some(shown) = self.shown.get(&clip.id) {
+                        let gap = if clip.reverse {
+                            shown.source - due
+                        } else {
+                            due - shown.source
+                        };
+                        let late = time::secs(gap) / clip.speed.max(0.01);
+                        if late > 2.0 * time::secs(frame) {
+                            self.keeping.behind += 1;
+                        }
+                        self.keeping.worst = self.keeping.worst.max(late);
+                    }
                 }
             } else {
                 let current = self
@@ -387,7 +431,14 @@ impl Player {
         }
 
         if let State::Priming(since) = self.state {
-            let ready = stack.iter().all(|w| self.shown.contains_key(&w.clip.id));
+            let ready = stack.iter().all(|w| {
+                let streamed = w.media.kind == MediaKind::Video && !w.clip.frozen;
+                if streamed {
+                    self.flowing.contains(&w.clip.id)
+                } else {
+                    self.shown.contains_key(&w.clip.id)
+                }
+            });
             if ready || now - since > PRIME_TIMEOUT {
                 self.state = State::Playing {
                     anchor: now,
@@ -480,13 +531,18 @@ impl Player {
         let size = stream.size;
         let reverse = stream.reverse;
         let mut latest = None;
+        let mut skipped = 0;
         loop {
             if stream.pending.is_none() {
                 let t = stream.decoder.next_time();
                 stream.pending = stream.decoder.try_next().map(|image| (t, image));
             }
             match stream.pending.take() {
-                Some((t, image)) if (if reverse { t >= due } else { t <= due }) => latest = Some((t, image)),
+                Some((t, image)) if (if reverse { t >= due } else { t <= due }) => {
+                    if latest.replace((t, image)).is_some() {
+                        skipped += 1;
+                    }
+                }
                 Some(early) => {
                     stream.pending = Some(early);
                     break;
@@ -494,6 +550,7 @@ impl Player {
                 None => break,
             }
         }
+        self.keeping.skipped += skipped;
         latest.map(|(t, image)| (t, size, image))
     }
 

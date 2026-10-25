@@ -977,6 +977,7 @@ impl Editor {
             "duration": s(project.duration()),
             "playhead": s(self.player.position),
             "playing": self.player.is_playing(),
+            "playback": self.player.keeping,
             "selection": self.selection.iter().map(|c| c.0).collect::<Vec<_>>(),
             "media": project.media.len(),
             "tracks": project.tracks.len(),
