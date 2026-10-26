@@ -111,7 +111,9 @@ make install-app   # Splice.app in /Applications
 - **Captions** (Edit → Add Captions from Speech, or the clip's Sound
   section): Splice hears what is said, on your Mac (whisper.cpp,
   `brew install whisper-cpp`; a 148 MB speech model downloads once), and lays
-  captions over it, each word lighting up as it is said. Each caption is a
+  captions over it, each word lighting up as it is said. Any language whisper
+  knows works; Japanese and Chinese, written without spaces, are grouped into
+  words to light up and set in one font that has them. Each caption is a
   title you can edit. `.srt` and `.vtt` files load too.
 - **Colour** shelf: full-frame colours for backgrounds and title cards, a
   half-black tint, and light leaks that wash warm or cool light over a shot.
@@ -125,6 +127,8 @@ make install-app   # Splice.app in /Applications
     the playhead; set another somewhere else and it glides between them
     (linear, smooth, ease in, ease out, or hold). Dragging a keyframed picture
     on the stage keys it where the playhead is. ⌥K keys place and size at once.
+    A selected clip shows its keyframes as marks along its foot on the
+    timeline: click one to go to it, drag it to change when it happens.
   - **Transition:** the way into a clip from the one before it: dissolve, dip
     to black or white, wipe or push four ways, or zoom, centred on the cut,
     with a length. A tab on the timeline marks each one. ⇧⌘T adds a dissolve
@@ -290,7 +294,10 @@ recorder, so there is no OBS and no extra install.
 - The take comes into the media panel. In Story view it goes into the chosen
   beat instead.
 - The first recording asks for Screen Recording permission. It is granted to
-  whatever launched Splice: the app, or your terminal.
+  whatever launched Splice: the app, or your terminal. Without it, Start says
+  so at once. A rebuilt app is new to macOS (it is signed only locally), so
+  after `make install-app` turn the permission off and on again in System
+  Settings → Privacy & Security → Screen Recording.
 
 ## Projects
 

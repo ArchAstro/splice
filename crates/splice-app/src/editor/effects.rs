@@ -470,20 +470,20 @@ impl Editor {
                 editor.captioning.remove(&id);
                 // Where the clip is now: it may have moved while it was heard.
                 let now = editor.doc.project.clip(id).cloned();
-                let heard: anyhow::Result<(Vec<crate::speech::Heard>, Time, f64)> = match (heard, now) {
+                let heard: anyhow::Result<(Vec<crate::speech::Heard>, Time, f64, Time)> = match (heard, now) {
                     (Err(e), _) => Err(e),
                     (Ok(_), None) => Err(anyhow::anyhow!("the clip was removed while it was heard")),
                     (Ok(_), Some(c)) if c.source_in != from || c.speed != clip.speed || c.reverse => Err(
                         anyhow::anyhow!("the clip was trimmed or retimed while it was heard; caption it again"),
                     ),
-                    (Ok(h), Some(c)) => Ok((h, c.start, c.speed)),
+                    (Ok(h), Some(c)) => Ok((h, c.start, c.speed, c.end())),
                 };
                 let answer = match heard {
-                    Ok((heard, _, _)) if heard.is_empty() => {
+                    Ok((heard, ..)) if heard.is_empty() => {
                         editor.say_error("No speech heard in that clip");
                         serde_json::json!({ "ok": false, "error": "no speech heard" })
                     }
-                    Ok((heard, start, speed)) => {
+                    Ok((heard, start, speed, end)) => {
                         // From source time to timeline time, at the clip's speed.
                         let at = |t: Time| start + (t as f64 / speed).round() as Time;
                         let words: Vec<splice_core::captions::Word> = heard
@@ -494,6 +494,10 @@ impl Editor {
                                 end: at(w.end),
                             })
                             .collect();
+                        let layout = splice_core::captions::Layout {
+                            until: Some(end),
+                            ..layout
+                        };
                         let ids = editor.edit(cx, |p| p.add_captions(&words, &layout));
                         editor.selection = ids.clone();
                         editor.say(format!(

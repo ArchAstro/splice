@@ -171,6 +171,34 @@ pub fn hit(project: &Project, view: &View, p: Point<f32>) -> Hit {
     Hit::Empty
 }
 
+/// The keyframe mark under `p`, among the chosen clips' (they show their
+/// marks along their foot): the clip, and the keyframe's clip time.
+pub fn keyframe_at(project: &Project, view: &View, chosen: &[ClipId], p: Point<f32>) -> Option<(ClipId, Time)> {
+    let n = project.tracks.len();
+    for &id in chosen {
+        let (Some(clip), Some(slot)) = (project.clip(id), project.slot(id)) else {
+            continue;
+        };
+        let y = view.track_y(slot.track, n) + ROW - 9.0;
+        if p.y < y - 3.0 || p.y > y + 10.0 {
+            continue;
+        }
+        let near = clip
+            .look
+            .keys
+            .moments()
+            .into_iter()
+            .filter(|k| (0..=clip.duration).contains(k))
+            .map(|k| (k, (view.x(clip.start + k) - p.x).abs()))
+            .filter(|(_, d)| *d <= 6.0)
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((k, _)) = near {
+            return Some((id, k));
+        }
+    }
+    None
+}
+
 /// Where a transition's tab is drawn on a row at `y` (timeline coordinates):
 /// across the stretch it takes, at least wide enough to hold.
 pub fn transition_tab(view: &View, cut: &splice_core::transition::Cut, y: f32) -> Bounds<Pixels> {
@@ -397,7 +425,15 @@ pub fn paint(b: Bounds<Pixels>, frame: Frame, window: &mut Window, cx: &mut App)
                     if art.outdated && x1 - x0 > 16.0 {
                         rect(window, area(x1 - 11.0, y + 5.0, 6.0, 6.0), Theme::accent(), 3.0);
                     }
-                    let label_x = x0.max(GUTTER) + 6.0;
+                    let mut label_x = x0.max(GUTTER) + 6.0;
+                    // Clear of the tab of the transition into it.
+                    if let Some(cut) = project.cut_into(clip.id) {
+                        let tab = transition_tab(&view, &cut, 0.0);
+                        let right = f32::from(tab.origin.x + tab.size.width);
+                        if right + 4.0 > label_x {
+                            label_x = right + 4.0;
+                        }
+                    }
                     // Under the ruler, the name stays on the part still in view.
                     let y = y.max(top).min(y + ROW - 21.0);
                     if x1 - label_x > 24.0 {

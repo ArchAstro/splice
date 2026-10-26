@@ -6,6 +6,7 @@ use crate::ffmpeg;
 use crate::session::dirs;
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
+use splice_core::captions::unspaced;
 use splice_core::time::{Time, secs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -106,7 +107,7 @@ pub fn transcribe(path: &Path, from: Time, length: Time) -> Result<Vec<Heard>> {
         .arg(&model)
         .arg("-f")
         .arg(&wav)
-        .args(["-l", "auto", "-ml", "1", "-sow", "-oj", "-np", "-of"])
+        .args(["-l", "auto", "-ml", "1", "-oj", "-np", "-of"])
         .arg(work.join("words"))
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -118,25 +119,62 @@ pub fn transcribe(path: &Path, from: Time, length: Time) -> Result<Vec<Heard>> {
         let text = String::from_utf8_lossy(&output.stderr);
         bail!("whisper could not hear it: {}", text.lines().last().unwrap_or(""));
     }
-    parse(&json?)
+    // Whisper's last times can run past the end of what it heard.
+    Ok(parse(&json?)?
+        .into_iter()
+        .filter(|w| w.start < length)
+        .map(|w| Heard {
+            end: w.end.min(length),
+            ..w
+        })
+        .collect())
 }
 
-/// whisper-cli's JSON, one segment a word (`-ml 1 -sow`), as words.
+/// whisper-cli's JSON, one segment a token (`-ml 1`), as words: a token
+/// without a space before it is the rest of the word before ("every" +
+/// "body", "work" + "."), except in writing without spaces (Japanese,
+/// Chinese), where each token keeps its own time.
 fn parse(json: &str) -> Result<Vec<Heard>> {
     let value: serde_json::Value = serde_json::from_str(json)?;
     let segments = value["transcription"].as_array().cloned().unwrap_or_default();
-    Ok(segments
-        .iter()
-        .filter_map(|s| {
-            let text = s["text"].as_str()?.trim().trim_matches('"').to_string();
+    let mut words: Vec<Heard> = Vec::new();
+    for s in &segments {
+        let (Some(text), Some(a), Some(z)) = (
+            s["text"].as_str(),
+            s["offsets"]["from"].as_i64(),
+            s["offsets"]["to"].as_i64(),
+        ) else {
+            continue;
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        let (start, end) = (a * 1000, z.max(a) * 1000);
+        let first = text.chars().next().unwrap_or(' ');
+        let rest = !first.is_whitespace()
+            && words.last().is_some_and(|w| {
+                let last = w.text.chars().last().unwrap_or(' ');
+                !(unspaced(last) && unspaced(first))
+            });
+        match words.last_mut() {
+            Some(word) if rest => {
+                word.text.push_str(text);
+                word.end = word.end.max(end);
+            }
+            _ => words.push(Heard {
+                text: text.trim().to_string(),
+                start,
+                end,
+            }),
+        }
+    }
+    Ok(words
+        .into_iter()
+        .filter_map(|w| {
+            let text = w.text.trim().trim_matches('"').to_string();
             // Whisper marks what it cannot make out in brackets: [MUSIC], (laughs).
             let noise = text.starts_with('[') || text.starts_with('(');
-            let (a, z) = (s["offsets"]["from"].as_i64()?, s["offsets"]["to"].as_i64()?);
-            (!text.is_empty() && !noise).then_some(Heard {
-                text,
-                start: a * 1000,
-                end: z.max(a) * 1000,
-            })
+            (!text.is_empty() && !noise).then_some(Heard { text, ..w })
         })
         .collect())
 }
@@ -144,6 +182,36 @@ fn parse(json: &str) -> Result<Vec<Heard>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tokens_join_into_words_except_where_words_are_unspaced() {
+        let json = r#"{"transcription":[
+            {"offsets":{"from":0,"to":100},"text":" Today"},
+            {"offsets":{"from":100,"to":200},"text":","},
+            {"offsets":{"from":200,"to":300},"text":" I"},
+            {"offsets":{"from":300,"to":400},"text":"'m"},
+            {"offsets":{"from":400,"to":500},"text":" [MUS"},
+            {"offsets":{"from":500,"to":600},"text":"IC]"},
+            {"offsets":{"from":600,"to":700},"text":" 今日は"},
+            {"offsets":{"from":700,"to":800},"text":"動画"},
+            {"offsets":{"from":800,"to":900},"text":"。"}]}"#;
+        let words: Vec<(String, Time, Time)> = parse(json)
+            .unwrap()
+            .into_iter()
+            .map(|w| (w.text, w.start / 1000, w.end / 1000))
+            .collect();
+        assert_eq!(
+            words,
+            vec![
+                ("Today,".into(), 0, 200),
+                ("I'm".into(), 200, 400),
+                ("今日は".into(), 600, 700),
+                // Unspaced tokens stay apart; captions group them.
+                ("動画".into(), 700, 800),
+                ("。".into(), 800, 900),
+            ]
+        );
+    }
 
     #[test]
     fn reads_whisper_words() {

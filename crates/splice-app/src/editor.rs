@@ -102,6 +102,13 @@ enum Drag {
         left: bool,
         before: Project,
     },
+    /// A chosen clip's keyframes at one moment, moving along it.
+    Keyframe {
+        id: ClipId,
+        at: Time,
+        before: Project,
+        moved: bool,
+    },
     /// The end of a story beat, making it longer or shorter.
     BeatEnd {
         id: splice_core::story::BeatId,
@@ -974,6 +981,20 @@ impl Editor {
         window.focus(&self.focus);
         let p = self.local(event.position);
         let shift = event.modifiers.shift || event.modifiers.platform;
+        // A keyframe's mark: the playhead goes to it, and a drag moves it.
+        if !shift
+            && let Some((id, at)) = timeline::keyframe_at(&self.doc.project, &self.view, &self.selection, p)
+            && let Some(start) = self.doc.project.clip(id).map(|c| c.start)
+        {
+            self.seek(start + at, cx);
+            self.drag = Drag::Keyframe {
+                id,
+                at,
+                before: self.doc.project.clone(),
+                moved: false,
+            };
+            return cx.notify();
+        }
         match timeline::hit(&self.doc.project, &self.view, p) {
             Hit::Ruler => {
                 self.drag = Drag::Scrub;
@@ -1142,6 +1163,22 @@ impl Editor {
                 project.set_beat_duration(*id, t - start);
                 self.doc.project = project;
             }
+            Drag::Keyframe { id, at, before, moved } => {
+                let Some(clip) = before.clip(*id) else { return };
+                let frame = before.frame();
+                let to = ((view.t(p.x) - clip.start).clamp(0, clip.duration) + frame / 2) / frame * frame;
+                if !*moved && (to - *at).abs() < frame {
+                    return;
+                }
+                *moved = true;
+                let mut project = before.clone();
+                if let Some(c) = project.clip_mut(*id) {
+                    c.look.keys.move_moment(*at, to);
+                }
+                let start = clip.start;
+                self.doc.project = project;
+                self.seek(start + to, cx);
+            }
             Drag::Trim { id, left, before } => {
                 let mut t = view.t(p.x);
                 let mut points = before.snap_points(&[*id]);
@@ -1168,6 +1205,9 @@ impl Editor {
     fn timeline_up(&mut self, _: &MouseUpEvent, cx: &mut Context<Self>) {
         match std::mem::replace(&mut self.drag, Drag::None) {
             Drag::Move {
+                before, moved: true, ..
+            }
+            | Drag::Keyframe {
                 before, moved: true, ..
             }
             | Drag::Trim { before, .. }

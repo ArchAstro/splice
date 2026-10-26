@@ -24,6 +24,8 @@ pub struct Layout {
     pub chars: usize,
     /// Light words up as they are said (else each line appears whole).
     pub karaoke: bool,
+    /// No caption goes past this (the end of the clip heard).
+    pub until: Option<Time>,
 }
 
 impl Default for Layout {
@@ -32,6 +34,7 @@ impl Default for Layout {
             words: 6,
             chars: 36,
             karaoke: true,
+            until: None,
         }
     }
 }
@@ -51,9 +54,11 @@ pub fn lines(words: &[Word], layout: &Layout) -> Vec<Vec<Word>> {
     let mut phrase: Vec<Word> = Vec::new();
     for word in words.iter().filter(|w| !w.text.trim().is_empty()) {
         let paused = phrase.last().is_some_and(|last| word.start - last.end >= PAUSE);
-        let ended = phrase
-            .last()
-            .is_some_and(|last| last.text.trim_end().ends_with(['.', '?', '!', ':', ';']));
+        let ended = phrase.last().is_some_and(|last| {
+            last.text
+                .trim_end()
+                .ends_with(['.', '?', '!', ':', ';', '。', '？', '！'])
+        });
         if !phrase.is_empty() && (paused || ended) {
             phrases.push(std::mem::take(&mut phrase));
         }
@@ -89,37 +94,100 @@ pub fn lines(words: &[Word], layout: &Layout) -> Vec<Vec<Word>> {
 }
 
 /// Whether a character is written without spaces between words (Chinese,
-/// Japanese, Thai): a line of it is cut by characters instead.
-fn unspaced(c: char) -> bool {
-    matches!(c as u32, 0x3040..=0x30ff | 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff | 0x0e00..=0x0e7f | 0xac00..=0xd7af)
+/// Japanese, Thai, and their punctuation), so words are found another way.
+/// Korean has spaces.
+pub fn unspaced(c: char) -> bool {
+    matches!(c as u32, 0x3000..=0x30ff | 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff | 0xff00..=0xffef | 0x0e00..=0x0e7f)
+}
+
+/// Kinds of unspaced character, for finding where a word ends.
+#[derive(Clone, Copy, PartialEq)]
+enum Script {
+    Hiragana,
+    Katakana,
+    Han,
+    Mark,
+    Other,
+}
+
+fn script(c: char) -> Script {
+    match c as u32 {
+        0x3040..=0x309f => Script::Hiragana,
+        0x30a0..=0x30ff => Script::Katakana,
+        0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff => Script::Han,
+        0x3000..=0x303f | 0xff00..=0xffef => Script::Mark,
+        _ => Script::Other,
+    }
+}
+
+/// The most characters in one piece of unspaced writing.
+const PIECE: usize = 8;
+
+/// Whether a new piece of unspaced writing starts at `next`, after `piece`:
+/// after punctuation, where kana that ended a phrase meets the kanji or
+/// katakana that starts the next (Japanese), or when it has grown long
+/// (Chinese, which this cannot read further).
+fn breaks(piece: &str, next: char) -> bool {
+    let Some(last) = piece.chars().last() else {
+        return false;
+    };
+    let (last, now) = (script(last), script(next));
+    if now == Script::Mark {
+        return false;
+    }
+    last == Script::Mark
+        || (last == Script::Hiragana && matches!(now, Script::Han | Script::Katakana))
+        || piece.chars().count() >= PIECE
 }
 
 /// Words in order, each starting after the last and ending after it
-/// starts; a long run of unspaced writing (heard as one "word") cut into
-/// pieces of a few characters, its time shared out.
+/// starts; unspaced writing (heard a character, a token or a whole sentence
+/// at a time) regrouped into short pieces that read as words, each taking
+/// its share of the time.
 fn tidy(words: &[Word]) -> Vec<Word> {
     let mut sorted: Vec<Word> = words.iter().filter(|w| !w.text.trim().is_empty()).cloned().collect();
     sorted.sort_by_key(|w| w.start);
+    // Unspaced writing a character at a time, with its time.
     let mut out: Vec<Word> = Vec::new();
+    let mut piece: Option<Word> = None;
     for word in sorted {
         let text = word.text.trim().to_string();
         let chars: Vec<char> = text.chars().collect();
-        if chars.len() > 8 && chars.iter().filter(|c| unspaced(**c)).count() * 2 > chars.len() {
-            let n = chars.len().div_ceil(6);
-            let span = (word.end - word.start).max(0);
-            for (i, piece) in chars.chunks(chars.len().div_ceil(n)).enumerate() {
-                let k = piece.len() as Time;
-                let at = word.start + span * (i as Time * 6).min(chars.len() as Time) / chars.len().max(1) as Time;
-                out.push(Word {
-                    text: piece.iter().collect(),
-                    start: at,
-                    end: at + span * k / chars.len().max(1) as Time,
-                });
-            }
-        } else {
+        if !chars.iter().any(|c| unspaced(*c)) {
+            out.extend(piece.take());
             out.push(Word { text, ..word });
+            continue;
+        }
+        let span = (word.end - word.start).max(0);
+        let n = chars.len().max(1) as Time;
+        for (i, c) in chars.iter().enumerate() {
+            let (a, z) = (
+                word.start + span * i as Time / n,
+                word.start + span * (i as Time + 1) / n,
+            );
+            if c.is_whitespace() || *c == WORD_BREAK {
+                out.extend(piece.take());
+                continue;
+            }
+            // Latin letters inside it ("iPhoneで") stay together.
+            let latin = |p: &Word| !unspaced(*c) && p.text.chars().last().is_some_and(|l| !unspaced(l));
+            match piece.as_mut() {
+                Some(p) if latin(p) || (unspaced(*c) && !breaks(&p.text, *c)) => {
+                    p.text.push(*c);
+                    p.end = z;
+                }
+                _ => {
+                    out.extend(piece.take());
+                    piece = Some(Word {
+                        text: c.to_string(),
+                        start: a,
+                        end: z,
+                    });
+                }
+            }
         }
     }
+    out.extend(piece);
     // Starts that never run backwards or tie, ends after starts.
     let mut last = Time::MIN;
     for w in &mut out {
@@ -130,13 +198,17 @@ fn tidy(words: &[Word]) -> Vec<Word> {
     out
 }
 
+/// Between words of unspaced writing: no space shows, but each still lights
+/// up on its own.
+pub const WORD_BREAK: char = '\u{200B}';
+
 /// Words joined as written: spaced, except within unspaced writing.
 fn join(line: &[Word]) -> String {
     let mut text = String::new();
     for w in line {
         let glued = text.chars().last().is_some_and(unspaced) && w.text.chars().next().is_some_and(unspaced);
-        if !text.is_empty() && !glued {
-            text.push(' ');
+        if !text.is_empty() {
+            text.push(if glued { WORD_BREAK } else { ' ' });
         }
         text.push_str(&w.text);
     }
@@ -207,7 +279,8 @@ impl Project {
             } else {
                 said + SECOND / 5
             };
-            let end = end.max(start + SHORTEST).min(next).max(start + frame);
+            let until = layout.until.unwrap_or(Time::MAX);
+            let end = end.max(start + SHORTEST).min(next).min(until).max(start + frame);
             let title = Title {
                 text: join(line),
                 animate: layout.karaoke.then_some(TextMotion {
@@ -325,6 +398,53 @@ mod tests {
     }
 
     #[test]
+    fn unspaced_writing_is_grouped_where_words_end() {
+        let pieces = |words: &[Word]| -> Vec<String> { tidy(words).into_iter().map(|w| w.text).collect() };
+        // As whisper hears Japanese, a token at a time.
+        let tokens = said(&[
+            ("今日は", 0.1, 0.7),
+            ("動画", 0.7, 1.0),
+            ("の", 1.0, 1.1),
+            ("編", 1.1, 1.7),
+            ("集", 1.7, 1.9),
+            ("方", 1.9, 2.1),
+            ("法", 2.1, 2.3),
+            ("を", 2.3, 2.5),
+            ("紹", 2.5, 2.7),
+            ("介", 2.7, 2.8),
+            ("します。", 2.8, 3.6),
+            // Joined as heard (`speech::parse`): no space before "で".
+            ("iPhoneで", 3.7, 4.2),
+        ]);
+        assert_eq!(
+            pieces(&tokens),
+            vec!["今日は", "動画の", "編集方法を", "紹介します。", "iPhoneで"]
+        );
+        let t = tidy(&tokens);
+        assert_eq!(
+            (t[2].start, t[2].end),
+            (1_100_000, 2_500_000),
+            "each piece keeps its own time"
+        );
+        // Or a whole sentence at once: the same pieces, time shared out.
+        let whole = said(&[("今日は動画の編集方法を紹介します", 0.0, 3.2)]);
+        assert_eq!(pieces(&whole), vec!["今日は", "動画の", "編集方法を", "紹介します"]);
+        // Chinese has no kana to go by: punctuation, and pieces of a few characters.
+        let chinese = said(&[("今天我想给你们介绍一下我是怎么剪辑视频的，很简单。", 0.0, 5.0)]);
+        let p = pieces(&chinese);
+        assert!(p.iter().all(|p| p.chars().count() <= PIECE), "{p:?}");
+        assert!(p.iter().any(|p| p.ends_with('，')), "{p:?}");
+        // Korean is spaced: its words stay as heard, joined with spaces.
+        let korean = said(&[("오늘은", 0.0, 0.5), ("영상을", 0.5, 1.0)]);
+        assert_eq!(join(&tidy(&korean)), "오늘은 영상을");
+        assert_eq!(
+            join(&tidy(&tokens)[..2]),
+            "今日は\u{200B}動画の",
+            "unspaced words keep a break between"
+        );
+    }
+
+    #[test]
     fn lines_break_at_sentences_pauses_and_length() {
         let words = said(&[
             ("Hello", 0.0, 0.3),
@@ -377,6 +497,14 @@ mod tests {
         assert_eq!(title.timing, vec![0, 500_000, SECOND]);
         assert!(title.animate.is_some_and(|m| m.style == Style::Karaoke));
         assert_eq!(p.slot(ids[1]).unwrap().track, p.slot(ids[0]).unwrap().track);
+        // Never past the end of the clip heard.
+        let mut q = Project::default();
+        let until = Layout {
+            until: Some(4_500_000),
+            ..Layout::default()
+        };
+        let ids = q.add_captions(&words, &until);
+        assert_eq!(q.clip(ids[1]).unwrap().end(), 4_500_000);
     }
 
     #[test]

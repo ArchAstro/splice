@@ -155,6 +155,8 @@ pub struct Recording {
     child: Child,
     pub path: PathBuf,
     pub started: Instant,
+    /// The same moment by the clock files are stamped with.
+    begun: std::time::SystemTime,
     pub source: Source,
     /// Watching the mouse for clicks, until told to stop.
     clicks: Option<(Arc<AtomicBool>, std::thread::JoinHandle<Vec<Click>>)>,
@@ -199,9 +201,11 @@ struct Point {
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
-    fn CGEventSourceButtonState(state: u32, button: u32) -> bool;
+    fn CGEventSourceCounterForEventType(state: u32, event: u32) -> u32;
     fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
     fn CGEventGetLocation(event: *mut std::ffi::c_void) -> Point;
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGRequestScreenCaptureAccess() -> bool;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -222,11 +226,12 @@ fn mouse() -> Option<(f64, f64)> {
     }
 }
 
-/// Whether the left button is down (no permission needed to ask).
-fn pressed() -> bool {
+/// How many times the left button has gone down since the login session
+/// began (no permission needed to ask).
+fn presses() -> u32 {
     const COMBINED: u32 = 0;
-    const LEFT: u32 = 0;
-    unsafe { CGEventSourceButtonState(COMBINED, LEFT) }
+    const LEFT_MOUSE_DOWN: u32 = 1;
+    unsafe { CGEventSourceCounterForEventType(COMBINED, LEFT_MOUSE_DOWN) }
 }
 
 /// The part of the screen `source` records, in screen points from the main
@@ -295,19 +300,31 @@ fn window_bounds(id: u32) -> Option<(f64, f64, f64, f64)> {
     None
 }
 
-/// screencapture starts recording about this long after it is started.
-const LATE: f64 = 0.2;
+/// When the file says nothing, how long after it is started screencapture
+/// begins.
+const LATE: f64 = 0.5;
+
+/// How long after `started` the take's first frame was: screencapture
+/// takes a while to begin (a quarter second to more than one, measured), and
+/// its file is born then.
+fn lateness(path: &std::path::Path, started: std::time::SystemTime) -> f64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.created())
+        .ok()
+        .and_then(|born| born.duration_since(started).ok())
+        .map(|d| d.as_secs_f64())
+        .filter(|&d| d < 5.0)
+        .unwrap_or(LATE)
+}
 
 /// Clicks in the recording's own time, without the click that stopped it
 /// (the Stop button, or Splice in the Dock) in its last half second.
-fn settle(clicks: Vec<Click>, ended: f64) -> Vec<Click> {
+/// `late` is how long after the clicks' clock the take begins.
+fn settle(clicks: Vec<Click>, ended: f64, late: f64) -> Vec<Click> {
     clicks
         .into_iter()
-        .filter(|c| c.t < ended - 0.5)
-        .map(|c| Click {
-            t: (c.t - LATE).max(0.0),
-            ..c
-        })
+        .filter(|c| c.t < ended - 0.5 && c.t >= late)
+        .map(|c| Click { t: c.t - late, ..c })
         .collect()
 }
 
@@ -315,13 +332,14 @@ fn settle(clicks: Vec<Click>, ended: f64) -> Vec<Click> {
 fn watch(area: (f64, f64, f64, f64), started: Instant, stop: Arc<AtomicBool>) -> Vec<Click> {
     let (ax, ay, aw, ah) = area;
     let mut clicks = Vec::new();
-    let mut was = pressed();
+    // Counting presses rather than looking at the button: a tap on a
+    // trackpad can go down and up between two looks.
+    let mut seen = presses();
     while !stop.load(Ordering::Relaxed) {
-        let now = pressed();
-        if now
-            && !was
-            && let Some((x, y)) = mouse()
-        {
+        let count = presses();
+        let new = count != seen;
+        seen = count;
+        if new && let Some((x, y)) = mouse() {
             let (u, v) = ((x - ax) / aw.max(1.0), (y - ay) / ah.max(1.0));
             if (0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v) {
                 clicks.push(Click {
@@ -331,7 +349,6 @@ fn watch(area: (f64, f64, f64, f64), started: Instant, stop: Arc<AtomicBool>) ->
                 });
             }
         }
-        was = now;
         std::thread::sleep(std::time::Duration::from_millis(8));
     }
     clicks
@@ -355,19 +372,11 @@ impl Recording {
                 libc_kill(self.child.id() as i32, 2);
             }
         }
-        if let Some((stop, watcher)) = self.clicks.take() {
-            let ended = self.started.elapsed().as_secs_f64();
+        let ended = self.started.elapsed().as_secs_f64();
+        let clicks = self.clicks.take().and_then(|(stop, watcher)| {
             stop.store(true, Ordering::Relaxed);
-            if let Ok(clicks) = watcher.join()
-                && let clicks = settle(clicks, ended)
-                && !clicks.is_empty()
-            {
-                let _ = std::fs::write(
-                    clicks_file(&self.path),
-                    serde_json::to_string(&clicks).unwrap_or_default(),
-                );
-            }
-        }
+            watcher.join().ok()
+        });
         let output = self.child.wait_with_output()?;
         let ok = std::fs::metadata(&self.path).is_ok_and(|m| m.len() > 0);
         if !ok {
@@ -379,6 +388,15 @@ impl Recording {
             } else {
                 why
             });
+        }
+        if let Some(clicks) = clicks
+            && let clicks = settle(clicks, ended, lateness(&self.path, self.begun))
+            && !clicks.is_empty()
+        {
+            let _ = std::fs::write(
+                clicks_file(&self.path),
+                serde_json::to_string(&clicks).unwrap_or_default(),
+            );
         }
         Ok(self.path)
     }
@@ -396,6 +414,16 @@ pub fn takes() -> PathBuf {
 
 /// Starts recording `source`.
 pub fn start(source: Source, options: &Options) -> Result<Recording> {
+    // Without permission, screencapture writes nothing, and that would only
+    // show when the take ends. Asking puts Splice in the list (and, the
+    // first time, brings up the system's prompt).
+    if !unsafe { CGPreflightScreenCaptureAccess() } {
+        unsafe { CGRequestScreenCaptureAccess() };
+        anyhow::bail!(
+            "Splice needs Screen Recording permission: turn it on in System Settings → Privacy & Security → \
+             Screen Recording, then reopen Splice"
+        );
+    }
     let dir = takes();
     std::fs::create_dir_all(&dir)?;
     let stamp = {
@@ -442,6 +470,7 @@ pub fn start(source: Source, options: &Options) -> Result<Recording> {
         .spawn()
         .context("starting screencapture")?;
     let started = Instant::now();
+    let begun = std::time::SystemTime::now();
     // Clicks are noted for zooming in on later.
     let clicks = area(&source).and_then(|area| {
         let stop = Arc::new(AtomicBool::new(false));
@@ -456,6 +485,7 @@ pub fn start(source: Source, options: &Options) -> Result<Recording> {
         child,
         path,
         started,
+        begun,
         source,
         clicks,
     })
@@ -475,9 +505,11 @@ mod tests {
                 y: 0.99,
             },
         ];
-        let kept = settle(clicks, 10.0);
+        let kept = settle(clicks, 10.0, 0.4);
         assert_eq!(kept.len(), 1);
-        assert!((kept[0].t - 0.8).abs() < 1e-9, "in the recording's own time");
+        assert!((kept[0].t - 0.6).abs() < 1e-9, "in the recording's own time");
+        let early = settle(vec![Click { t: 0.1, x: 0.5, y: 0.5 }], 10.0, 0.4);
+        assert!(early.is_empty(), "a click before the first frame is not in the take");
     }
 
     #[test]

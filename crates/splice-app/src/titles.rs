@@ -3,6 +3,7 @@
 //! the picture the viewer shows is the very picture export overlays.
 
 use cosmic_text::{Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, Style, SwashCache, Weight};
+use splice_core::captions::WORD_BREAK;
 use splice_core::export::{Rendered, Resolve};
 use splice_core::look::Mask;
 use splice_core::model::{Align, Clip, Generator, Media, Title};
@@ -171,6 +172,44 @@ fn draw_title(title: &Title, canvas: (u32, u32)) -> Picture {
     }
 }
 
+/// The family to set `text` in: `font`, unless it has no letters for the
+/// text's writing (most Latin fonts have no kanji or hangul). Then one font
+/// for all of it, chosen by what it holds; left to fallback, each run of a
+/// script finds its own, so kanji beside kana could come out in a Chinese
+/// serif.
+fn family_for(system: &mut FontSystem, font: &str, text: &str, bold: bool) -> String {
+    let script = |range: std::ops::RangeInclusive<u32>| text.chars().any(|c| range.contains(&(c as u32)));
+    let wanted = if script(0x3040..=0x30ff) {
+        "Hiragino Sans"
+    } else if script(0xac00..=0xd7af) || script(0x1100..=0x11ff) {
+        "Apple SD Gothic Neo"
+    } else if script(0x3400..=0x9fff) {
+        "PingFang SC"
+    } else if script(0x0e00..=0x0e7f) {
+        "Thonburi"
+    } else {
+        return font.to_string();
+    };
+    let Some(sample) = text.chars().find(|c| !c.is_ascii() && !c.is_whitespace()) else {
+        return font.to_string();
+    };
+    let weight = if bold { Weight::BOLD } else { Weight::NORMAL };
+    let has = |system: &mut FontSystem, family: &str| {
+        let id = system.db().query(&cosmic_text::fontdb::Query {
+            families: &[cosmic_text::fontdb::Family::Name(family)],
+            weight,
+            ..Default::default()
+        });
+        id.and_then(|id| system.get_font(id, weight))
+            .is_some_and(|f| f.as_swash().charmap().map(sample) != 0)
+    };
+    if has(system, font) || !has(system, wanted) {
+        font.to_string()
+    } else {
+        wanted.to_string()
+    }
+}
+
 /// Draws a title as its parts (see `Parts`).
 pub fn draw_title_parts(title: &Title, canvas: (u32, u32)) -> Parts {
     let size = (title.size * canvas.1 as f32).clamp(4.0, 2000.0);
@@ -183,8 +222,9 @@ pub fn draw_title_parts(title: &Title, canvas: (u32, u32)) -> Parts {
     let mut guard = fonts().lock().unwrap();
     let Fonts { system, cache } = &mut *guard;
 
+    let family = family_for(system, &title.font, text, title.bold);
     let attrs = Attrs::new()
-        .family(Family::Name(&title.font))
+        .family(Family::Name(&family))
         .weight(if title.bold { Weight::BOLD } else { Weight::NORMAL })
         .style(if title.italic { Style::Italic } else { Style::Normal });
     let align = match title.align {
@@ -253,8 +293,20 @@ pub fn draw_title_parts(title: &Title, canvas: (u32, u32)) -> Parts {
                     *word += 1;
                 }
             };
+            let mut after = 0;
             for glyph in run.glyphs.iter() {
-                let blank = run.text.get(glyph.start..glyph.end).is_none_or(|t| t.trim().is_empty());
+                let text = run.text.get(glyph.start..glyph.end);
+                let blank = text.is_none_or(|t| t.trim().trim_matches(WORD_BREAK).is_empty());
+                // A break between words of unspaced writing draws nothing,
+                // and may leave no glyph of its own.
+                let broken = run
+                    .text
+                    .get(after.min(glyph.start)..glyph.start)
+                    .is_some_and(|t| t.contains(WORD_BREAK));
+                after = glyph.end;
+                if broken {
+                    close(&mut current, &mut units, &mut word);
+                }
                 if blank {
                     close(&mut current, &mut units, &mut word);
                     continue;
@@ -273,6 +325,21 @@ pub fn draw_title_parts(title: &Title, canvas: (u32, u32)) -> Parts {
                     rect: rect(a, z, run.line_top, run.line_height),
                     word: first,
                 });
+            }
+        }
+        // Neighbours whose margins reach into each other (letters, or words
+        // with no space between) meet halfway, so one lit does not light the
+        // edge of the next.
+        for list in [&mut units.words, &mut units.letters] {
+            for i in 1..list.len() {
+                let (a, b) = (list[i - 1].rect, list[i].rect);
+                let (a_right, b_right) = (a[0] + a[2], b[0] + b[2]);
+                if a[1] == b[1] && b[0] > a[0] && b[0] < a_right {
+                    let middle = (b[0] + a_right) / 2;
+                    list[i - 1].rect[2] = middle - a[0];
+                    list[i].rect[0] = middle;
+                    list[i].rect[2] = b_right - middle;
+                }
             }
         }
         units
@@ -370,8 +437,9 @@ pub fn text_picture(
     let text = if text.is_empty() { " " } else { text };
     let mut guard = fonts().lock().unwrap();
     let Fonts { system, cache } = &mut *guard;
+    let family = family_for(system, font, text, bold);
     let attrs = Attrs::new()
-        .family(Family::Name(font))
+        .family(Family::Name(&family))
         .weight(if bold { Weight::BOLD } else { Weight::NORMAL })
         .style(if italic { Style::Italic } else { Style::Normal });
     let align = match align {
@@ -440,9 +508,14 @@ fn blur(values: &mut [f32], w: usize, h: usize, radius: usize) {
     }
 }
 
+/// Goes up when drawing changes how the same title looks, so drawings kept
+/// from before are made again.
+const DRAWING: u32 = 3;
+
 /// A stable key for a drawing: what is drawn, its mask and the canvas.
 pub fn key(generator: &Generator, mask: Option<&Mask>, canvas: (u32, u32)) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    DRAWING.hash(&mut hasher);
     serde_json::to_string(generator).unwrap_or_default().hash(&mut hasher);
     serde_json::to_string(&mask).unwrap_or_default().hash(&mut hasher);
     canvas.hash(&mut hasher);
@@ -657,6 +730,39 @@ pub fn drawn_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writing_a_font_lacks_is_set_in_one_font_that_has_it() {
+        let mut guard = fonts().lock().unwrap();
+        let system = &mut guard.system;
+        if system
+            .db()
+            .faces()
+            .all(|f| f.families.iter().all(|(n, _)| n != "Hiragino Sans"))
+        {
+            return; // Not a Mac with its Japanese fonts.
+        }
+        assert_eq!(
+            family_for(system, "Avenir Next", "画面を録画して", true),
+            "Hiragino Sans"
+        );
+        assert_eq!(family_for(system, "Avenir Next", "Hello", true), "Avenir Next");
+        assert_eq!(
+            family_for(system, "Hiragino Mincho ProN", "画面を", false),
+            "Hiragino Mincho ProN",
+            "a font that has it is kept"
+        );
+        drop(guard);
+        // Words of it, marked apart without spaces, are each a word to animate.
+        let title = Title {
+            text: "今日は\u{200B}動画の\u{200B}編集方法を".into(),
+            ..Title::default()
+        };
+        let parts = draw_title_parts(&title, (1920, 1080));
+        assert_eq!(parts.units.words.len(), 3);
+        let [a, b] = [parts.units.words[0].rect, parts.units.words[1].rect];
+        assert_eq!(a[0] + a[2], b[0], "touching, not overlapping");
+    }
 
     #[test]
     fn draws_text_with_a_system_font() {
