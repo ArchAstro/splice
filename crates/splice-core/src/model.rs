@@ -201,6 +201,9 @@ pub struct Clip {
     /// The way in from the clip before it (or from what is beneath).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition: Option<crate::transition::Transition>,
+    /// Its sound cleaned up as a voice: rumble, steady noise, uneven level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean: Option<crate::voice::Clean>,
 }
 
 fn is_default(look: &Look) -> bool {
@@ -341,6 +344,7 @@ impl Clip {
             reverse: false,
             frozen: false,
             transition: None,
+            clean: None,
         }
     }
 
@@ -388,6 +392,11 @@ impl Clip {
     /// Whether this clip changes how its source plays.
     pub fn is_retimed(&self) -> bool {
         self.speed != 1.0 || self.reverse || self.frozen
+    }
+
+    /// Whether its sound is not simply its media's: retimed or cleaned up.
+    pub fn has_own_sound(&self) -> bool {
+        self.is_retimed() || self.clean.is_some()
     }
 }
 

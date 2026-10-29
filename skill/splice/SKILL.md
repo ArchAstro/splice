@@ -93,6 +93,7 @@ splice ctl split --at 8.5                           # every clip under 8.5s; --c
 splice ctl delete --clip 4,5 --ripple               # --ripple closes the gap
 splice ctl duplicate --clip 3
 splice ctl volume --clip 9 --value 0.4              # 1 as recorded, 0 silent
+splice ctl clean --clip 9 --noise 0.6 --even        # clean up a voice (--off to undo)
 splice ctl track --track 2 --mute --hide            # --unmute, --show
 splice ctl canvas --aspect 9:16                     # or --size 1080x1920, --fps 30
 splice ctl undo
@@ -483,6 +484,7 @@ splice ctl record sources                  # displays, windows, cameras, microph
 splice ctl record setup                    # this project's setup
 splice ctl record setup --screen window:Safari --camera C920 --microphone default --system
 splice ctl record setup --layout bubble --corner br --size 0.3 --shape circle --mirror
+splice ctl record setup --clean                     # mic clips come in with the voice cleaned up
 splice ctl record setup --codec hevc --quality high --fps 60 --height 1440 --default
 splice ctl record start [--for 20] [--beat 27 | --at 30 | --into media]
 splice ctl record pause | resume

@@ -32,6 +32,8 @@ Editing (each is one undo step; clips and media are named by id, media also by n
   delete --clip C [--ripple]               remove clips; --ripple closes the gap
   duplicate --clip C                       copy clips to just after themselves
   volume --clip C --value V                1 is as recorded, 0 silent, up to 4
+  clean --clip C [--noise F] [--even/--no-even] | --off
+                                 clean up a voice: rumble cut, steady noise down (0 to 1, 0.5), level evened out
   track --track N [--mute|--unmute] [--hide|--show]
   canvas [--aspect 16:9|9:16|1:1|4:5] [--size WxH] [--fps N] [--letterbox 2.39|1.85|2|none]
   undo | redo
@@ -203,6 +205,7 @@ Recording (each source to its own file; the take is laid out as the scene says)
       --camera NAME|none   --microphone NAME|default|none   --system | --no-system (the Mac's sound)
       --layout screen|bubble|side|camera   --corner tl|tr|bl|br   --size 0.3 (bubble height)
       --shape circle|square   --split 0.32 (camera's share, side by side)   --mirror/--no-mirror
+      --clean/--no-clean (takes' mic clips come in with the voice cleaned up)
       --codec h264|hevc   --quality good|high|best   --fps 30|60   --height full|4k|1440|1080
       --cursor | --no-cursor   --clicks | --no-clicks (note clicks, to zoom in on later)
   record start [SETUP] [--for S] [--beat B | --at T [--track N] | --into media]
@@ -481,7 +484,7 @@ fn build(args: &[String]) -> Result<Value, String> {
             | "--crop-left" | "--crop-top" | "--crop-right" | "--crop-bottom" | "--exposure" | "--contrast"
             | "--saturation" | "--warmth" | "--tint" | "--rate" | "--blur" | "--vignette" | "--grain" | "--shake"
             | "--glitch" | "--backdrop-blur" | "--backdrop-dim" | "--redact-x" | "--redact-y" | "--redact-width"
-            | "--redact-height" => {
+            | "--redact-height" | "--noise" => {
                 let raw = next(arg)?;
                 let v = match raw.parse::<f64>() {
                     Ok(v) => json!(v),
@@ -526,10 +529,11 @@ fn build(args: &[String]) -> Result<Value, String> {
                 let v: f64 = next(arg)?.parse().map_err(|_| "--for expects seconds".to_string())?;
                 request.insert("for".into(), json!(v));
             }
-            "--mic" | "--clicks" | "--system" | "--cursor" | "--default" | "--mirror" => {
+            "--mic" | "--clicks" | "--system" | "--cursor" | "--default" | "--mirror" | "--even" | "--clean"
+            | "--off" => {
                 request.insert(arg[2..].into(), json!(true));
             }
-            "--no-clicks" | "--no-system" | "--no-cursor" | "--no-mirror" => {
+            "--no-clicks" | "--no-system" | "--no-cursor" | "--no-mirror" | "--no-even" | "--no-clean" => {
                 request.insert(arg[5..].into(), json!(false));
             }
             "--screen" | "--camera" | "--microphone" | "--layout" | "--corner" | "--shape" | "--codec"
@@ -614,8 +618,8 @@ fn build(args: &[String]) -> Result<Value, String> {
     }
     let cmd = match command.as_str() {
         "status" | "read" | "versions" | "add" | "move" | "trim" | "split" | "delete" | "duplicate" | "volume"
-        | "track" | "canvas" | "undo" | "redo" | "play" | "pause" | "select" | "save" | "say" | "wait" | "text"
-        | "color" | "style" | "look" | "fonts" | "transition" | "speed" | "freeze" | "keyframe" | "leak"
+        | "clean" | "track" | "canvas" | "undo" | "redo" | "play" | "pause" | "select" | "save" | "say" | "wait"
+        | "text" | "color" | "style" | "look" | "fonts" | "transition" | "speed" | "freeze" | "keyframe" | "leak"
         | "captions" | "zoom" => command.as_str(),
         "restore" => {
             if let Some(id) = words.first().and_then(|w| w.parse::<u64>().ok()) {
@@ -855,6 +859,15 @@ mod tests {
             json!({"cmd": "record", "sub": "setup", "screen": "window:Safari", "camera": "C920", "system": false,
                    "layout": "bubble", "size": 0.25, "fps": 60, "height": "1440", "default": true})
         );
+        let r = build(&args("record setup --mirror --clean")).unwrap();
+        assert_eq!(
+            r,
+            json!({"cmd": "record", "sub": "setup", "mirror": true, "clean": true})
+        );
+        let r = build(&args("clean --clip 9 --noise 0.6 --no-even")).unwrap();
+        assert_eq!(r, json!({"cmd": "clean", "clips": [9], "noise": 0.6, "even": false}));
+        let r = build(&args("look --clip 3 --mirror")).unwrap();
+        assert_eq!(r, json!({"cmd": "look", "clips": [3], "mirror": true}));
     }
 
     #[test]

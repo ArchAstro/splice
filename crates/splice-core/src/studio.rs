@@ -18,6 +18,9 @@ pub struct Studio {
     pub microphone: Option<Device>,
     /// The sound the Mac plays (not Splice's own).
     pub system_audio: bool,
+    /// Takes' microphone clips come in with their voice cleaned up (the
+    /// file stays as recorded).
+    pub clean: bool,
     pub scene: Scene,
     pub output: Output,
 }

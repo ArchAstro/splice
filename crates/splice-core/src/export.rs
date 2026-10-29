@@ -1259,6 +1259,10 @@ fn clip_sound(
         }
     };
     let mut chain = vec![format!("{trim}aresample=48000"), "asetpts=PTS-STARTPTS".to_string()];
+    // Cleaned as recorded, before any change of speed.
+    if let Some(clean) = clip.clean {
+        chain.extend(clean.filters());
+    }
     if clip.reverse {
         chain.push("areverse".into());
     }
@@ -1374,12 +1378,15 @@ mod tests {
             content: None,
             clicks: Vec::new(),
         });
-        p.append_clip(v);
+        let clip = p.append_clip(v).unwrap();
+        p.clip_mut(clip).unwrap().clean = Some(crate::voice::Clean::default());
         p.insert_clip(image, 0, SECOND);
         let plan = plan(&p, &Fake, Path::new("/o.mp4"), Quality::Draft).unwrap();
         let graph = graph(&plan);
         assert_eq!(graph.matches("overlay=").count(), 2);
         assert!(graph.contains("amix=inputs=2"));
+        let cleaned = graph.find("highpass=f=80,afftdn=").expect("the voice is cleaned");
+        assert!(cleaned < graph.find("volume=").unwrap());
         assert!(
             graph.contains("scale=1080:1080"),
             "the square image fits the 1920x1080 canvas: {graph}"

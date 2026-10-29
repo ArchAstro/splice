@@ -181,12 +181,13 @@ struct Status {
 /// Names the retimed sound of a clip: what it plays, how fast, which way.
 fn retimed_key(clip: &splice_core::model::Clip, media: &Media) -> String {
     format!(
-        "{}:{}:{}:{}:{}",
+        "{}:{}:{}:{}:{}:{:?}",
         media.hash,
         clip.source_in,
         clip.span(),
         clip.speed,
-        clip.reverse
+        clip.reverse,
+        clip.clean
     )
 }
 
@@ -797,10 +798,10 @@ impl Editor {
                 let fades = |f: Option<(Time, Time)>| f.map(|(a, z)| (audio.frames(a), audio.frames(z)));
                 let (fade_in, fade_out) = (fades(sound.fade_in), fades(sound.fade_out));
                 let volume = clip.volume;
-                // A clip played faster, slower or backwards sounds as export
-                // makes it, once that is decoded; until then, its own sound
-                // retimed on the fly.
-                if clip.is_retimed() {
+                // A clip played faster, slower or backwards, or cleaned up,
+                // sounds as export makes it, once that is decoded; until
+                // then, its own sound retimed on the fly.
+                if clip.has_own_sound() {
                     let (start, length) = (audio.frames(clip.start), audio.frames(clip.duration));
                     if let Some(Some(pcm)) = retimed.get(&retimed_key(clip, media)) {
                         return Some(Voice {
@@ -849,12 +850,12 @@ impl Editor {
     }
 
     /// Decodes, in the background, the sound of every clip played at
-    /// another speed or backwards, as export will make it.
+    /// another speed or backwards, or cleaned up, as export will make it.
     fn prepare_retimed_sound(&mut self) {
         let rate = self.audio.rate;
         let mut wanted = Vec::new();
         for (clip, media) in self.doc.project.audible_clips() {
-            if !clip.is_retimed() || clip.frozen {
+            if !clip.has_own_sound() || clip.frozen {
                 continue;
             }
             let key = retimed_key(clip, media);
@@ -866,6 +867,7 @@ impl Editor {
                 path.to_path_buf(),
                 clip.source_in,
                 clip.span(),
+                clip.clean.map(|c| c.filters()).unwrap_or_default(),
                 clip.speed,
                 clip.reverse,
             ));
@@ -873,14 +875,14 @@ impl Editor {
         let mut cache = self.retimed_sound.lock().unwrap();
         let keep: std::collections::HashSet<&String> = wanted.iter().map(|w| &w.0).collect();
         cache.retain(|k, _| keep.contains(k));
-        for (key, path, from, span, speed, reverse) in wanted {
+        for (key, path, from, span, clean, speed, reverse) in wanted {
             if cache.contains_key(&key) {
                 continue;
             }
             cache.insert(key.clone(), None);
             let cache = self.retimed_sound.clone();
             std::thread::spawn(move || {
-                if let Ok(pcm) = ffmpeg::decode_audio_retimed(&path, rate, from, span, speed, reverse)
+                if let Ok(pcm) = ffmpeg::decode_audio_retimed(&path, rate, from, span, clean, speed, reverse)
                     && let Some(slot) = cache.lock().unwrap().get_mut(&key)
                 {
                     *slot = Some(Arc::new(pcm));

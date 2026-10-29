@@ -20,4 +20,5 @@ pub mod symbol;
 pub mod textmotion;
 pub mod time;
 pub mod transition;
+pub mod voice;
 pub mod zoom;
