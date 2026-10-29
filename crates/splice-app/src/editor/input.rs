@@ -90,6 +90,10 @@ impl Editor {
                     "pictures": layers,
                     "overlay": !matches!(self.overlay, Overlay::None),
                     "editor": self.workbench.as_ref().map(|b| b.media.0),
+                    "record": (self.mode == story::Mode::Record).then(|| {
+                        let (scene, bubble) = self.rec.drawn;
+                        json!({ "scene": scene.map(rect), "bubble": bubble.map(rect) })
+                    }),
                     "note": "Positions are window points: a screenshot's pixels divided by `scale`.",
                 }));
             }

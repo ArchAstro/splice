@@ -88,7 +88,7 @@ pub fn parse_color(text: &str) -> Option<u32> {
     }
 }
 
-fn look_json(look: &splice_core::look::Look) -> Value {
+pub(super) fn look_json(look: &splice_core::look::Look) -> Value {
     json!({
         "x": look.x,
         "y": look.y,
@@ -1139,7 +1139,7 @@ impl Editor {
 
 /// Look fields from a request, onto `look`.
 /// `at` is clip time, where a keyframed value is keyed.
-fn apply_look(look: &mut splice_core::look::Look, request: &Value, at: Time) -> Result<(), String> {
+pub(super) fn apply_look(look: &mut splice_core::look::Look, request: &Value, at: Time) -> Result<(), String> {
     use splice_core::look::{Drift, Key, Mask, MotionKind, Shape};
     let text = |key: &str| request.get(key).and_then(Value::as_str);
     let number = |key: &str| request.get(key).and_then(Value::as_f64).map(|v| v as f32);

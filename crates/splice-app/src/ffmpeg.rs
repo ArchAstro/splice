@@ -351,10 +351,11 @@ pub fn decode_audio_retimed(
         filters.push(format!("atempo={rest:.6}"));
     }
     let mut command = base_command()?;
-    if from > 0 {
-        command.args(["-ss", &format!("{:.6}", secs(from))]);
-    }
+    // Always seeked, even to 0, as export does: the clean-up's filters
+    // adapt from their first sample, and AAC's priming samples are only
+    // dropped when seeking, so starting differently changes the level.
     command
+        .args(["-ss", &format!("{:.6}", secs(from.max(0)))])
         .args(["-t", &format!("{:.6}", secs(length))])
         .arg("-i")
         .arg(path);

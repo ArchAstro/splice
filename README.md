@@ -295,6 +295,12 @@ yourself and your screen. Nothing extra to install.
 - **Scene:** Screen, Bubble (the camera in a round or square corner, small,
   medium or large), Side by side, or Camera, the camera mirrored if you like.
   The file stays as the camera saw it; the mirror is part of the edit.
+  Drag the bubble on the preview to move it to another corner.
+- **Crop and colour** for the screen and the camera, like OBS's crop and
+  colour-correction filters: cut any edge away, change brightness,
+  contrast, saturation and warmth, and key out a green or blue screen behind
+  you. It shows live, fits every layout, and the take's clips start with it
+  (the files stay as recorded, so it can be undone or changed later).
 - **A file per source**, like OBS's Source Record: every take writes
   `screen.mp4`, `camera.mp4`, `microphone.m4a` and `system.m4a` into its own
   folder under `~/Movies/Splice/Recordings/<project>/`. All start at the same
@@ -312,6 +318,8 @@ yourself and your screen. Nothing extra to install.
   hiss, hum) lowered, and the level evened out. Switch it on for the mic in
   Record, or for any clip under Sound in the inspector; the file stays as
   recorded.
+- **Mic mode:** with a mic live, the Record tab opens macOS's own menu for
+  Voice Isolation, Wide Spectrum or Standard, and shows the one in use.
 - **Each project keeps its own setup.** "Make this my default" sets the one
   new projects start with.
 - **Permissions:** Screen Recording, Camera and Microphone, asked for the

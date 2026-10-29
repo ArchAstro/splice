@@ -22,7 +22,75 @@ pub struct Studio {
     /// file stays as recorded).
     pub clean: bool,
     pub scene: Scene,
+    /// How each picture is changed, as a clip's look: crop, colour, a
+    /// green-screen key, effects, a hidden box. Its place and size come
+    /// from the scene. Takes' clips start with it (the files stay as
+    /// recorded), and the preview shows it live.
+    #[serde(skip_serializing_if = "untouched")]
+    pub screen_look: Look,
+    #[serde(skip_serializing_if = "untouched")]
+    pub camera_look: Look,
     pub output: Output,
+}
+
+fn untouched(look: &Look) -> bool {
+    *look == Look::default()
+}
+
+/// The edges a look cuts away, if any.
+fn cut_of(look: &Look) -> Option<Crop> {
+    look.crop.map(Crop::clamped).filter(|c| !c.is_none())
+}
+
+/// A picture's size once `look` has cut its edges away.
+fn cut_size(size: (u32, u32), look: &Look) -> (u32, u32) {
+    match cut_of(look) {
+        Some(c) => {
+            let (w, h) = c.size((size.0.max(1) as f64, size.1.max(1) as f64));
+            ((w.round() as u32).max(1), (h.round() as u32).max(1))
+        }
+        None => size,
+    }
+}
+
+/// `placed`, where the scene put a picture of the cut size, as a look on
+/// the whole picture: its own crop added to any the layout made, and the
+/// rest of `own` (colour, key, effects) kept.
+fn on_whole(placed: Look, own: &Look, size: (u32, u32), canvas: (u32, u32)) -> Look {
+    let mut look = Look {
+        x: placed.x,
+        y: placed.y,
+        scale: placed.scale,
+        mask: placed.mask,
+        crop: placed.crop,
+        mirror: placed.mirror || own.mirror,
+        keys: Default::default(),
+        ..own.clone()
+    };
+    let Some(c) = cut_of(own) else {
+        return look;
+    };
+    let (w, h) = (canvas.0.max(1) as f32, canvas.1.max(1) as f32);
+    let fit = |s: (u32, u32)| (w / s.0.max(1) as f32).min(h / s.1.max(1) as f32);
+    let cut = cut_size(size, own);
+    // Canvas pixels per picture pixel, as the layout sized the cut picture.
+    let k = fit(cut) * placed.scale;
+    look.scale = k / fit(size);
+    // The whole picture's centre sits off the kept part's centre.
+    let (fw, fh) = (size.0.max(1) as f32, size.1.max(1) as f32);
+    look.x += (0.5 - (c.left + 1.0 - c.right) / 2.0) * fw * k / w;
+    look.y += (0.5 - (c.top + 1.0 - c.bottom) / 2.0) * fh * k / h;
+    // A layout's crop is of the kept part; a mask is measured on what the
+    // crop leaves, which is the kept part already.
+    let (kw, kh) = (1.0 - c.left - c.right, 1.0 - c.top - c.bottom);
+    let more = placed.crop.unwrap_or_default();
+    look.crop = Some(Crop {
+        left: c.left + more.left * kw,
+        right: c.right + more.right * kw,
+        top: c.top + more.top * kh,
+        bottom: c.bottom + more.bottom * kh,
+    });
+    look
 }
 
 /// What of the screen is recorded.
@@ -255,6 +323,25 @@ impl Studio {
     /// the screen's and the camera's, given their sizes. None leaves that
     /// picture off the timeline (it is still recorded, and in the media).
     pub fn looks(&self, canvas: (u32, u32), screen: Option<(u32, u32)>, camera: Option<(u32, u32)>) -> Placed {
+        // Laid out as if each picture were only what its crop keeps.
+        let placed = self.layout(
+            canvas,
+            screen.map(|s| cut_size(s, &self.screen_look)),
+            camera.map(|c| cut_size(c, &self.camera_look)),
+        );
+        Placed {
+            screen: placed
+                .screen
+                .zip(screen)
+                .map(|(p, size)| on_whole(p, &self.screen_look, size, canvas)),
+            camera: placed
+                .camera
+                .zip(camera)
+                .map(|(p, size)| on_whole(p, &self.camera_look, size, canvas)),
+        }
+    }
+
+    fn layout(&self, canvas: (u32, u32), screen: Option<(u32, u32)>, camera: Option<(u32, u32)>) -> Placed {
         let scene = self.scene;
         let (w, h) = (canvas.0.max(1) as f32, canvas.1.max(1) as f32);
         // Scale 1 is the picture fitted inside the canvas.
@@ -479,6 +566,73 @@ mod tests {
         assert!(placed.camera.is_none(), "recorded, in the media, not laid out");
     }
 
+    /// Where the part of a picture that shows lands on the canvas: left,
+    /// top, right, bottom in pixels.
+    fn shown(look: &Look, size: (u32, u32)) -> [f32; 4] {
+        let (w, h) = (CANVAS.0 as f32, CANVAS.1 as f32);
+        let k = (w / size.0 as f32).min(h / size.1 as f32) * look.scale;
+        let (pw, ph) = (size.0 as f32 * k, size.1 as f32 * k);
+        let (left, top) = (w / 2.0 + look.x * w - pw / 2.0, h / 2.0 + look.y * h - ph / 2.0);
+        let c = look.crop.unwrap_or_default();
+        let [mut l, mut t, mut r, mut b] = [c.left, c.top, 1.0 - c.right, 1.0 - c.bottom];
+        if let Some(m) = look.mask {
+            let (kw, kh) = (r - l, b - t);
+            [l, t, r, b] = [
+                l + (m.x - m.width / 2.0) * kw,
+                t + (m.y - m.height / 2.0) * kh,
+                l + (m.x + m.width / 2.0) * kw,
+                t + (m.y + m.height / 2.0) * kh,
+            ];
+        }
+        [left + l * pw, top + t * ph, left + r * pw, top + b * ph]
+    }
+
+    fn near(a: [f32; 4], b: [f32; 4]) -> bool {
+        a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1.5)
+    }
+
+    #[test]
+    fn a_cropped_picture_fills_the_same_place_in_every_layout() {
+        let crop = Crop {
+            left: 0.1,
+            right: 0.3,
+            top: 0.05,
+            bottom: 0.2,
+        };
+        for layout in Layout::ALL {
+            let mut s = studio(layout);
+            s.camera_look.crop = Some(crop);
+            s.screen_look.crop = Some(crop);
+            s.camera_look.grade.exposure = 0.4;
+            let placed = s.looks(CANVAS, SCREEN, CAMERA);
+            // The same places as pictures already that size.
+            let cut = |(w, h): (u32, u32)| {
+                (
+                    (w as f32 * (1.0 - 0.1 - 0.3)).round() as u32,
+                    (h as f32 * (1.0 - 0.05 - 0.2)).round() as u32,
+                )
+            };
+            let small = studio(layout).looks(CANVAS, SCREEN.map(cut), CAMERA.map(cut));
+            for (whole, alone, size) in [
+                (&placed.screen, &small.screen, SCREEN.unwrap()),
+                (&placed.camera, &small.camera, CAMERA.unwrap()),
+            ] {
+                let (Some(whole), Some(alone)) = (whole, alone) else {
+                    assert_eq!(whole.is_some(), alone.is_some(), "{layout:?}");
+                    continue;
+                };
+                let (a, b) = (shown(whole, size), shown(alone, cut(size)));
+                assert!(near(a, b), "{layout:?}: {a:?} vs {b:?}");
+                // Nothing the crop took away shows.
+                let c = whole.crop.unwrap();
+                assert!(c.left >= 0.1 - 1e-4 && c.right >= 0.3 - 1e-4, "{layout:?} {c:?}");
+            }
+            if let Some(cam) = placed.camera {
+                assert_eq!(cam.grade.exposure, 0.4, "the colour comes along");
+            }
+        }
+    }
+
     #[test]
     fn a_studio_reads_back_what_it_wrote() {
         let s = Studio {
@@ -491,9 +645,14 @@ mod tests {
                 name: "C920".into(),
             }),
             system_audio: true,
+            camera_look: Look {
+                key: Some(crate::look::Key::default()),
+                ..Look::default()
+            },
             ..Studio::default()
         };
         let text = serde_json::to_string(&s).unwrap();
+        assert!(!text.contains("screen_look"), "an untouched look isn't written");
         assert_eq!(serde_json::from_str::<Studio>(&text).unwrap(), s);
         assert_eq!(serde_json::from_str::<Studio>("{}").unwrap(), Studio::default());
     }
