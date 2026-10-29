@@ -2208,35 +2208,43 @@ impl Editor {
     /// Cutting edges off a picture: four sliders, and a way back.
     fn crop_section(&mut self, id: ClipId, clip: &Clip, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let crop = clip.look.crop.filter(|c| !c.is_none());
-        let summary = match crop {
-            None => "Off".to_string(),
-            Some(c) => {
+        let mirror = clip.look.mirror;
+        let summary = match (crop, mirror) {
+            (None, false) => "Off".to_string(),
+            (None, true) => "Mirrored".to_string(),
+            (Some(c), _) => {
                 let (w, h) = (1.0 - c.left - c.right, 1.0 - c.top - c.bottom);
-                format!("{:.0}% × {:.0}% left", w * 100.0, h * 100.0)
+                let flip = if mirror { ", mirrored" } else { "" };
+                format!("{:.0}% × {:.0}% left{flip}", w * 100.0, h * 100.0)
             }
         };
-        let (section, open) = self.fold(id, "Crop", crop.is_some(), summary, cx);
+        let (section, open) = self.fold(id, "Crop and mirror", crop.is_some() || mirror, summary, cx);
         section.when(open, |d| {
-            d.child(self.slider(id, clip, Field::CropLeft, cx))
-                .child(self.slider(id, clip, Field::CropRight, cx))
-                .child(self.slider(id, clip, Field::CropTop, cx))
-                .child(self.slider(id, clip, Field::CropBottom, cx))
-                .child(
+            d.child(
+                self.toggle("mirror", "Mirror, left to right", mirror, cx, move |this, cx| {
+                    this.change(id, cx, |c| c.look.mirror = !c.look.mirror)
+                }),
+            )
+            .child(self.slider(id, clip, Field::CropLeft, cx))
+            .child(self.slider(id, clip, Field::CropRight, cx))
+            .child(self.slider(id, clip, Field::CropTop, cx))
+            .child(self.slider(id, clip, Field::CropBottom, cx))
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .line_height(px(15.0))
+                    .text_color(Theme::overlay())
+                    .child("The picture keeps its size; what remains stays where it was."),
+            )
+            .when(crop.is_some(), |d| {
+                d.child(
                     div()
-                        .text_size(px(10.5))
-                        .line_height(px(15.0))
-                        .text_color(Theme::overlay())
-                        .child("The picture keeps its size; what remains stays where it was."),
+                        .flex()
+                        .child(self.chip("crop-reset", "Reset crop", false, cx, move |this, cx| {
+                            this.change(id, cx, |c| c.look.crop = None);
+                        })),
                 )
-                .when(crop.is_some(), |d| {
-                    d.child(
-                        div()
-                            .flex()
-                            .child(self.chip("crop-reset", "Reset crop", false, cx, move |this, cx| {
-                                this.change(id, cx, |c| c.look.crop = None);
-                            })),
-                    )
-                })
+            })
         })
     }
 

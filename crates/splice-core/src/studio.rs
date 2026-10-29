@@ -142,6 +142,8 @@ pub struct Scene {
     pub shape: Bubble,
     /// Side by side: the camera's share of the width.
     pub split: f32,
+    /// The camera flipped left to right, as a mirror shows you.
+    pub mirror: bool,
 }
 
 impl Default for Scene {
@@ -152,6 +154,7 @@ impl Default for Scene {
             size: 0.3,
             shape: Bubble::Circle,
             split: 0.32,
+            mirror: false,
         }
     }
 }
@@ -264,7 +267,7 @@ impl Studio {
             (_, None, Some(_)) => Layout::Camera,
             (layout, _, _) => layout,
         };
-        match (layout, screen, camera) {
+        let mut placed = match (layout, screen, camera) {
             (Layout::Screen, Some(_), _) => Placed {
                 screen: Some(Look::default()),
                 camera: None,
@@ -344,7 +347,11 @@ impl Studio {
                 }
             }
             _ => Placed::default(),
+        };
+        if let Some(camera) = &mut placed.camera {
+            camera.mirror = scene.mirror;
         }
+        placed
     }
 }
 
@@ -426,6 +433,18 @@ mod tests {
         .camera
         .unwrap();
         assert!(left.x < 0.0 && left.y < 0.0);
+        assert!(!cam.mirror && !left.mirror);
+    }
+
+    #[test]
+    fn a_mirrored_camera_is_flipped_in_every_layout() {
+        for layout in Layout::ALL {
+            let mut s = studio(layout);
+            s.scene.mirror = true;
+            let placed = s.looks(CANVAS, SCREEN, CAMERA);
+            assert!(placed.camera.is_none_or(|c| c.mirror), "{layout:?}");
+            assert!(placed.screen.is_none_or(|c| !c.mirror), "{layout:?}");
+        }
     }
 
     #[test]

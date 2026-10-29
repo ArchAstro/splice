@@ -870,20 +870,30 @@ impl Editor {
                     })
                     .child(record),
             )
-            .when(scene.layout == Layout::Bubble, |d| {
+            .when(studio.camera.is_some() && scene.layout != Layout::Screen, |d| {
                 d.child(
                     div()
                         .flex()
                         .flex_wrap()
                         .items_center()
                         .gap(px(6.0))
-                        .child(label("Corner"))
-                        .children(corners)
-                        .child(div().w(px(10.0)))
-                        .child(label("Size"))
-                        .children(sizes)
-                        .child(div().w(px(10.0)))
-                        .children(shapes),
+                        .when(scene.layout == Layout::Bubble, |d| {
+                            d.child(label("Corner"))
+                                .children(corners)
+                                .child(div().w(px(10.0)))
+                                .child(label("Size"))
+                                .children(sizes)
+                                .child(div().w(px(10.0)))
+                                .children(shapes)
+                                .child(div().w(px(10.0)))
+                        })
+                        .child(
+                            chip("camera-mirror", "Mirror", scene.mirror)
+                                .tooltip(tip("Flip the camera left to right, as a mirror shows you", None))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_studio(cx, |s| s.scene.mirror = !s.scene.mirror)
+                                })),
+                        ),
                 )
             })
     }
@@ -1482,6 +1492,9 @@ impl Editor {
         }
         if let Some(split) = request.get("split").and_then(Value::as_f64) {
             studio.scene.split = (split as f32).clamp(0.15, 0.6);
+        }
+        if let Some(mirror) = request.get("mirror").and_then(Value::as_bool) {
+            studio.scene.mirror = mirror;
         }
         if let Some(shape) = text("shape") {
             studio.scene.shape = match shape.as_str() {

@@ -293,7 +293,8 @@ yourself and your screen. Nothing extra to install.
   live in the tab, sounds with a level meter. Splice keeps its own windows
   out of the shot.
 - **Scene:** Screen, Bubble (the camera in a round or square corner, small,
-  medium or large), Side by side, or Camera.
+  medium or large), Side by side, or Camera, the camera mirrored if you like.
+  The file stays as the camera saw it; the mirror is part of the edit.
 - **A file per source**, like OBS's Source Record: every take writes
   `screen.mp4`, `camera.mp4`, `microphone.m4a` and `system.m4a` into its own
   folder under `~/Movies/Splice/Recordings/<project>/`. All start at the same

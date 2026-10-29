@@ -161,6 +161,7 @@ pub fn config(studio: &Studio, devices: &Devices, preview: u32) -> Result<Value>
         "cursor": out.cursor,
         "exclude": std::process::id(),
         "preview": preview,
+        "mirror": studio.scene.mirror,
     }))
 }
 
