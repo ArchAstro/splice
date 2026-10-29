@@ -96,6 +96,10 @@ fn icon(name: &str) -> Option<&'static str> {
             r#"<path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2.2h7a2 2 0 0 1 2 2v7.8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>"#
         }
         "flag" => r#"<path d="M5.5 21V4"/><path d="M5.5 4.5h11l-2.5 4 2.5 4h-11"/>"#,
+        "camera" => r#"<rect x="3" y="6.5" width="12.5" height="11" rx="2.2"/><path d="m15.5 10.5 5-3v9l-5-3"/>"#,
+        "mic" => {
+            r#"<rect x="9" y="3.5" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0"/><path d="M12 18v2.5"/>"#
+        }
         "record" => r#"<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5" fill="black"/>"#,
         "check" => r#"<path d="m5.5 12.5 4 4 9-9.5"/>"#,
         "close" => r#"<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>"#,

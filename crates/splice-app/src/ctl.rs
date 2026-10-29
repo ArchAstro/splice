@@ -184,7 +184,7 @@ Story (planning: beats end to end along the timeline, and cues)
   story take fail --take T       a generation that failed: its pending take goes
   story take choose --take T | story take remove --take T
   cue add [--at T] --label TEXT  |  cue set --cue C [--at T] [--label TEXT]  |  cue remove --cue C
-  view edit|story                switch the window between Edit view and the Story board
+  view edit|story|record         switch the window between Edit, the Story board and Record
 
 The bible (who and what the movie keeps coming back to, and its look)
   bible read                     entries: kind, name, words, pictures, the beats each is in
@@ -193,13 +193,23 @@ The bible (who and what the movie keeps coming back to, and its look)
   bible picture --entry E --image FILE | --remove I     (the first picture is the face briefs lead with)
   bible remove --entry E         E is an entry's id or name
 
-Recording the screen
-  record sources                 the displays and windows that can be recorded
-  record start [--display N | --window ID|APP | --region X,Y,W,H] [--mic] [--clicks] [--for S]
-               [--beat B | --at T [--track N]] [--hide]
-                                 start; the take goes into beat B, onto the timeline at T, or the media
+Recording (each source to its own file; the take is laid out as the scene says)
+  record sources                 displays, windows, cameras, microphones, and permissions
+  record setup [SETUP] [--default]
+                                 show or change what this project records; --default makes it the
+                                 setup new projects start with. SETUP is any of:
+      --screen display:N|window:APP|none   --region X,Y,W,H (points, on that display)
+      --camera NAME|none   --microphone NAME|default|none   --system | --no-system (the Mac's sound)
+      --layout screen|bubble|side|camera   --corner tl|tr|bl|br   --size 0.3 (bubble height)
+      --shape circle|square   --split 0.32 (camera's share, side by side)
+      --codec h264|hevc   --quality good|high|best   --fps 30|60   --height full|4k|1440|1080
+      --cursor | --no-cursor   --clicks | --no-clicks (note clicks, to zoom in on later)
+  record start [SETUP] [--for S] [--beat B | --at T [--track N] | --into media]
+                                 start (answers once recording); the take goes after everything on
+                                 the timeline, into beat B, at T, or only into the media
+  record pause | resume
   record stop [--wait]           stop; with --wait, answer once the take is in the project
-  record status                  whether it is recording, and for how long
+  record status                  recording or not, for how long, sound levels, the last take's folder
 
 Operating the window (as a person would: for checking the interface)
   ui                             window size and scale, mouse, stage, timeline and picture bounds
@@ -515,8 +525,21 @@ fn build(args: &[String]) -> Result<Value, String> {
                 let v: f64 = next(arg)?.parse().map_err(|_| "--for expects seconds".to_string())?;
                 request.insert("for".into(), json!(v));
             }
-            "--mic" | "--clicks" => {
+            "--mic" | "--clicks" | "--system" | "--cursor" | "--default" => {
                 request.insert(arg[2..].into(), json!(true));
+            }
+            "--no-clicks" | "--no-system" | "--no-cursor" => {
+                request.insert(arg[5..].into(), json!(false));
+            }
+            "--screen" | "--camera" | "--microphone" | "--layout" | "--corner" | "--shape" | "--codec"
+            | "--quality" | "--height" => {
+                request.insert(arg[2..].into(), json!(next(arg)?));
+            }
+            "--split" => {
+                let v: f64 = next(arg)?
+                    .parse()
+                    .map_err(|_| "--split expects a fraction".to_string())?;
+                request.insert("split".into(), json!(v));
             }
             "--every" => {
                 let v: f64 = next(arg)?.parse().map_err(|_| "--every expects seconds".to_string())?;
@@ -681,7 +704,7 @@ fn build(args: &[String]) -> Result<Value, String> {
             command.as_str()
         }
         "view" => {
-            let which = words.first().ok_or("view expects edit or story")?;
+            let which = words.first().ok_or("view expects edit, story or record")?;
             request.insert("view".into(), json!(which));
             "view"
         }
@@ -822,6 +845,15 @@ mod tests {
         );
         assert!(build(&args("move --clip x")).is_err());
         assert!(build(&args("explode")).is_err());
+        let r = build(&args(
+            "record setup --screen window:Safari --camera C920 --no-system --layout bubble --size 0.25 --fps 60 --height 1440 --default",
+        ))
+        .unwrap();
+        assert_eq!(
+            r,
+            json!({"cmd": "record", "sub": "setup", "screen": "window:Safari", "camera": "C920", "system": false,
+                   "layout": "bubble", "size": 0.25, "fps": 60, "height": "1440", "default": true})
+        );
     }
 
     #[test]

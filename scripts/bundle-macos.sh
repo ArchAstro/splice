@@ -66,7 +66,9 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>NSHumanReadableCopyright</key>
     <string>© ArchAstro. MIT license.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Splice records your microphone with a screen recording when you turn Microphone on.</string>
+    <string>Splice records the microphone you choose in the Record tab.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Splice records the camera you choose in the Record tab.</string>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>

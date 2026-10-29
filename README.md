@@ -4,7 +4,7 @@
 
 <p align="center">
   <b>A small, quiet video editor you can talk to.</b><br>
-  Rust core · GPU-rendered · titles, looks, music and motion made in place · a story board · screen recording · an assistant that edits beside you
+  Rust core · GPU-rendered · titles, looks, music and motion made in place · a story board · recording screen, camera and mic · an assistant that edits beside you
 </p>
 
 <p align="center">
@@ -285,19 +285,35 @@ while you cut it.
 - **Shot list** copies the plan as text.
 - Keys: B adds a beat, C marks a cue.
 
-**Record** (⇧⌘R, or the record button) captures the screen with macOS's own
-recorder, so there is no OBS and no extra install.
+**Record** is a tab beside Edit and Story, and it replaces OBS for recording
+yourself and your screen. Nothing extra to install.
 
-- You can record the entire screen or any one window, with the cursor and
-  optional clicks and microphone.
-- Recording the whole screen hides Splice. Click it in the Dock to stop.
-- The take comes into the media panel. In Story view it goes into the chosen
-  beat instead.
-- The first recording asks for Screen Recording permission. It is granted to
-  whatever launched Splice: the app, or your terminal. Without it, Start says
-  so at once. A rebuilt app is new to macOS (it is signed only locally), so
-  after `make install-app` turn the permission off and on again in System
-  Settings → Privacy & Security → Screen Recording.
+- **Sources:** a display or one window (with the pointer), a camera
+  (Continuity Camera too), a microphone, and the sound the Mac plays. Each is
+  live in the tab, sounds with a level meter. Splice keeps its own windows
+  out of the shot.
+- **Scene:** Screen, Bubble (the camera in a round or square corner, small,
+  medium or large), Side by side, or Camera.
+- **A file per source**, like OBS's Source Record: every take writes
+  `screen.mp4`, `camera.mp4`, `microphone.m4a` and `system.m4a` into its own
+  folder under `~/Movies/Splice/Recordings/<project>/`. All start at the same
+  moment and run as long.
+- **The take comes onto the timeline** after what is there, as layers in the
+  scene's places. The scene is an edit, not baked in, so you can still move
+  the bubble, change the layout or drop a source afterwards. In Story view,
+  ⇧⌘R records into the chosen beat.
+- **Files:** H.264 or HEVC on the Mac's hardware encoder at constant quality
+  (Good, High or Best), 30 or 60 fps, and the screen at full size, 4K, 1440p
+  or 1080p. Files are written in one-second pieces, so a crash keeps what
+  was recorded.
+- **Pause** and resume within a take. Clicks are noted, to zoom in on later.
+- **Each project keeps its own setup.** "Make this my default" sets the one
+  new projects start with.
+- **Permissions:** Screen Recording, Camera and Microphone, asked for the
+  first time each is used. They are granted to whatever launched Splice: the
+  app, or your terminal. A rebuilt app is new to macOS (it is signed only
+  locally), so after `make install-app` turn its permissions off and on again
+  in System Settings → Privacy & Security.
 
 ## Projects
 
@@ -349,7 +365,7 @@ with `make install-skill`) teaches Claude Code to use it.
 | `splice ctl save`, `versions`, `export FILE [--wait]` | versions and export |
 | `splice ctl ui`, `click`, `hover`, `drag`, `scroll`, `key`, `type` | operate the window as a person would, for checking the interface |
 | `splice ctl story read / add / set / move / remove / fill / list / shot`, `cue add / set / remove`, `view edit|story` | plan the movie: beats and cues |
-| `splice ctl record sources / start / stop / status` | record a screen, a window or a region, into a beat or the timeline |
+| `splice ctl record sources / setup / start / pause / stop / status` | record screen, camera, mic and the Mac's sound, each to its own file, laid out as a scene |
 | `splice ctl wait --name Claude` | connects an assistant and waits for your message |
 | `splice ctl say --text T` | shows a line in the status bar |
 

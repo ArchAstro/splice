@@ -15,6 +15,7 @@ pub mod motion;
 pub mod score;
 pub mod store;
 pub mod story;
+pub mod studio;
 pub mod symbol;
 pub mod textmotion;
 pub mod time;

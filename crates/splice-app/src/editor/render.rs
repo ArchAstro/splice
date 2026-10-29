@@ -365,6 +365,8 @@ impl Render for Editor {
                                     d.child(self.render_workbench(window, cx))
                                 } else if self.mode == story::Mode::Story {
                                     d.child(self.render_board(cx))
+                                } else if self.mode == story::Mode::Record {
+                                    d.child(self.render_studio(cx))
                                 } else {
                                     d.child(self.render_viewer(cx)).when(inspector_open, |d| {
                                         d.child(div().w(px(GAP)).flex_none())
@@ -543,7 +545,7 @@ impl Editor {
         }
     }
 
-    /// Edit or Story: the two ways to look at the movie.
+    /// Edit, Story or Record: the ways to work on the movie.
     fn mode_switch(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tab = |this: &Self, mode: story::Mode, label: &'static str, cx: &mut Context<Self>| {
             let on = this.mode == mode;
@@ -574,6 +576,10 @@ impl Editor {
             .gap(px(2.0))
             .child(tab(self, story::Mode::Edit, "Edit", cx).tooltip(tip("Edit the movie", Some("⌘3"))))
             .child(tab(self, story::Mode::Story, "Story", cx).tooltip(tip("Plan it: beats, cues, shots", Some("⌘3"))))
+            .child(
+                tab(self, story::Mode::Record, "Record", cx)
+                    .tooltip(tip("Record: screen, camera, microphone", Some("⇧⌘R"))),
+            )
     }
 
     fn render_titlebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1662,7 +1668,6 @@ impl Editor {
 
         let content = match &self.overlay {
             Overlay::None => return None,
-            Overlay::Record { .. } => panel().child(self.record_overlay(cx)),
             Overlay::Cast { beat, index } => {
                 let (beat, index) = (*beat, *index);
                 panel().w(px(380.0)).child(self.cast_overlay(beat, index, cx))

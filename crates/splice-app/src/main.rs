@@ -2,6 +2,7 @@
 
 mod actions;
 mod audio;
+mod capture;
 mod cli;
 mod ctl;
 mod editor;
