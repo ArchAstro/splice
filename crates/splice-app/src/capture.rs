@@ -182,8 +182,26 @@ pub enum Feed {
 
 enum Message {
     Event(Value),
-    Frame(Feed, Arc<RenderImage>),
+    /// A preview picture, its full size, and the part of it kept.
+    Frame(Feed, Arc<RenderImage>, (u32, u32), Option<Part>),
     Gone,
+}
+
+/// Part of a picture: left, top, right and bottom, as fractions of it.
+pub type Part = [f32; 4];
+
+/// The pixels of `part` of a BGRA picture, and their size.
+fn cut(bgra: &[u8], (w, h): (u32, u32), part: Part) -> (Vec<u8>, (u32, u32)) {
+    let edge = |f: f32, n: u32| ((f.clamp(0.0, 1.0) * n as f32).round() as u32).min(n);
+    let (l, t) = (edge(part[0], w).min(w - 1), edge(part[1], h).min(h - 1));
+    let (r, b) = (edge(part[2], w).clamp(l + 1, w), edge(part[3], h).clamp(t + 1, h));
+    let (cw, ch) = (r - l, b - t);
+    let mut out = Vec::with_capacity((cw * ch * 4) as usize);
+    for y in t..t + ch {
+        let row = (y * w + l) as usize * 4;
+        out.extend_from_slice(&bgra[row..row + cw as usize * 4]);
+    }
+    (out, (cw, ch))
 }
 
 /// A recording under way.
@@ -207,6 +225,12 @@ pub struct Live {
     /// The instructions it was started with.
     pub config: Value,
     pub frames: HashMap<Feed, Arc<RenderImage>>,
+    /// Each picture's full size, and the part of it its frame holds.
+    pub natural: HashMap<Feed, (u32, u32)>,
+    pub parts: HashMap<Feed, Option<Part>>,
+    /// The part of the camera's picture the scene shows; its preview frames
+    /// arrive cut to it, so a bubble can be drawn round.
+    pub camera_part: Arc<std::sync::Mutex<Option<Part>>>,
     /// The loudest each sound has been lately, 0 to 1.
     pub levels: HashMap<String, f32>,
     /// Sources that have sent something.
@@ -243,6 +267,8 @@ impl Live {
         writeln!(stdin, "{config}")?;
         let mut stdout = child.stdout.take().expect("piped");
         let (tx, messages) = channel();
+        let camera_part = Arc::new(std::sync::Mutex::new(None));
+        let wanted = camera_part.clone();
         std::thread::Builder::new()
             .name("splice-capture".into())
             .spawn(move || {
@@ -262,12 +288,20 @@ impl Live {
                             let feed = if body[0] == 0 { Feed::Screen } else { Feed::Camera };
                             let w = u32::from_le_bytes([body[1], body[2], body[3], body[4]]);
                             let h = u32::from_le_bytes([body[5], body[6], body[7], body[8]]);
-                            if body.len() != 9 + (w * h * 4) as usize {
+                            if w == 0 || h == 0 || body.len() != 9 + (w * h * 4) as usize {
                                 continue;
                             }
                             body.drain(..9);
-                            match ffmpeg::render_image(w, h, body) {
-                                Some(image) => Message::Frame(feed, image),
+                            let part = match feed {
+                                Feed::Camera => *wanted.lock().unwrap(),
+                                Feed::Screen => None,
+                            };
+                            let (pixels, size) = match part {
+                                Some(part) => cut(&body, (w, h), part),
+                                None => (body, (w, h)),
+                            };
+                            match ffmpeg::render_image(size.0, size.1, pixels) {
+                                Some(image) => Message::Frame(feed, image, (w, h), part),
                                 None => continue,
                             }
                         }
@@ -285,6 +319,9 @@ impl Live {
             messages,
             config,
             frames: HashMap::new(),
+            natural: HashMap::new(),
+            parts: HashMap::new(),
+            camera_part,
             levels: HashMap::new(),
             live: false,
             recording: None,
@@ -350,8 +387,10 @@ impl Live {
         while let Ok(message) = self.messages.try_recv() {
             heard = true;
             match message {
-                Message::Frame(feed, image) => {
+                Message::Frame(feed, image, natural, part) => {
                     self.live = true;
+                    self.natural.insert(feed, natural);
+                    self.parts.insert(feed, part);
                     if let Some(old) = self.frames.insert(feed, image) {
                         retire.push(old);
                     }
@@ -530,4 +569,21 @@ pub fn take_dir(project: &Path) -> PathBuf {
         n += 1;
     }
     dir
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_part_of_a_picture_keeps_its_pixels() {
+        // 4×2, each pixel's first byte its index.
+        let bgra: Vec<u8> = (0..8u8).flat_map(|i| [i, 0, 0, 255]).collect();
+        let (pixels, size) = cut(&bgra, (4, 2), [0.25, 0.5, 0.75, 1.0]);
+        assert_eq!(size, (2, 1));
+        assert_eq!(pixels.chunks(4).map(|p| p[0]).collect::<Vec<_>>(), vec![5, 6]);
+        // Nothing left still leaves a pixel, inside the picture.
+        let (pixels, size) = cut(&bgra, (4, 2), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!((size, pixels[0]), ((1, 1), 7));
+    }
 }

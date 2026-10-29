@@ -308,6 +308,10 @@ yourself and your screen. Nothing extra to install.
   or 1080p. Files are written in one-second pieces, so a crash keeps what
   was recorded.
 - **Pause** and resume within a take. Clicks are noted, to zoom in on later.
+- **Voice clean-up**, like OBS's mic filters: rumble cut, steady noise (fans,
+  hiss, hum) lowered, and the level evened out. Switch it on for the mic in
+  Record, or for any clip under Sound in the inspector; the file stays as
+  recorded.
 - **Each project keeps its own setup.** "Make this my default" sets the one
   new projects start with.
 - **Permissions:** Screen Recording, Camera and Microphone, asked for the

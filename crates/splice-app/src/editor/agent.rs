@@ -360,6 +360,41 @@ impl Editor {
                 self.edit(cx, |p| p.set_volume(&ids, volume as f32));
                 self.edited()
             }
+            "clean" => {
+                let ids = match self.clips(request) {
+                    Ok(ids) => ids,
+                    Err(e) => return Some(fail(e)),
+                };
+                let project = &self.doc.project;
+                if let Some(id) = ids.iter().find(|id| {
+                    project
+                        .clip(**id)
+                        .is_none_or(|c| c.generator.is_some() || project.media(c.media).is_none_or(|m| !m.has_audio))
+                }) {
+                    return Some(fail(format!("clip {} has no sound to clean", id.0)));
+                }
+                let off = flag("off") == Some(true);
+                let noise = request
+                    .get("noise")
+                    .and_then(Value::as_f64)
+                    .map(|v| v.clamp(0.0, 1.0) as f32);
+                let even = flag("even");
+                self.edit(cx, |p| {
+                    for id in &ids {
+                        if let Some(c) = p.clip_mut(*id) {
+                            c.clean = if off {
+                                None
+                            } else {
+                                let mut clean = c.clean.unwrap_or_default();
+                                clean.noise = noise.unwrap_or(clean.noise);
+                                clean.even = even.unwrap_or(clean.even);
+                                Some(clean)
+                            };
+                        }
+                    }
+                });
+                self.edited()
+            }
             "track" => {
                 let Some(track) = self.track(request).filter(|t| *t < self.doc.project.tracks.len()) else {
                     return Some(fail(format!(
@@ -901,6 +936,9 @@ impl Editor {
                 value["media"] = json!(clip.media.0);
                 value["source_in"] = json!(s(clip.source_in));
                 value["volume"] = json!(clip.volume);
+                if let Some(clean) = clip.clean {
+                    value["clean"] = json!(clean);
+                }
             }
             Some(Generator::Text(title)) => {
                 let h = project.settings.height as f32;

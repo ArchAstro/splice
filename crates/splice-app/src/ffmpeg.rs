@@ -321,17 +321,19 @@ pub fn decode_audio(path: &Path, rate: u32) -> Result<Pcm> {
     Ok(Pcm { rate, samples })
 }
 
-/// The sound of `length` of `path` from `from`, played at `speed` (its
-/// pitch kept) and backwards when `reverse`: what a retimed clip sounds like.
+/// The sound of `length` of `path` from `from`, run through `first` (a
+/// voice's clean-up), played at `speed` (its pitch kept) and backwards when
+/// `reverse`: what a retimed or cleaned clip sounds like.
 pub fn decode_audio_retimed(
     path: &Path,
     rate: u32,
     from: Time,
     length: Time,
+    first: Vec<String>,
     speed: f64,
     reverse: bool,
 ) -> Result<Pcm> {
-    let mut filters = Vec::new();
+    let mut filters = first;
     if reverse {
         filters.push("areverse".to_string());
     }

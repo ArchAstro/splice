@@ -509,6 +509,12 @@ impl Editor {
                             placed.push(clip);
                         }
                     }
+                    if studio.clean
+                        && let Some(mic) = clips.get("microphone")
+                        && let Some(c) = project.clip_mut(*mic)
+                    {
+                        c.clean = Some(splice_core::voice::Clean::default());
+                    }
                     // The first pictures in a project set its shape: place them by it.
                     let canvas = (project.settings.width, project.settings.height);
                     let shown = studio.looks(canvas, size(project, "screen"), size(project, "camera"));
@@ -667,22 +673,23 @@ impl Editor {
             (f32::from(area.size.width) - w) / 2.0,
             (f32::from(area.size.height) - h) / 2.0,
         );
-        let frames = self.rec.live.as_ref().map(|l| l.frames.clone()).unwrap_or_default();
-        let dims = |f: Feed| {
-            frames.get(&f).map(|i| {
-                let s = i.size(0);
-                (s.width.0 as u32, s.height.0 as u32)
-            })
-        };
+        let live = self.rec.live.as_ref();
+        let frames = live.map(|l| l.frames.clone()).unwrap_or_default();
+        let dims = |f: Feed| live.and_then(|l| l.natural.get(&f).copied());
         let canvas_px = (settings.width, settings.height);
         let shown = studio.looks(canvas_px, dims(Feed::Screen), dims(Feed::Camera));
+        // Camera frames come cut to what the scene shows of them.
+        if let Some(live) = live {
+            *live.camera_part.lock().unwrap() = shown.camera.as_ref().map(|l| shown_part(l).0);
+        }
         let mut layers: Vec<AnyElement> = Vec::new();
         for (feed, look) in [(Feed::Screen, shown.screen), (Feed::Camera, shown.camera)] {
             let (Some(look), Some(image)) = (look, frames.get(&feed)) else {
                 continue;
             };
             let Some(natural) = dims(feed) else { continue };
-            layers.push(picture(image.clone(), natural, &look, (w, h)));
+            let part = live.and_then(|l| l.parts.get(&feed).copied().flatten());
+            layers.push(picture(image.clone(), natural, part, &look, (w, h)));
         }
         let failed = self.rec.problem.is_some();
         let status = if let Some(problem) = &self.rec.problem {
@@ -1100,7 +1107,33 @@ impl Editor {
                 .flex_col()
                 .child(mic_row)
                 .when(studio.microphone.is_some(), |d| {
-                    d.child(meter(levels.get("microphone").copied()))
+                    d.child(meter(levels.get("microphone").copied())).child(
+                        div()
+                            .id("mic-clean")
+                            .h(px(28.0))
+                            .px(px(8.0))
+                            .ml(px(23.0))
+                            .rounded(px(7.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(9.0))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(Theme::surface0()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(11.5))
+                                    .text_color(Theme::subtext())
+                                    .child("Clean up the voice"),
+                            )
+                            .child(switch(studio.clean))
+                            .tooltip(tip(
+                                "Takes come in with rumble and steady noise lowered and the level evened out; \
+                                 microphone.m4a stays as recorded",
+                                None,
+                            ))
+                            .on_click(cx.listener(|this, _, _, cx| this.set_studio(cx, |s| s.clean = !s.clean))),
+                    )
                 })
                 .into_any_element(),
         );
@@ -1493,6 +1526,9 @@ impl Editor {
         if let Some(split) = request.get("split").and_then(Value::as_f64) {
             studio.scene.split = (split as f32).clamp(0.15, 0.6);
         }
+        if let Some(clean) = flag("clean") {
+            studio.clean = clean;
+        }
         if let Some(mirror) = request.get("mirror").and_then(Value::as_bool) {
             studio.scene.mirror = mirror;
         }
@@ -1588,28 +1624,57 @@ fn take_name(path: &Path) -> String {
 }
 
 /// A live picture where `look` puts it on a stage of `stage` points.
-fn picture(image: Arc<RenderImage>, natural: (u32, u32), look: &Look, stage: (f32, f32)) -> AnyElement {
+/// What shows of a picture: all of it, a mask's box, or what a crop
+/// leaves (as a `Part`), and whether it is round.
+fn shown_part(look: &Look) -> (capture::Part, bool) {
+    if let Some(m) = look.mask {
+        let part = [
+            m.x - m.width / 2.0,
+            m.y - m.height / 2.0,
+            m.x + m.width / 2.0,
+            m.y + m.height / 2.0,
+        ];
+        (
+            part.map(|v| v.clamp(0.0, 1.0)),
+            m.shape == splice_core::look::Shape::Ellipse,
+        )
+    } else if let Some(c) = look.crop {
+        ([c.left, c.top, 1.0 - c.right, 1.0 - c.bottom], false)
+    } else {
+        ([0.0, 0.0, 1.0, 1.0], false)
+    }
+}
+
+/// A live picture placed by `look` on a stage of `stage` points. `part` is
+/// the part of the picture the frame holds, when it was cut to fit.
+fn picture(
+    image: Arc<RenderImage>,
+    natural: (u32, u32),
+    part: Option<capture::Part>,
+    look: &Look,
+    stage: (f32, f32),
+) -> AnyElement {
     let (sw, sh) = stage;
     let (nw, nh) = (natural.0.max(1) as f32, natural.1.max(1) as f32);
     let fit = (sw / nw).min(sh / nh) * look.scale;
     let (pw, ph) = (nw * fit, nh * fit);
     let (cx, cy) = (sw / 2.0 + look.x * sw, sh / 2.0 + look.y * sh);
     let (pl, pt) = (cx - pw / 2.0, cy - ph / 2.0);
-    // What shows of it: all, a mask's shape, or what a crop leaves.
-    let (mut l, mut t, mut r, mut b) = (0.0, 0.0, 1.0, 1.0);
-    let mut round = false;
-    if let Some(m) = look.mask {
-        (l, t, r, b) = (
-            m.x - m.width / 2.0,
-            m.y - m.height / 2.0,
-            m.x + m.width / 2.0,
-            m.y + m.height / 2.0,
-        );
-        round = m.shape == splice_core::look::Shape::Ellipse;
-    } else if let Some(c) = look.crop {
-        (l, t, r, b) = (c.left, c.top, 1.0 - c.right, 1.0 - c.bottom);
-    }
+    let ([l, t, r, b], round) = shown_part(look);
     let (vl, vt, vw, vh) = (pl + l * pw, pt + t * ph, (r - l) * pw, (b - t) * ph);
+    // A frame holding just what shows is drawn as it is, round if need be:
+    // clipping a larger one to a circle is beyond gpui.
+    if part.is_some_and(|p| p.iter().zip([l, t, r, b]).all(|(a, b)| (a - b).abs() < 1e-3)) {
+        return img(image)
+            .absolute()
+            .left(px(vl))
+            .top(px(vt))
+            .w(px(vw))
+            .h(px(vh))
+            .when(round, |d| d.rounded_full())
+            .object_fit(ObjectFit::Fill)
+            .into_any_element();
+    }
     div()
         .absolute()
         .left(px(vl))

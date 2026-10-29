@@ -64,6 +64,7 @@ pub enum Field {
     RedactWidth,
     RedactHeight,
     TextOver,
+    CleanNoise,
 }
 
 impl Field {
@@ -106,6 +107,7 @@ impl Field {
             | Field::RedactY => (0.0, 1.0),
             Field::RedactWidth | Field::RedactHeight => (0.02, 1.0),
             Field::TextOver => (0.1, 5.0),
+            Field::CleanNoise => (0.0, 1.0),
         }
     }
 
@@ -133,6 +135,7 @@ impl Field {
             Field::RedactWidth => Redact::default().width,
             Field::RedactHeight => Redact::default().height,
             Field::TextOver => 1.0,
+            Field::CleanNoise => splice_core::voice::Clean::default().noise,
         }
     }
 
@@ -173,6 +176,7 @@ impl Field {
             Field::RedactWidth => "Width",
             Field::RedactHeight => "Height",
             Field::TextOver => "Over",
+            Field::CleanNoise => "Noise",
         }
     }
 
@@ -252,6 +256,7 @@ impl Field {
                 Some(Generator::Text(t)) => t.animate.map_or(1.0, |m| secs(m.over) as f32),
                 _ => 1.0,
             },
+            Field::CleanNoise => clip.clean.unwrap_or_default().noise,
         }
     }
 
@@ -303,6 +308,11 @@ impl Field {
             Field::Warmth => look.grade.temperature = v,
             Field::Tint => look.grade.tint = v,
             Field::Volume => clip.volume = v,
+            Field::CleanNoise => {
+                if let Some(c) = &mut clip.clean {
+                    c.noise = v;
+                }
+            }
             Field::TextSize => {
                 if let Some(Generator::Text(t)) = &mut clip.generator {
                     t.size = v;
@@ -1061,6 +1071,9 @@ impl Editor {
             sections.push(
                 self.section("Sound")
                     .child(self.slider(id, &clip, Field::Volume, cx))
+                    .when(clip.generator.is_none(), |d| {
+                        d.child(self.clean_controls(id, &clip, cx))
+                    })
                     .when(speech, |d| {
                         d.child(
                             div().flex().child(
@@ -1830,6 +1843,44 @@ impl Editor {
                     .child("For a picture that doesn't fill the frame: a phone video on a wide canvas."),
             )
         })
+    }
+
+    /// Cleaning up a voice: a switch, how hard the noise is pushed down, and
+    /// whether the level is evened out.
+    fn clean_controls(&mut self, id: ClipId, clip: &Clip, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let clean = clip.clean;
+        div()
+            .flex()
+            .flex_col()
+            .child(self.toggle(
+                "clean-voice",
+                "Clean up the voice",
+                clean.is_some(),
+                cx,
+                move |this, cx| {
+                    this.change(id, cx, |c| {
+                        c.clean = match c.clean {
+                            Some(_) => None,
+                            None => Some(splice_core::voice::Clean::default()),
+                        };
+                    });
+                },
+            ))
+            .when_some(clean, |d, clean| {
+                d.child(self.slider(id, clip, Field::CleanNoise, cx)).child(self.toggle(
+                    "clean-even",
+                    "Even out the level",
+                    clean.even,
+                    cx,
+                    move |this, cx| {
+                        this.change(id, cx, |c| {
+                            if let Some(c) = &mut c.clean {
+                                c.even = !c.even;
+                            }
+                        });
+                    },
+                ))
+            })
     }
 
     /// Hiding part of the picture: a face, a screen, a number plate.
