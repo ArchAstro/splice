@@ -11,7 +11,7 @@ use crate::capture::{self, Devices, Feed, Happened, Live};
 use crate::recorder;
 use gpui::FontWeight;
 use serde_json::{Value, json};
-use splice_core::look::Look;
+use splice_core::look::{Key, Look};
 use splice_core::story::BeatId;
 use splice_core::studio::{self, Bubble, Codec, Corner, Layout, Quality, Screen, Studio, Take};
 use std::sync::mpsc::Sender;
@@ -60,6 +60,121 @@ pub struct Recorder {
     problem: Option<String>,
     /// Where the stage is drawn, measured as it is painted.
     bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// The camera bubble being dragged: where the pointer went down and
+    /// where it is now.
+    drag: Option<(Point<Pixels>, Point<Pixels>)>,
+    /// The corner a dragged bubble would land in.
+    landing: Option<Corner>,
+    /// Where the scene and the camera bubble were last drawn, in window
+    /// points, for `ctl ui`.
+    pub drawn: (Option<Bounds<Pixels>>, Option<Bounds<Pixels>>),
+    /// The picture whose crop and colour are open in the sources panel.
+    adjusting: Option<Feed>,
+    /// A slider being dragged, and the project before the drag (one undo).
+    sliding: Option<(Feed, Knob, Project)>,
+    /// Where each slider's track was drawn.
+    tracks: Tracks,
+}
+
+/// Where each slider's track was drawn, measured as it is painted.
+type Tracks = Rc<std::cell::RefCell<HashMap<(Feed, Knob), Bounds<Pixels>>>>;
+
+/// What a slider in a picture's crop and colour changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Knob {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    Exposure,
+    Contrast,
+    Saturation,
+    Warmth,
+    /// How far from the key colour still counts as screen.
+    Reach,
+}
+
+impl Knob {
+    const CROP: [Knob; 4] = [Knob::Left, Knob::Right, Knob::Top, Knob::Bottom];
+    const COLOUR: [Knob; 4] = [Knob::Exposure, Knob::Contrast, Knob::Saturation, Knob::Warmth];
+
+    fn label(self) -> &'static str {
+        match self {
+            Knob::Left => "Left",
+            Knob::Right => "Right",
+            Knob::Top => "Top",
+            Knob::Bottom => "Bottom",
+            Knob::Exposure => "Brightness",
+            Knob::Contrast => "Contrast",
+            Knob::Saturation => "Saturation",
+            Knob::Warmth => "Warmth",
+            Knob::Reach => "Reach",
+        }
+    }
+
+    fn range(self) -> (f32, f32) {
+        match self {
+            Knob::Left | Knob::Right | Knob::Top | Knob::Bottom => (0.0, 0.45),
+            Knob::Reach => (0.02, 0.45),
+            _ => (-1.0, 1.0),
+        }
+    }
+
+    /// Where a double click puts it back.
+    fn rest(self) -> f32 {
+        match self {
+            Knob::Reach => Key::default().similarity,
+            _ => 0.0,
+        }
+    }
+
+    fn get(self, look: &Look) -> f32 {
+        let crop = look.crop.unwrap_or_default();
+        match self {
+            Knob::Left => crop.left,
+            Knob::Right => crop.right,
+            Knob::Top => crop.top,
+            Knob::Bottom => crop.bottom,
+            Knob::Exposure => look.grade.exposure,
+            Knob::Contrast => look.grade.contrast,
+            Knob::Saturation => look.grade.saturation,
+            Knob::Warmth => look.grade.temperature,
+            Knob::Reach => look.key.map_or(Key::default().similarity, |k| k.similarity),
+        }
+    }
+
+    fn set(self, look: &mut Look, v: f32) {
+        let (lo, hi) = self.range();
+        let v = v.clamp(lo, hi);
+        let mut crop = look.crop.unwrap_or_default();
+        match self {
+            Knob::Left => crop.left = v,
+            Knob::Right => crop.right = v,
+            Knob::Top => crop.top = v,
+            Knob::Bottom => crop.bottom = v,
+            Knob::Exposure => look.grade.exposure = v,
+            Knob::Contrast => look.grade.contrast = v,
+            Knob::Saturation => look.grade.saturation = v,
+            Knob::Warmth => look.grade.temperature = v,
+            Knob::Reach => {
+                if let Some(key) = &mut look.key {
+                    key.similarity = v;
+                }
+            }
+        }
+        if Knob::CROP.contains(&self) {
+            look.crop = Some(crop.clamped()).filter(|c| !c.is_none());
+        }
+    }
+
+    fn shown(self, v: f32) -> String {
+        match self {
+            Knob::Left | Knob::Right | Knob::Top | Knob::Bottom => format!("{:.0}%", v * 100.0),
+            Knob::Reach => format!("{:.2}", v),
+            _ if v.abs() < 0.005 => "0".into(),
+            _ => format!("{v:+.2}"),
+        }
+    }
 }
 
 impl Recorder {
@@ -142,6 +257,20 @@ impl Editor {
         f(&mut studio);
         self.edit(cx, |p| p.studio = Some(studio));
         self.relive(cx);
+    }
+
+    /// Lets go of a dragged bubble, in the corner it was over.
+    fn drop_bubble(&mut self, cx: &mut Context<Self>) {
+        let Some((from, to)) = self.rec.drag.take() else {
+            return;
+        };
+        let moved = f32::from(to.x - from.x).hypot(f32::from(to.y - from.y));
+        match self.rec.landing.take() {
+            Some(corner) if moved > 3.0 && corner != self.studio().scene.corner => {
+                self.set_studio(cx, |s| s.scene.corner = corner)
+            }
+            _ => cx.notify(),
+        }
     }
 
     fn list_devices(&mut self, cx: &mut Context<Self>) {
@@ -681,16 +810,127 @@ impl Editor {
         // Camera frames come cut to what the scene shows of them.
         if let Some(live) = live {
             *live.camera_part.lock().unwrap() = shown.camera.as_ref().map(|l| shown_part(l).0);
+            *live.tones.lock().unwrap() = [(Feed::Screen, &shown.screen), (Feed::Camera, &shown.camera)]
+                .into_iter()
+                .filter_map(|(feed, look)| {
+                    let look = look.as_ref()?;
+                    let tone = splice_core::tone::Tone {
+                        grade: look.grade,
+                        key: look.key,
+                    };
+                    (!tone.is_none()).then_some((feed, tone))
+                })
+                .collect();
         }
+        // A bubble over the screen can be dragged to another corner: it
+        // follows the pointer, a ring shows where it will land, and letting
+        // go puts it there.
+        let bubble = match (&shown.screen, &shown.camera, dims(Feed::Camera)) {
+            (Some(_), Some(look), Some(natural)) if look.mask.is_some() => Some(shown_rect(natural, look, (w, h))),
+            _ => None,
+        };
+        let moved = self.rec.drag.map_or((0.0, 0.0), |(from, now)| {
+            (f32::from(now.x - from.x), f32::from(now.y - from.y))
+        });
+        let landing = bubble.filter(|_| self.rec.drag.is_some()).map(|[l, t, bw, bh]| {
+            let (x, y) = (l + bw / 2.0 + moved.0, t + bh / 2.0 + moved.1);
+            let corner = corner_at(x > w / 2.0, y > h / 2.0);
+            let mut there = studio.clone();
+            there.scene.corner = corner;
+            let rect = there
+                .looks(canvas_px, dims(Feed::Screen), dims(Feed::Camera))
+                .camera
+                .zip(dims(Feed::Camera))
+                .map(|(look, natural)| shown_rect(natural, &look, (w, h)));
+            (corner, rect)
+        });
         let mut layers: Vec<AnyElement> = Vec::new();
         for (feed, look) in [(Feed::Screen, shown.screen), (Feed::Camera, shown.camera)] {
-            let (Some(look), Some(image)) = (look, frames.get(&feed)) else {
+            let (Some(mut look), Some(image)) = (look, frames.get(&feed)) else {
                 continue;
             };
             let Some(natural) = dims(feed) else { continue };
+            if feed == Feed::Camera && bubble.is_some() {
+                look.x += moved.0 / w;
+                look.y += moved.1 / h;
+            }
             let part = live.and_then(|l| l.parts.get(&feed).copied().flatten());
             layers.push(picture(image.clone(), natural, part, &look, (w, h)));
         }
+        let round = studio.scene.shape == Bubble::Circle;
+        if let Some((_, Some([l, t, bw, bh]))) = landing {
+            layers.push(
+                div()
+                    .absolute()
+                    .left(px(l))
+                    .top(px(t))
+                    .w(px(bw))
+                    .h(px(bh))
+                    .border_2()
+                    .border_color(gpui::rgba(0xffffffb3))
+                    .when(round, |d| d.rounded_full())
+                    .into_any_element(),
+            );
+        }
+        if let Some([l, t, bw, bh]) = bubble {
+            let dragging = self.rec.drag.is_some();
+            layers.push(
+                div()
+                    .id("bubble-grip")
+                    .absolute()
+                    .left(px(l + moved.0))
+                    .top(px(t + moved.1))
+                    .w(px(bw))
+                    .h(px(bh))
+                    .when(round, |d| d.rounded_full())
+                    .cursor_grab()
+                    .when(!dragging, |d| d.tooltip(tip("Drag to another corner", None)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                            this.rec.drag = Some((event.position, event.position));
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+            );
+        }
+        // While dragging, the pointer is followed anywhere in the window.
+        let entity = cx.entity();
+        let follow = self.rec.drag.is_some().then(|| {
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    let e = entity.clone();
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                        if phase.bubble() {
+                            e.update(cx, |editor, cx| {
+                                if event.pressed_button != Some(MouseButton::Left) {
+                                    editor.drop_bubble(cx);
+                                } else if let Some(drag) = editor.rec.drag.as_mut() {
+                                    drag.1 = event.position;
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    });
+                    let e = entity;
+                    window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                        if phase.bubble() {
+                            e.update(cx, |editor, cx| editor.drop_bubble(cx));
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .size_full()
+        });
+        self.rec.landing = landing.map(|(corner, _)| corner);
+        let at = |x: f32, y: f32, w: f32, h: f32| {
+            Bounds::new(area.origin + point(px(left + x), px(top + y)), size(px(w), px(h)))
+        };
+        self.rec.drawn = (Some(at(0.0, 0.0, w, h)), bubble.map(|[l, t, bw, bh]| at(l, t, bw, bh)));
         let failed = self.rec.problem.is_some();
         let status = if let Some(problem) = &self.rec.problem {
             Some(problem.clone())
@@ -708,6 +948,7 @@ impl Editor {
             .min_h_0()
             .relative()
             .child(measure)
+            .children(follow)
             .child(
                 div()
                     .absolute()
@@ -905,8 +1146,336 @@ impl Editor {
             })
     }
 
+    /// A picture's crop, colour and (for a camera) green screen: shown
+    /// live, and each take's clip starts with them.
+    fn adjust_panel(&mut self, studio: &Studio, feed: Feed, cx: &mut Context<Self>) -> AnyElement {
+        let look = own_look(studio, feed).clone();
+        let open = self.rec.adjusting == Some(feed);
+        let mut said = Vec::new();
+        if look.crop.is_some() {
+            said.push("cropped");
+        }
+        if !look.grade.is_none() {
+            said.push("colour");
+        }
+        if look.key.is_some() {
+            said.push("green screen");
+        }
+        if said.is_empty() && look != Look::default() {
+            said.push("changed");
+        }
+        let id = |name: &str| SharedString::from(format!("{name}-{feed:?}"));
+        let header = div()
+            .id(id("adjust"))
+            .h(px(26.0))
+            .ml(px(23.0))
+            .px(px(8.0))
+            .rounded(px(7.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .cursor_pointer()
+            .hover(|d| d.bg(Theme::surface0()))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.5))
+                    .text_color(Theme::subtext())
+                    .child("Crop and colour"),
+            )
+            .when(!said.is_empty(), |d| {
+                d.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_right()
+                        .text_size(px(11.0))
+                        .text_color(Theme::overlay())
+                        .child(said.join(" · ")),
+                )
+            })
+            .child(icon(if open { "chevron" } else { "chevron-right" }, Theme::overlay()).size(px(11.0)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.rec.adjusting = if this.rec.adjusting == Some(feed) {
+                    None
+                } else {
+                    Some(feed)
+                };
+                cx.notify();
+            }));
+        let mut body: Vec<AnyElement> = Vec::new();
+        if open {
+            let heading = |text: &'static str| {
+                div()
+                    .pt(px(6.0))
+                    .text_size(px(10.5))
+                    .text_color(Theme::overlay())
+                    .child(text)
+                    .into_any_element()
+            };
+            body.push(heading("CROP"));
+            for knob in Knob::CROP {
+                body.push(self.knob(feed, knob, &look, cx));
+            }
+            body.push(heading("COLOUR"));
+            for knob in Knob::COLOUR {
+                body.push(self.knob(feed, knob, &look, cx));
+            }
+            if feed == Feed::Camera {
+                let keyed = look.key.is_some();
+                body.push(
+                    div()
+                        .id(id("key"))
+                        .h(px(26.0))
+                        .mt(px(4.0))
+                        .flex()
+                        .items_center()
+                        .cursor_pointer()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(11.5))
+                                .text_color(Theme::subtext())
+                                .child("Green screen"),
+                        )
+                        .child(switch(keyed))
+                        .tooltip(tip(
+                            "The screen behind you turns clear, showing what is under the camera",
+                            None,
+                        ))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_studio(cx, |s| {
+                                s.camera_look.key = if s.camera_look.key.is_some() {
+                                    None
+                                } else {
+                                    Some(Key::default())
+                                };
+                            })
+                        }))
+                        .into_any_element(),
+                );
+                if let Some(key) = look.key {
+                    let colours = [(0x00ff00u32, "Green"), (0x0000ffu32, "Blue")].map(|(colour, name)| {
+                        chip((id("key-colour"), colour as usize), name, key.color == colour)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_studio(cx, |s| {
+                                    if let Some(k) = &mut s.camera_look.key {
+                                        k.color = colour;
+                                    }
+                                })
+                            }))
+                            .into_any_element()
+                    });
+                    body.push(div().flex().gap(px(6.0)).children(colours).into_any_element());
+                    body.push(self.knob(feed, Knob::Reach, &look, cx));
+                }
+            }
+            if look != Look::default() {
+                body.push(
+                    div()
+                        .pt(px(6.0))
+                        .flex()
+                        .child(
+                            chip(id("adjust-reset"), "Reset", false)
+                                .tooltip(tip("Back to the picture as it is", None))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.set_studio(cx, |s| *own_look_mut(s, feed) = Look::default())
+                                })),
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
+        // While a slider is held, the pointer is followed anywhere.
+        let entity = cx.entity();
+        let follow = self.rec.sliding.as_ref().filter(|(f, ..)| *f == feed).map(|_| {
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    let e = entity.clone();
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                        if phase.bubble() {
+                            e.update(cx, |editor, cx| {
+                                if event.pressed_button == Some(MouseButton::Left) {
+                                    editor.slide_knob(event.position, cx);
+                                } else {
+                                    editor.let_go_knob(cx);
+                                }
+                            });
+                        }
+                    });
+                    let e = entity;
+                    window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                        if phase.bubble() {
+                            e.update(cx, |editor, cx| editor.let_go_knob(cx));
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .size_full()
+        });
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .child(header)
+            .when(open, |d| {
+                d.child(
+                    div()
+                        .ml(px(31.0))
+                        .mr(px(8.0))
+                        .pb(px(6.0))
+                        .flex()
+                        .flex_col()
+                        .children(body),
+                )
+            })
+            .children(follow)
+            .into_any_element()
+    }
+
+    /// One slider of a picture's crop and colour.
+    fn knob(&self, feed: Feed, knob: Knob, look: &Look, cx: &mut Context<Self>) -> AnyElement {
+        let (lo, hi) = knob.range();
+        let value = knob.get(look);
+        let frac = ((value - lo) / (hi - lo)).clamp(0.0, 1.0);
+        let held = self
+            .rec
+            .sliding
+            .as_ref()
+            .is_some_and(|(f, k, _)| *f == feed && *k == knob);
+        let tracks = self.rec.tracks.clone();
+        let group = SharedString::from(format!("knob-{feed:?}-{knob:?}"));
+        // Two-sided adjustments fill from the middle.
+        let from = if lo < 0.0 {
+            (-lo / (hi - lo)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let (a, b) = if frac < from { (frac, from) } else { (from, frac) };
+        div()
+            .h(px(22.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .w(px(62.0))
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(Theme::subtext())
+                    .child(knob.label()),
+            )
+            .child(
+                div()
+                    .id(group.clone())
+                    .group(group.clone())
+                    .flex_1()
+                    .h(px(18.0))
+                    .relative()
+                    .cursor_pointer()
+                    .child(
+                        canvas(
+                            move |b, _, _| {
+                                tracks.borrow_mut().insert((feed, knob), b);
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .top(px(8.0))
+                            .h(px(2.0))
+                            .rounded_full()
+                            .bg(Theme::surface1()),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(relative(a))
+                            .w(relative(b - a))
+                            .top(px(8.0))
+                            .h(px(2.0))
+                            .rounded_full()
+                            .bg(Theme::subtext()),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(3.0))
+                            .left(relative(frac))
+                            .ml(px(-6.0))
+                            .size(px(12.0))
+                            .rounded_full()
+                            .bg(Theme::text())
+                            .border_2()
+                            .border_color(if held { Theme::accent() } else { Theme::panel() })
+                            .group_hover(group, |s| s.border_color(Theme::accent())),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            if event.click_count >= 2 {
+                                this.set_studio(cx, |s| knob.set(own_look_mut(s, feed), knob.rest()));
+                                return;
+                            }
+                            // Editing a project still on the default setup
+                            // gives it its own, as any change here does.
+                            let studio = this.studio();
+                            this.doc.project.studio.get_or_insert(studio);
+                            this.rec.sliding = Some((feed, knob, this.doc.project.clone()));
+                            this.slide_knob(event.position, cx);
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(38.0))
+                    .flex_none()
+                    .text_right()
+                    .text_size(px(11.0))
+                    .text_color(Theme::overlay())
+                    .child(knob.shown(value)),
+            )
+            .into_any_element()
+    }
+
+    /// The held slider follows the pointer, changing the picture live.
+    fn slide_knob(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some((feed, knob, _)) = self.rec.sliding.as_ref().map(|(f, k, _)| (*f, *k, ())) else {
+            return;
+        };
+        let Some(track) = self.rec.tracks.borrow().get(&(feed, knob)).copied() else {
+            return;
+        };
+        let frac = (f32::from(at.x - track.origin.x) / f32::from(track.size.width).max(1.0)).clamp(0.0, 1.0);
+        let (lo, hi) = knob.range();
+        if let Some(studio) = &mut self.doc.project.studio {
+            knob.set(own_look_mut(studio, feed), lo + frac * (hi - lo));
+        }
+        cx.notify();
+    }
+
+    /// The slider let go: one undo step for the whole drag.
+    fn let_go_knob(&mut self, cx: &mut Context<Self>) {
+        if let Some((_, _, before)) = self.rec.sliding.take() {
+            self.doc.commit(before);
+            self.after_edit();
+            cx.notify();
+        }
+    }
+
     fn sources_panel(&mut self, studio: &Studio, cx: &mut Context<Self>) -> impl IntoElement {
         let levels = self.rec.live.as_ref().map(|l| l.levels.clone()).unwrap_or_default();
+        let mic_mode = self.rec.live.as_ref().and_then(|l| l.mic_mode.clone());
         let devices = self.rec.devices.clone().unwrap_or_default();
         let open = self.rec.pick;
         let row = |id: &'static str,
@@ -1097,9 +1666,15 @@ impl Editor {
         if open == Some(Pick::Screen) {
             list.extend(options(Pick::Screen, cx));
         }
+        if studio.screen.is_some() {
+            list.push(self.adjust_panel(studio, Feed::Screen, cx));
+        }
         list.push(camera_row.into_any_element());
         if open == Some(Pick::Camera) {
             list.extend(options(Pick::Camera, cx));
+        }
+        if studio.camera.is_some() {
+            list.push(self.adjust_panel(studio, Feed::Camera, cx));
         }
         list.push(
             div()
@@ -1107,33 +1682,75 @@ impl Editor {
                 .flex_col()
                 .child(mic_row)
                 .when(studio.microphone.is_some(), |d| {
-                    d.child(meter(levels.get("microphone").copied())).child(
-                        div()
-                            .id("mic-clean")
-                            .h(px(28.0))
-                            .px(px(8.0))
-                            .ml(px(23.0))
-                            .rounded(px(7.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(9.0))
-                            .cursor_pointer()
-                            .hover(|d| d.bg(Theme::surface0()))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_size(px(11.5))
-                                    .text_color(Theme::subtext())
-                                    .child("Clean up the voice"),
-                            )
-                            .child(switch(studio.clean))
-                            .tooltip(tip(
-                                "Takes come in with rumble and steady noise lowered and the level evened out; \
+                    d.child(meter(levels.get("microphone").copied()))
+                        .child(
+                            div()
+                                .id("mic-clean")
+                                .h(px(28.0))
+                                .px(px(8.0))
+                                .ml(px(23.0))
+                                .rounded(px(7.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(9.0))
+                                .cursor_pointer()
+                                .hover(|d| d.bg(Theme::surface0()))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_size(px(11.5))
+                                        .text_color(Theme::subtext())
+                                        .child("Clean up the voice"),
+                                )
+                                .child(switch(studio.clean))
+                                .tooltip(tip(
+                                    "Takes come in with rumble and steady noise lowered and the level evened out; \
                                  microphone.m4a stays as recorded",
-                                None,
-                            ))
-                            .on_click(cx.listener(|this, _, _, cx| this.set_studio(cx, |s| s.clean = !s.clean))),
-                    )
+                                    None,
+                                ))
+                                .on_click(cx.listener(|this, _, _, cx| this.set_studio(cx, |s| s.clean = !s.clean))),
+                        )
+                        .when_some(mic_mode.clone(), |d, mode| {
+                            d.child(
+                                div()
+                                    .id("mic-mode")
+                                    .h(px(28.0))
+                                    .px(px(8.0))
+                                    .ml(px(23.0))
+                                    .rounded(px(7.0))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(9.0))
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(Theme::surface0()))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_size(px(11.5))
+                                            .text_color(Theme::subtext())
+                                            .child("Mic mode"),
+                                    )
+                                    .child(div().text_size(px(11.5)).text_color(Theme::text()).child(
+                                        match mode.as_str() {
+                                            "voice-isolation" => "Voice Isolation",
+                                            "wide-spectrum" => "Wide Spectrum",
+                                            _ => "Standard",
+                                        },
+                                    ))
+                                    .child(icon("chevron-right", Theme::overlay()).size(px(11.0)))
+                                    .tooltip(tip(
+                                        "macOS's own processing of the microphone: Voice Isolation keeps your voice \
+                                     and drops what's around it, before Splice gets the sound",
+                                        None,
+                                    ))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if let Some(live) = &mut this.rec.live {
+                                            live.mic_modes();
+                                        }
+                                        cx.notify();
+                                    })),
+                            )
+                        })
                 })
                 .into_any_element(),
         );
@@ -1356,6 +1973,43 @@ impl Editor {
                     "own": self.doc.project.studio.is_some(),
                 }))
             }
+            "mic-mode" => {
+                let Some(live) = self.rec.live.as_mut().filter(|l| l.mic_mode.is_some()) else {
+                    return Some(fail("the microphone isn't live: open the Record tab with a mic chosen"));
+                };
+                live.mic_modes();
+                Some(json!({
+                    "ok": true,
+                    "mode": live.mic_mode,
+                    "note": "macOS's Mic Mode menu is open: Voice Isolation, Wide Spectrum or Standard",
+                }))
+            }
+            "adjust" => {
+                let source = request.get("source").and_then(Value::as_str).unwrap_or_default();
+                let camera = match source {
+                    "camera" => true,
+                    "screen" => false,
+                    _ => return Some(fail("record adjust expects screen or camera")),
+                };
+                let mut studio = self.studio();
+                let look = if camera {
+                    &mut studio.camera_look
+                } else {
+                    &mut studio.screen_look
+                };
+                if request.get("reset").and_then(Value::as_bool) == Some(true) {
+                    *look = Look::default();
+                }
+                if let Err(e) = agent::apply_look(look, request, 0) {
+                    return Some(fail(e));
+                }
+                // Its place and size are the scene's.
+                let shown = look.clone();
+                if studio != self.studio() {
+                    self.set_studio(cx, |s| *s = studio);
+                }
+                Some(json!({ "ok": true, "source": source, "look": agent::look_json(&shown) }))
+            }
             "status" => Some(json!({
                 "ok": true,
                 "recording": self.rec.recording(),
@@ -1363,6 +2017,7 @@ impl Editor {
                 "seconds": self.rec.seconds(),
                 "live": self.rec.live.as_ref().is_some_and(|l| l.live),
                 "levels": self.rec.live.as_ref().map(|l| l.levels.clone()),
+                "mic_mode": self.rec.live.as_ref().and_then(|l| l.mic_mode.clone()),
                 "problem": self.rec.problem,
                 "asking": self.rec.live.as_ref().and_then(|l| l.asking.clone()),
                 "last": self.rec.last,
@@ -1627,21 +2282,52 @@ fn take_name(path: &Path) -> String {
 /// What shows of a picture: all of it, a mask's box, or what a crop
 /// leaves (as a `Part`), and whether it is round.
 fn shown_part(look: &Look) -> (capture::Part, bool) {
-    if let Some(m) = look.mask {
-        let part = [
-            m.x - m.width / 2.0,
-            m.y - m.height / 2.0,
-            m.x + m.width / 2.0,
-            m.y + m.height / 2.0,
-        ];
-        (
-            part.map(|v| v.clamp(0.0, 1.0)),
-            m.shape == splice_core::look::Shape::Ellipse,
-        )
-    } else if let Some(c) = look.crop {
-        ([c.left, c.top, 1.0 - c.right, 1.0 - c.bottom], false)
-    } else {
-        ([0.0, 0.0, 1.0, 1.0], false)
+    // A mask is measured on what the crop leaves.
+    let c = look.crop.unwrap_or_default();
+    let [l, t, r, b] = [c.left, c.top, 1.0 - c.right, 1.0 - c.bottom];
+    match look.mask {
+        Some(m) => {
+            let (kw, kh) = (r - l, b - t);
+            let part = [
+                l + (m.x - m.width / 2.0) * kw,
+                t + (m.y - m.height / 2.0) * kh,
+                l + (m.x + m.width / 2.0) * kw,
+                t + (m.y + m.height / 2.0) * kh,
+            ];
+            (
+                part.map(|v| v.clamp(0.0, 1.0)),
+                m.shape == splice_core::look::Shape::Ellipse,
+            )
+        }
+        None => ([l, t, r, b], false),
+    }
+}
+
+/// Where `look` puts the whole of a picture on a stage of `stage` points:
+/// left, top, width and height.
+fn placed_rect(natural: (u32, u32), look: &Look, stage: (f32, f32)) -> [f32; 4] {
+    let (sw, sh) = stage;
+    let (nw, nh) = (natural.0.max(1) as f32, natural.1.max(1) as f32);
+    let fit = (sw / nw).min(sh / nh) * look.scale;
+    let (pw, ph) = (nw * fit, nh * fit);
+    let (cx, cy) = (sw / 2.0 + look.x * sw, sh / 2.0 + look.y * sh);
+    [cx - pw / 2.0, cy - ph / 2.0, pw, ph]
+}
+
+/// Where the part of a picture that shows lands on the stage.
+fn shown_rect(natural: (u32, u32), look: &Look, stage: (f32, f32)) -> [f32; 4] {
+    let [pl, pt, pw, ph] = placed_rect(natural, look, stage);
+    let ([l, t, r, b], _) = shown_part(look);
+    [pl + l * pw, pt + t * ph, (r - l) * pw, (b - t) * ph]
+}
+
+/// The corner on the right or left, at the bottom or top.
+fn corner_at(right: bool, bottom: bool) -> Corner {
+    match (right, bottom) {
+        (false, false) => Corner::TopLeft,
+        (true, false) => Corner::TopRight,
+        (false, true) => Corner::BottomLeft,
+        (true, true) => Corner::BottomRight,
     }
 }
 
@@ -1654,14 +2340,9 @@ fn picture(
     look: &Look,
     stage: (f32, f32),
 ) -> AnyElement {
-    let (sw, sh) = stage;
-    let (nw, nh) = (natural.0.max(1) as f32, natural.1.max(1) as f32);
-    let fit = (sw / nw).min(sh / nh) * look.scale;
-    let (pw, ph) = (nw * fit, nh * fit);
-    let (cx, cy) = (sw / 2.0 + look.x * sw, sh / 2.0 + look.y * sh);
-    let (pl, pt) = (cx - pw / 2.0, cy - ph / 2.0);
+    let [pl, pt, pw, ph] = placed_rect(natural, look, stage);
     let ([l, t, r, b], round) = shown_part(look);
-    let (vl, vt, vw, vh) = (pl + l * pw, pt + t * ph, (r - l) * pw, (b - t) * ph);
+    let [vl, vt, vw, vh] = shown_rect(natural, look, stage);
     // A frame holding just what shows is drawn as it is, round if need be:
     // clipping a larger one to a circle is beyond gpui.
     if part.is_some_and(|p| p.iter().zip([l, t, r, b]).all(|(a, b)| (a - b).abs() < 1e-3)) {
@@ -1693,6 +2374,21 @@ fn picture(
                 .object_fit(ObjectFit::Fill),
         )
         .into_any_element()
+}
+
+/// The look a picture's takes start with.
+fn own_look(studio: &Studio, feed: Feed) -> &Look {
+    match feed {
+        Feed::Screen => &studio.screen_look,
+        Feed::Camera => &studio.camera_look,
+    }
+}
+
+fn own_look_mut(studio: &mut Studio, feed: Feed) -> &mut Look {
+    match feed {
+        Feed::Screen => &mut studio.screen_look,
+        Feed::Camera => &mut studio.camera_look,
+    }
 }
 
 /// A small choice that is on or off.

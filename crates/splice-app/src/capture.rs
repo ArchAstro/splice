@@ -11,6 +11,7 @@ use gpui::RenderImage;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use splice_core::studio::{Codec, Screen, Studio, Take};
+use splice_core::tone::Tone;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -231,8 +232,14 @@ pub struct Live {
     /// The part of the camera's picture the scene shows; its preview frames
     /// arrive cut to it, so a bubble can be drawn round.
     pub camera_part: Arc<std::sync::Mutex<Option<Part>>>,
+    /// Each picture's colour and key, worked on its preview frames as
+    /// they arrive.
+    pub tones: Arc<std::sync::Mutex<HashMap<Feed, Tone>>>,
     /// The loudest each sound has been lately, 0 to 1.
     pub levels: HashMap<String, f32>,
+    /// The microphone's mode in macOS: standard, voice-isolation or
+    /// wide-spectrum.
+    pub mic_mode: Option<String>,
     /// Sources that have sent something.
     pub live: bool,
     pub recording: Option<Rec>,
@@ -269,6 +276,8 @@ impl Live {
         let (tx, messages) = channel();
         let camera_part = Arc::new(std::sync::Mutex::new(None));
         let wanted = camera_part.clone();
+        let tones: Arc<std::sync::Mutex<HashMap<Feed, Tone>>> = Arc::default();
+        let toned = tones.clone();
         std::thread::Builder::new()
             .name("splice-capture".into())
             .spawn(move || {
@@ -296,10 +305,14 @@ impl Live {
                                 Feed::Camera => *wanted.lock().unwrap(),
                                 Feed::Screen => None,
                             };
-                            let (pixels, size) = match part {
+                            let (mut pixels, size) = match part {
                                 Some(part) => cut(&body, (w, h), part),
                                 None => (body, (w, h)),
                             };
+                            let tone = toned.lock().unwrap().get(&feed).copied();
+                            if let Some(tone) = tone {
+                                tone.apply(&mut pixels);
+                            }
                             match ffmpeg::render_image(size.0, size.1, pixels) {
                                 Some(image) => Message::Frame(feed, image, (w, h), part),
                                 None => continue,
@@ -322,6 +335,8 @@ impl Live {
             natural: HashMap::new(),
             parts: HashMap::new(),
             camera_part,
+            tones,
+            mic_mode: None,
             levels: HashMap::new(),
             live: false,
             recording: None,
@@ -357,6 +372,11 @@ impl Live {
 
     pub fn pause(&mut self) {
         self.command(json!({ "cmd": "pause" }));
+    }
+
+    /// Opens macOS's microphone modes (Voice Isolation and the rest).
+    pub fn mic_modes(&mut self) {
+        self.command(json!({ "cmd": "micmodes" }));
     }
 
     pub fn resume(&mut self) {
@@ -436,6 +456,9 @@ impl Live {
                         Some(v) => self.levels.insert(feed.into(), v as f32),
                         None => self.levels.remove(feed),
                     };
+                }
+                if let Some(mode) = e["mic_mode"].as_str() {
+                    self.mic_mode = Some(mode.to_string());
                 }
                 if let (Some(rec), Some(s)) = (&mut self.recording, e["seconds"].as_f64()) {
                     rec.seconds = s;

@@ -485,6 +485,10 @@ splice ctl record setup                    # this project's setup
 splice ctl record setup --screen window:Safari --camera C920 --microphone default --system
 splice ctl record setup --layout bubble --corner br --size 0.3 --shape circle --mirror
 splice ctl record setup --clean                     # mic clips come in with the voice cleaned up
+splice ctl record adjust camera --crop-left 0.2 --exposure 0.3 --key green   # shown live; takes start with it
+splice ctl record adjust screen --crop-top 0.05 --saturation -0.2
+splice ctl record adjust camera --reset             # the picture as it is
+splice ctl record mic-mode                 # open macOS's Mic Mode menu (Voice Isolation)
 splice ctl record setup --codec hevc --quality high --fps 60 --height 1440 --default
 splice ctl record start [--for 20] [--beat 27 | --at 30 | --into media]
 splice ctl record pause | resume
@@ -504,6 +508,17 @@ splice ctl record stop --wait              # answers once the take is in the pro
   `camera.mp4`, `microphone.m4a` and `system.m4a`.
 - The layout is only where the take's layers are put: move or resize them
   afterwards like any clip (`look`).
+- `record adjust screen|camera` takes `look`'s options except place and
+  size (the scene sets those): `--crop-left/-right/-top/-bottom`, colour
+  (`--exposure`, `--contrast`, `--saturation`, `--warmth`, `--tint`), `--key
+  green|blue|#rrggbb|none` with `--similarity`, effects and `--redact`. A
+  crop is laid out as if the picture were only what it keeps, in every
+  layout. The preview shows crop, colour and key live (a grade's preset
+  only in the timeline and export). Takes' clips start with it; the files
+  are untouched.
+- `record status` has `mic_mode` (`standard`, `voice-isolation`,
+  `wide-spectrum`) while the mic is live; `record mic-mode` opens macOS's
+  menu to change it. The person chooses there.
 - Ask before recording, and record only what the person wants: a window is
   usually better than the whole screen. Splice keeps itself out of the shot.
 - Screen Recording, Camera and Microphone permission are each asked for the

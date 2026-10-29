@@ -35,6 +35,16 @@ func send(_ kind: UInt8, _ body: Data) {
     outLock.unlock()
 }
 
+/// The mode macOS runs the microphone in for this app, as chosen in
+/// Control Center.
+func micMode() -> String {
+    switch AVCaptureDevice.activeMicrophoneMode {
+    case .voiceIsolation: return "voice-isolation"
+    case .wideSpectrum: return "wide-spectrum"
+    default: return "standard"
+    }
+}
+
 func event(_ name: String, _ fields: [String: Any] = [:]) {
     var all = fields
     all["event"] = name
@@ -755,6 +765,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate,
             var fields: [String: Any] = [:]
             for (f, p) in peaks { fields[f.name] = Double(p) }
             if zero != nil { fields["seconds"] = seconds() }
+            if feed == .microphone { fields["mic_mode"] = micMode() }
             event("levels", fields)
             peaks = [:]
         }
@@ -848,6 +859,9 @@ Thread.detachNewThread {
             capture.queue.async { capture.resume() }
         case "stop":
             capture.queue.async { capture.finish() }
+        case "micmodes":
+            // macOS's own menu: Standard, Voice Isolation, Wide Spectrum.
+            DispatchQueue.main.async { AVCaptureDevice.showSystemUserInterface(.microphoneModes) }
         case "quit":
             capture.shutdown()
             exit(0)

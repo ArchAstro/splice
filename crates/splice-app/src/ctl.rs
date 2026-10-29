@@ -208,6 +208,13 @@ Recording (each source to its own file; the take is laid out as the scene says)
       --clean/--no-clean (takes' mic clips come in with the voice cleaned up)
       --codec h264|hevc   --quality good|high|best   --fps 30|60   --height full|4k|1440|1080
       --cursor | --no-cursor   --clicks | --no-clicks (note clicks, to zoom in on later)
+  record adjust screen|camera [LOOK] [--reset]
+                                 change a picture as recorded clips will: --crop-left/-right/-top/
+                                 -bottom F, colour (--exposure …), --key green, --blur F, --redact …
+                                 (any look option but place and size, which the scene sets); shown
+                                 live, and each take's clip starts with it (the file is untouched)
+  record mic-mode                open macOS's Mic Mode menu (Voice Isolation, Wide Spectrum); the
+                                 mode in use shows in `record status` as mic_mode
   record start [SETUP] [--for S] [--beat B | --at T [--track N] | --into media]
                                  start (answers once recording); the take goes after everything on
                                  the timeline, into beat B, at T, or only into the media
@@ -216,7 +223,8 @@ Recording (each source to its own file; the take is laid out as the scene says)
   record status                  recording or not, for how long, sound levels, the last take's folder
 
 Operating the window (as a person would: for checking the interface)
-  ui                             window size and scale, mouse, stage, timeline and picture bounds
+  ui                             window size and scale, mouse, stage, timeline and picture bounds,
+                                 and in Record the scene and the camera bubble
   click X Y [--double] [--right] [--shift|--cmd|--alt|--ctrl]
   hover X Y                      move the pointer there (tooltips show after a moment)
   drag X1 Y1 X2 Y2 [--shift…]    press, move, release
@@ -706,6 +714,10 @@ fn build(args: &[String]) -> Result<Value, String> {
             if let Some(action) = words.get(1).filter(|_| sub == "shot" || sub == "take") {
                 request.insert("action".into(), json!(action));
             }
+            if command == "record" && sub == "adjust" {
+                let source = words.get(1).ok_or("record adjust expects screen or camera")?;
+                request.insert("source".into(), json!(source));
+            }
             command.as_str()
         }
         "view" => {
@@ -847,6 +859,20 @@ mod tests {
         assert_eq!(
             r,
             json!({"cmd": "text", "text": "Hi", "size": 96.0, "bold": true, "duration": 2.5})
+        );
+        let r = build(&args(
+            "record adjust camera --crop-left 0.2 --exposure 0.5 --key green --reset",
+        ))
+        .unwrap();
+        assert_eq!(
+            r,
+            json!({"cmd": "record", "sub": "adjust", "source": "camera", "crop_left": 0.2, "exposure": 0.5,
+                   "key": "green", "reset": true})
+        );
+        assert!(build(&args("record adjust")).is_err(), "which picture");
+        assert_eq!(
+            build(&args("record mic-mode")).unwrap(),
+            json!({"cmd": "record", "sub": "mic-mode"})
         );
         assert!(build(&args("move --clip x")).is_err());
         assert!(build(&args("explode")).is_err());
