@@ -1521,8 +1521,9 @@ impl Editor {
         }
         if studio != before || self.doc.project.studio.is_none() && request.get("default").is_some() {
             self.edit(cx, |p| p.studio = Some(studio));
-            self.relive(cx);
         }
+        // Also brings back sources that stopped.
+        self.relive(cx);
         Ok(())
     }
 }

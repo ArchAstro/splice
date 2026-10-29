@@ -1081,7 +1081,7 @@ fn clip_frames(
             None => format!(",tpad=stop_mode=clone:stop_duration={len},trim=duration={len},setpts=PTS-STARTPTS"),
         };
         filters.push(format!(
-            "[{i}:v]reverse,trim=end_frame=1,setpts=PTS-STARTPTS,fps={fps}{hold}[{label}]"
+            "[{i}:v]reverse,trim=end_frame=1,setpts=PTS-STARTPTS,fps={fps}:eof_action=pass{hold}[{label}]"
         ));
         return Ok(Frames {
             label,
@@ -1459,6 +1459,8 @@ mod tests {
         assert_eq!(plan.args[seek + 1], "0.000000");
         assert_eq!(plan.args[seek + 3], "0.283333", "up to a frame past 0.25s");
         assert!(graph.contains("reverse,trim=end_frame=1"));
+        // A frame lasting a few milliseconds (variable frame rate) still shows.
+        assert!(graph.contains(":eof_action=pass"));
         assert!(
             graph.contains("colorchannelmixer=aa=0.5000") && !graph.contains("fade="),
             "the fade is half done: {graph}"

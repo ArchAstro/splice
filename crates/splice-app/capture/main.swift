@@ -224,6 +224,7 @@ final class Sink {
     let input: AVAssetWriterInput
     var appended = 0
     var dropped = 0
+    var last = CMTime.invalid
 
     init(feed: Feed, url: URL, sample: CMSampleBuffer, config: Config) throws {
         self.feed = feed
@@ -276,7 +277,13 @@ final class Sink {
 
     func append(_ buffer: CMSampleBuffer) {
         guard writer.status == .writing else { return }
+        // A frame hard on the heels of the one before (the held frame put at
+        // the start, or at a resume) would last a few milliseconds, which
+        // some readers drop altogether; the earlier one stands in for it.
+        let time = CMSampleBufferGetPresentationTimeStamp(buffer)
+        if feed.isVideo, last.isValid, CMTimeSubtract(time, last).seconds < 0.01 { return }
         if input.isReadyForMoreMediaData, input.append(buffer) {
+            last = time
             appended += 1
         } else {
             dropped += 1
@@ -467,8 +474,14 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate,
         }
         if let best, (try? device.lockForConfiguration()) != nil {
             device.activeFormat = best
+            // Cameras such as the C920 offer fixed rates like 30.00003 that
+            // refuse a duration of exactly 1/30; use the range's own then.
             if let range = best.videoSupportedFrameRateRanges.first(where: { $0.maxFrameRate >= fps - 0.5 }) {
-                let frame = CMTime(value: 1000, timescale: CMTimeScale(min(fps, range.maxFrameRate) * 1000))
+                var frame = range.minFrameDuration
+                if fps < range.maxFrameRate - 0.5 {
+                    let wanted = CMTime(value: 1000, timescale: CMTimeScale(fps * 1000))
+                    frame = CMTimeMaximum(CMTimeMinimum(wanted, range.maxFrameDuration), range.minFrameDuration)
+                }
                 device.activeVideoMinFrameDuration = frame
                 device.activeVideoMaxFrameDuration = frame
             }
