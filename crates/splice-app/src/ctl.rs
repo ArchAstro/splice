@@ -56,6 +56,7 @@ Titles, colours and looks
           --key green|blue|#rrggbb|none [--similarity F] [--blend F] [--despill/--no-despill]
           --mask ellipse|rect|none [--mask-x F --mask-y F --mask-width F --mask-height F]
                 [--feather F] [--invert/--no-invert]   (mask numbers are fractions of the clip's frame)
+          --mirror/--no-mirror (flip left to right, as a camera shows you to yourself)
           --crop-left F --crop-right F --crop-top F --crop-bottom F | --crop none
                 (cut edges away, fractions of the picture; it keeps its size and what remains stays put)
           --grade none|warm|cool|vivid|muted|faded|film|teal-orange|mono|noir   (a ready-made look)
@@ -201,7 +202,7 @@ Recording (each source to its own file; the take is laid out as the scene says)
       --screen display:N|window:APP|none   --region X,Y,W,H (points, on that display)
       --camera NAME|none   --microphone NAME|default|none   --system | --no-system (the Mac's sound)
       --layout screen|bubble|side|camera   --corner tl|tr|bl|br   --size 0.3 (bubble height)
-      --shape circle|square   --split 0.32 (camera's share, side by side)
+      --shape circle|square   --split 0.32 (camera's share, side by side)   --mirror/--no-mirror
       --codec h264|hevc   --quality good|high|best   --fps 30|60   --height full|4k|1440|1080
       --cursor | --no-cursor   --clicks | --no-clicks (note clicks, to zoom in on later)
   record start [SETUP] [--for S] [--beat B | --at T [--track N] | --into media]
@@ -525,10 +526,10 @@ fn build(args: &[String]) -> Result<Value, String> {
                 let v: f64 = next(arg)?.parse().map_err(|_| "--for expects seconds".to_string())?;
                 request.insert("for".into(), json!(v));
             }
-            "--mic" | "--clicks" | "--system" | "--cursor" | "--default" => {
+            "--mic" | "--clicks" | "--system" | "--cursor" | "--default" | "--mirror" => {
                 request.insert(arg[2..].into(), json!(true));
             }
-            "--no-clicks" | "--no-system" | "--no-cursor" => {
+            "--no-clicks" | "--no-system" | "--no-cursor" | "--no-mirror" => {
                 request.insert(arg[5..].into(), json!(false));
             }
             "--screen" | "--camera" | "--microphone" | "--layout" | "--corner" | "--shape" | "--codec"

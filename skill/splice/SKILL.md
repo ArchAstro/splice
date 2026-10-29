@@ -482,7 +482,7 @@ and lands on the timeline as layers placed by the scene.
 splice ctl record sources                  # displays, windows, cameras, microphones, permissions
 splice ctl record setup                    # this project's setup
 splice ctl record setup --screen window:Safari --camera C920 --microphone default --system
-splice ctl record setup --layout bubble --corner br --size 0.3 --shape circle
+splice ctl record setup --layout bubble --corner br --size 0.3 --shape circle --mirror
 splice ctl record setup --codec hevc --quality high --fps 60 --height 1440 --default
 splice ctl record start [--for 20] [--beat 27 | --at 30 | --into media]
 splice ctl record pause | resume

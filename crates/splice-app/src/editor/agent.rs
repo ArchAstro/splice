@@ -108,6 +108,7 @@ fn look_json(look: &splice_core::look::Look) -> Value {
         "effects": (!look.fx.is_none()).then_some(look.fx),
         "backdrop": look.backdrop,
         "redact": look.redact,
+        "mirror": look.mirror,
         "grade": (!look.grade.is_none()).then(|| json!({
             "look": look.grade.preset.name(),
             "exposure": look.grade.exposure,
@@ -497,13 +498,14 @@ impl Editor {
                         return Some(fail("a green-screen key is for video and pictures, not text or colour"));
                     }
                     let pictures_only = look.backdrop != clip.look.backdrop
+                        || look.mirror != clip.look.mirror
                         || look.redact != clip.look.redact
                         || look.fx.blur != clip.look.fx.blur
                         || look.fx.vignette != clip.look.fx.vignette
                         || look.fx.grain != clip.look.fx.grain;
                     if pictures_only && clip.generator.is_some() {
                         return Some(fail(
-                            "blur, vignette, grain, --backdrop and --redact are for video and pictures; a title or colour \
+                            "blur, vignette, grain, --mirror, --backdrop and --redact are for video and pictures; a title or colour \
                              takes --shake, --glitch and the rest",
                         ));
                     }
@@ -1189,6 +1191,7 @@ fn apply_look(look: &mut splice_core::look::Look, request: &Value, at: Time) -> 
     fx.shake = number("shake").unwrap_or(fx.shake);
     fx.glitch = number("glitch").unwrap_or(fx.glitch);
     *fx = fx.clamped();
+    look.mirror = flag("mirror").unwrap_or(look.mirror);
     match text("backdrop") {
         Some("on" | "yes" | "blur") => look.backdrop = Some(look.backdrop.unwrap_or_default()),
         Some("off" | "no" | "none") => look.backdrop = None,

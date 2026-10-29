@@ -143,9 +143,11 @@ struct Config: Decodable {
     /// The longest side of preview frames; 0 sends none.
     var preview: Int = 480
     var previewFps: Int = 12
+    /// The camera's preview flipped left to right (its file never is).
+    var mirror: Bool = false
 
     enum CodingKeys: String, CodingKey {
-        case screen, camera, microphone, codec, quality, fps, cursor, exclude, preview
+        case screen, camera, microphone, codec, quality, fps, cursor, exclude, preview, mirror
         case systemAudio = "system_audio"
         case maxHeight = "max_height"
         case previewFps = "preview_fps"
@@ -165,6 +167,7 @@ struct Config: Decodable {
         exclude = try c.decodeIfPresent(Int32.self, forKey: .exclude)
         preview = try c.decodeIfPresent(Int.self, forKey: .preview) ?? 480
         previewFps = try c.decodeIfPresent(Int.self, forKey: .previewFps) ?? 12
+        mirror = try c.decodeIfPresent(Bool.self, forKey: .mirror) ?? false
     }
 }
 
@@ -708,7 +711,9 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate,
         let (w, h) = (image.extent.width, image.extent.height)
         let k = min(1, CGFloat(config.preview) / max(w, h))
         let (pw, ph) = (max(2, Int(w * k)), max(2, Int(h * k)))
-        let small = image.transformed(by: CGAffineTransform(scaleX: CGFloat(pw) / w, y: CGFloat(ph) / h))
+        let flip: CGFloat = feed == .camera && config.mirror ? -1 : 1
+        let small = image.transformed(by: CGAffineTransform(scaleX: flip * CGFloat(pw) / w, y: CGFloat(ph) / h)
+            .translatedBy(x: flip < 0 ? -w : 0, y: 0))
         var body = Data(count: 9 + pw * ph * 4)
         body.withUnsafeMutableBytes { raw in
             let p = raw.baseAddress!

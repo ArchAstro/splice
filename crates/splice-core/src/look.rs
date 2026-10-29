@@ -48,6 +48,10 @@ pub struct Look {
     /// Part of the picture hidden: a face, a screen, a number plate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redact: Option<Redact>,
+    /// Flipped left to right, as a camera shows you to yourself. Crop, mask
+    /// and hidden box are then measured on the flipped picture.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub mirror: bool,
 }
 
 /// Effects on a clip's picture, each 0 (off) to 1 (strongest).
@@ -223,6 +227,7 @@ impl Default for Look {
             fx: Effects::default(),
             backdrop: None,
             redact: None,
+            mirror: false,
         }
     }
 }
@@ -1231,12 +1236,13 @@ impl Look {
             || self.fx.glitch > 0.0
     }
 
-    /// The same look with no crop or hidden box: for frames those were
+    /// The same look with no flip, crop or hidden box: for frames those were
     /// already applied to.
     pub fn clone_without_hiding(&self) -> Look {
         Look {
             crop: None,
             redact: None,
+            mirror: false,
             ..self.clone()
         }
     }
@@ -1266,6 +1272,9 @@ impl Look {
     pub fn hiding_filters(&self, size: (u32, u32), prefix: &str) -> (Vec<String>, (u32, u32)) {
         let mut filters = Vec::new();
         let mut size = size;
+        if self.mirror {
+            filters.push("hflip".into());
+        }
         // Cut first, so a key and a mask work on what remains.
         if let Some(crop) = self.crop.filter(|c| !c.is_none()) {
             filters.push(crop.ffmpeg());
@@ -1510,5 +1519,23 @@ mod tests {
         let f = look.pixel_filters((640, 360), 1.0, "t").unwrap();
         assert!(f.starts_with("chromakey=0x00ff00:") && f.contains("despill=type=green") && f.contains("geq="));
         assert!(Look::default().pixel_filters((640, 360), 1.0, "t").is_none());
+    }
+
+    #[test]
+    fn a_mirror_flips_before_the_crop_and_mask() {
+        let look = Look {
+            mirror: true,
+            crop: Some(Crop {
+                left: 0.25,
+                ..Crop::default()
+            }),
+            mask: Some(Mask::default()),
+            ..Look::default()
+        };
+        let f = look.pixel_filters((640, 360), 1.0, "t").unwrap();
+        assert!(f.starts_with("hflip,crop="), "{f}");
+        assert!(!look.clone_without_hiding().mirror);
+        let json = serde_json::to_string(&Look::default()).unwrap();
+        assert!(!json.contains("mirror"), "unflipped looks stay as they were saved");
     }
 }
