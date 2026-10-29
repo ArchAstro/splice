@@ -16,6 +16,8 @@ pub enum Mode {
     #[default]
     Edit,
     Story,
+    /// What the project records, live.
+    Record,
 }
 
 /// Which words are being typed.
@@ -79,10 +81,12 @@ fn seconds(t: Time) -> String {
 impl Editor {
     pub(super) fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
         self.mode = mode;
-        if mode == Mode::Story {
+        if mode != Mode::Edit {
             self.workbench = None;
         }
         self.typing = None;
+        // The sources are live while the Record tab is open.
+        self.relive(cx);
         cx.notify();
     }
 
@@ -1085,7 +1089,7 @@ impl Editor {
             })).collect::<Vec<_>>(),
             "length": secs(story.end()),
             "selected": self.beat.map(|b| b.0),
-            "view": match self.mode { Mode::Edit => "edit", Mode::Story => "story" },
+            "view": match self.mode { Mode::Edit => "edit", Mode::Story => "story", Mode::Record => "record" },
         })
     }
 
@@ -1132,7 +1136,8 @@ impl Editor {
                 let mode = match text("view").as_deref() {
                     Some("story") => Mode::Story,
                     Some("edit") => Mode::Edit,
-                    _ => return fail("view is edit or story"),
+                    Some("record") => Mode::Record,
+                    _ => return fail("view is edit, story or record"),
                 };
                 self.set_mode(mode, cx);
                 json!({ "ok": true, "view": text("view") })

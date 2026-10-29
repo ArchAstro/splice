@@ -1,6 +1,6 @@
 ---
 name: splice
-description: Work with the user inside their Splice video editor - see the project they have open, place, move, trim, split and delete clips on the timeline, import media, plan the story as beats and cues, record the screen, compose music as a score, make animated scenes and diagrams, make and fill reusable symbols (intros, lower thirds with placeholders), look at any frame, export, and take requests they send from the editor. Also covers installing Splice and this skill. Use when the user asks for help editing a video they have open in Splice, says "my edit/timeline/movie/story/score", asks you to listen for requests from Splice, or asks to install or set up Splice.
+description: Work with the user inside their Splice video editor - see the project they have open, place, move, trim, split and delete clips on the timeline, import media, plan the story as beats and cues, record the screen, camera and microphone, compose music as a score, make animated scenes and diagrams, make and fill reusable symbols (intros, lower thirds with placeholders), look at any frame, export, and take requests they send from the editor. Also covers installing Splice and this skill. Use when the user asks for help editing a video they have open in Splice, says "my edit/timeline/movie/story/score", asks you to listen for requests from Splice, or asks to install or set up Splice.
 ---
 
 # Working in the user's Splice editor
@@ -472,24 +472,42 @@ and Splice keeps the plan, the references and the takes. For each beat:
 
 Check each landed take with `splice ctl frame` before calling it done.
 
-### Recording the screen
+### Recording (screen, camera, microphone, the Mac's sound)
+
+Each project has a recording setup (the Record tab shows it live). A take
+writes every source to its own file in one folder, all starting together,
+and lands on the timeline as layers placed by the scene.
 
 ```sh
-splice ctl record sources                              # displays and windows (ids, apps, titles)
-splice ctl record start --window Safari --beat 27      # or --display 1, or --region X,Y,W,H
-splice ctl record start --display 1 --for 20 --mic --clicks --at 30
-splice ctl record status
-splice ctl record stop --wait                          # answers once the take is in the project
+splice ctl record sources                  # displays, windows, cameras, microphones, permissions
+splice ctl record setup                    # this project's setup
+splice ctl record setup --screen window:Safari --camera C920 --microphone default --system
+splice ctl record setup --layout bubble --corner br --size 0.3 --shape circle
+splice ctl record setup --codec hevc --quality high --fps 60 --height 1440 --default
+splice ctl record start [--for 20] [--beat 27 | --at 30 | --into media]
+splice ctl record pause | resume
+splice ctl record status                   # recording, seconds, levels, the last take's folder
+splice ctl record stop --wait              # answers once the take is in the project
 ```
 
-- The take goes into the beat, onto the timeline at `--at`, or (by default)
-  just into the media panel.
+- `--screen` is `display:N`, `window:APP` or `none`; `--region X,Y,W,H` takes
+  part of the display. `--camera`/`--microphone` take a name (or part of
+  one), `default` or `none`. `--system`/`--no-system` is the sound the Mac
+  plays. Layouts: `screen`, `bubble`, `side`, `camera`. `--default` also
+  makes the setup the one new projects start with.
+- `record start` answers once recording has begun (the sources take a moment
+  to start). The take goes after everything on the timeline unless `--beat`,
+  `--at` or `--into media` says otherwise. The reply to `stop --wait` lists
+  its media and clips. The folder (`take` in the reply) holds `screen.mp4`,
+  `camera.mp4`, `microphone.m4a` and `system.m4a`.
+- The layout is only where the take's layers are put: move or resize them
+  afterwards like any clip (`look`).
 - Ask before recording, and record only what the person wants: a window is
-  usually better than the whole screen. `--hide` makes Splice step out of the
-  shot when recording a whole display.
-- The first recording needs Screen Recording permission. If a take comes out
-  empty, say so and ask the person to grant it in System Settings → Privacy &
-  Security.
+  usually better than the whole screen. Splice keeps itself out of the shot.
+- Screen Recording, Camera and Microphone permission are each asked for the
+  first time they are used. If `record status` shows a `problem`, or `record
+  sources` shows access `denied`, say so and ask the person to turn it on in
+  System Settings → Privacy & Security.
 - Splice notes where and when the mouse is clicked while it records (no
   extra permission). `splice ctl zoom --clip C --to 2` then zooms the take in
   towards each burst of clicks and back out between them, as keyframes on

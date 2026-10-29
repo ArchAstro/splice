@@ -137,13 +137,6 @@ enum Overlay {
         index: usize,
         list: Vec<String>,
     },
-    /// What to record: a screen or a window.
-    Record {
-        choices: Vec<record::Choice>,
-        index: usize,
-        microphone: bool,
-        clicks: bool,
-    },
     /// Who and what from the bible is in a beat.
     Cast {
         beat: splice_core::story::BeatId,
@@ -271,8 +264,8 @@ pub struct Editor {
     /// Words being typed into a beat or a cue.
     typing: Option<story::Typing>,
     story_focus: FocusHandle,
-    /// A screen recording under way.
-    recording: Option<record::Active>,
+    /// Recording: the live sources, and a take under way.
+    rec: record::Recorder,
     /// The reference shot each beat's card shows, when one was clicked.
     shown_shots: HashMap<splice_core::story::BeatId, splice_core::story::ShotId>,
     /// Takes to lay into a beat once they are imported.
@@ -418,7 +411,7 @@ impl Editor {
             beat: None,
             typing: None,
             story_focus: cx.focus_handle(),
-            recording: None,
+            rec: record::Recorder::new(),
             fill_after_import: HashMap::new(),
             take_after_import: HashMap::new(),
             page: plan::Page::default(),
@@ -429,11 +422,6 @@ impl Editor {
             _watch: watch,
         };
         editor.prepare_media(cx);
-        // Coming back to Splice while it hides for a recording stops it.
-        cx.observe_window_activation(window, |this, window, cx| {
-            this.window_activated(window.is_window_active(), cx);
-        })
-        .detach();
         editor
     }
 
@@ -1801,13 +1789,6 @@ impl Editor {
                         *index = 0;
                     }
                 }
-                _ => {}
-            },
-            Overlay::Record { choices, index, .. } => match key {
-                "escape" => return self.close_overlay(window, cx),
-                "up" => *index = index.saturating_sub(1),
-                "down" => *index = (*index + 1).min(choices.len().saturating_sub(1)),
-                "enter" => return self.start_from_overlay(window, cx),
                 _ => {}
             },
             Overlay::Instruments { part, query, index, .. } => match key {

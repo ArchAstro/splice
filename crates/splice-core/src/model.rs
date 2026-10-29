@@ -467,6 +467,9 @@ pub struct Project {
     /// shape: 2.39 for a cinema look. Drawn over everything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub letterbox: Option<f32>,
+    /// How this project records; None uses the default the user has set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub studio: Option<crate::studio::Studio>,
     next_id: u64,
 }
 
@@ -486,6 +489,7 @@ impl Default for Project {
             bible: crate::bible::Bible::default(),
             hold: None,
             letterbox: None,
+            studio: None,
             next_id: 2,
         }
     }
