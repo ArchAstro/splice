@@ -102,7 +102,8 @@ func access(_ media: AVMediaType) -> String {
 func allow(_ media: AVMediaType) -> Bool {
     switch AVCaptureDevice.authorizationStatus(for: media) {
     case .authorized: return true
-    case .notDetermined:
+        case .notDetermined:
+        event("asking", ["source": media == .video ? "camera" : "microphone"])
         let done = DispatchSemaphore(value: 0)
         var granted = false
         AVCaptureDevice.requestAccess(for: media) { ok in

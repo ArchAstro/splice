@@ -212,6 +212,8 @@ pub struct Live {
     pub live: bool,
     pub recording: Option<Rec>,
     pub problem: Option<String>,
+    /// What macOS is asking the person to allow, while it waits.
+    pub asking: Option<String>,
     /// What to watch for clicks while recording.
     area: Option<Source>,
 }
@@ -286,6 +288,7 @@ impl Live {
             live: false,
             recording: None,
             problem: None,
+            asking: None,
             area,
         })
     }
@@ -399,6 +402,9 @@ impl Live {
                 }
             }
             "live" => self.live = true,
+            // Every source has started: nothing is waiting on permission.
+            "started" => self.asking = None,
+            "asking" => self.asking = e["source"].as_str().map(str::to_string),
             "recording" => {
                 if let Some(rec) = &mut self.recording {
                     rec.zero = wall;
@@ -510,7 +516,7 @@ fn finished(e: &Value, rec: &Rec, clicks: Option<Vec<Click>>) -> Result<Take, St
     Ok(take)
 }
 
-/// A new folder for a take of `project`: Recordings/<project>/<when>.
+/// A new folder for a take of `project`: `Recordings/<project>/Take <when>`.
 pub fn take_dir(project: &Path) -> PathBuf {
     let name = project
         .file_stem()

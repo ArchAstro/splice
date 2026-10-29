@@ -689,6 +689,8 @@ impl Editor {
             Some(problem.clone())
         } else if !studio.has_sources() {
             Some("Choose what to record on the right.".into())
+        } else if let Some(what) = self.rec.live.as_ref().and_then(|l| l.asking.clone()) {
+            Some(format!("Waiting for you to allow the {what}: macOS is asking."))
         } else if self.rec.live.as_ref().is_none_or(|l| !l.live) {
             Some("Starting the sources…".into())
         } else {
@@ -714,6 +716,7 @@ impl Editor {
                             div()
                                 .absolute()
                                 .inset_0()
+                                .bg(gpui::rgba(0x000000b3))
                                 .p(px(20.0))
                                 .flex()
                                 .flex_col()
@@ -1318,6 +1321,7 @@ impl Editor {
                 "live": self.rec.live.as_ref().is_some_and(|l| l.live),
                 "levels": self.rec.live.as_ref().map(|l| l.levels.clone()),
                 "problem": self.rec.problem,
+                "asking": self.rec.live.as_ref().and_then(|l| l.asking.clone()),
                 "last": self.rec.last,
             })),
             "start" => {
