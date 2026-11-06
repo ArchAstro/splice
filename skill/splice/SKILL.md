@@ -473,6 +473,41 @@ and Splice keeps the plan, the references and the takes. For each beat:
 
 Check each landed take with `splice ctl frame` before calling it done.
 
+#### Bridging keyframes: what goes wrong, and how to avoid it
+
+First and last frames give the model two pictures to join. It treats the last
+one as a target to approximate, not to hit. When the two are far apart it
+cheats: it warps the camera, crossfades, or morphs bodies and props halfway
+through. Most bad bridges come from the inputs, not the model.
+
+1. Check every keyframe before you bridge from it, especially the ones you
+   generated. Zoom in on faces, hands and small props, and count the people.
+   An image model can double a prop (two pairs of sunglasses), and the video
+   will copy it and then morph it away to reach the next frame.
+2. Keep the two ends close:
+   - the same camera height, lens and framing, and the same light;
+   - each subject moves only a little: one action, not a whole change of
+     pose for everyone;
+   - when the story needs a big change, make a midpoint keyframe and bridge
+     twice (A → mid, mid → B), or cut on purpose instead of bridging.
+3. Write the bridge prompt for one continuous move:
+   - state where everyone ends up first, before the style words;
+   - one action and one camera move; give the final approach its own seconds;
+   - say "one continuous shot, no cuts, no crossfade";
+   - name what must not change (faces, props, wardrobe, the number of
+     people). Several look-alike children moving fast tend to multiply.
+4. After the take lands, look across it, not just at its ends:
+   - a contact sheet shows mid-clip warps and extra people:
+     `ffmpeg -i take.mp4 -vf "fps=4,scale=384:-1,tile=5x4" -frames:v 1 sheet.png`;
+   - Seedance often holds its last frame for about a quarter of a second, which
+     reads as a stall at the cut. Find still frames and trim them off:
+     `ffmpeg -i take.mp4 -vf "scale=320:-1,tblend=all_mode=difference,signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=-" -f null -`
+     (values near 0 are frozen frames). Then close the gap with `move`.
+   - Seedance renders at 24 fps; a 30 fps movie repeats a frame now and then.
+     That is normal, not a freeze.
+5. If a re-take comes back worse (extra people, the gag still missing), keep
+   the better take chosen and land the new one with `--keep`.
+
 ### Recording (screen, camera, microphone, the Mac's sound)
 
 Each project has a recording setup (the Record tab shows it live). A take
